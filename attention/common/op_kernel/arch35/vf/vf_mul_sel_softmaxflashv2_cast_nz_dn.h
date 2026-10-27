@@ -1241,23 +1241,23 @@ __simd_vf__ inline void ProcessVec1DnUpdateMxfp8VF(
     Max(max1, max1, max3, preg_108);
     Max(max0, max0, max1, preg_108);
     Muls(max0, max0, dScale, preg_108);
-    Muls(max0, max0, INV_LN2, preg_108);
+    Muls(max0, max0, INV_LN2, preg_108); //向ln2对齐
     Truncate<T, RoundMode::CAST_CEIL>(max0, max0, preg_108);
     Muls(max0, max0, LN2, preg_108);
     Sub(max0, max0, vreg_ln_p_scale, preg_108);
     Max(max0, max0, vreg_x_max_f32_b, preg_108);
 
     if (subLoop == 0) {
-        StoreAlign<T, Reg::StoreDist::DIST_NORM_B16>((__ubuf__ T*&)pre_loop_max, vreg_x_max_f32_b, preg_108);
+        StoreAlign<T, Reg::StoreDist::DIST_NORM_B16>((__ubuf__ T*&)pre_loop_max, vreg_x_max_f32_b, preg_108); // pre_loop_max保存上一个大块的最大值
         FusedExpSub(vreg_x_max_f32_b, vreg_x_max_f32_b, max0, preg_134);
     } else {
-        FusedExpSub(vreg_subloop_update, vreg_x_max_f32_b, max0, preg_134);
+        FusedExpSub(vreg_subloop_update, vreg_x_max_f32_b, max0, preg_134); //subloop=0的 spscale的更新参数
         LoadAlign(vreg_x_max_f32_b, pre_loop_max);
         FusedExpSub(vreg_x_max_f32_b, vreg_x_max_f32_b, max0, preg_134);
     }
 
-    StoreAlign<T, Reg::StoreDist::DIST_NORM_B16>((__ubuf__ T*&)new_global_max, max0, preg_108);
-    StoreAlign<T, Reg::StoreDist::DIST_NORM_B16>((__ubuf__ T*&)exp_max_fp32, vreg_x_max_f32_b, preg_108);
+    StoreAlign<T, Reg::StoreDist::DIST_NORM_B16>((__ubuf__ T*&)new_global_max, max0, preg_108); //subLoop=0时保存的当前小块的最大值，=1时保持两个大块之间的最大值
+    StoreAlign<T, Reg::StoreDist::DIST_NORM_B16>((__ubuf__ T*&)exp_max_fp32, vreg_x_max_f32_b, preg_108); //subLoop=1，两个大块之间的alpha更新系数
 
     Duplicate<T, Reg::MaskMergeMode::ZEROING, float>(vreg_x_sum_0, 0, preg_134);
     Duplicate<T, Reg::MaskMergeMode::ZEROING, float>(vreg_x_sum_1, 0, preg_134);
@@ -1294,7 +1294,7 @@ __simd_vf__ inline void ProcessVec1DnUpdateMxfp8VF(
         FusedExpSub(vreg_x_exp_1, vreg_x_f32_1, max0, preg_134);
         FusedExpSub(vreg_x_exp_2, vreg_x_f32_2, max0, preg_134);
         FusedExpSub(vreg_x_exp_3, vreg_x_f32_3, max0, preg_134);
-
+        // cast到fp8，并使用未量化的数据累积求和，Or是打包数据
         Cast<T2, T, castTraitRintZero>(vreg_x_exp_fp8_0, vreg_x_exp_0, preg_135);
         Add(vreg_x_sum_0, vreg_x_exp_0, vreg_x_sum_0, preg_134);
 
@@ -1313,7 +1313,7 @@ __simd_vf__ inline void ProcessVec1DnUpdateMxfp8VF(
            (RegTensor<uint8_t>&)vreg_x_exp_2, preg_134);
         Add(vreg_x_sum_3, vreg_x_exp_3, vreg_x_sum_3, preg_134);
 
-        Gather(vreg_x_exp_f8_pack_0, vreg_x_exp_fp8_0, idx_nd2nz);
+        Gather(vreg_x_exp_f8_pack_0, vreg_x_exp_fp8_0, idx_nd2nz); //根据idx进行gather，将数据排布为nz格式
         StoreAlign<T2, Reg::DataCopyMode::DATA_BLOCK_COPY, Reg::PostLiteral::POST_MODE_UPDATE>(
             ((__ubuf__ T2*&)x_exp), vreg_x_exp_f8_pack_0, blockStride, repeatStride, preg_134);
 
@@ -1374,7 +1374,7 @@ __simd_vf__ inline void ProcessVec1DnUpdateMxfp8VF(
         Mul(vreg_l1, vreg_x_max_f32_b, vreg_l1, preg_134);
         Add(vreg_l0, vreg_x_sum_0, vreg_l1, preg_134);
         StoreAlign<T, Reg::StoreDist::DIST_NORM_B32>((__ubuf__ T*&)new_global_sum, vreg_l0, preg_134);
-        // pscale update
+        // pscale update，更新殇一个pscale为e8m0
         RegTensor<bfloat16_t> vreg_p_scale_bf16_0;
         RegTensor<bfloat16_t> vreg_p_scale_bf16_1;
         RegTensor<fp8_e8m0_t> vreg_p_scale_f8e8m0;

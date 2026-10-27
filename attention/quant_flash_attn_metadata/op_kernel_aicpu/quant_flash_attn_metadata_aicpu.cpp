@@ -289,12 +289,16 @@ bool QuantFlashAttnMetadataCpuKernel::ParamsInit()
     if (quantMode_ == 1 || quantMode_ == 6 || quantMode_ == 0) {
         baseInfo.queryType = load_balance::DataType::FP8_E4M3FN;
         baseInfo.kvType = load_balance::DataType::FP8_E4M3FN;
+    } else if (quantMode_ == 5) {
+        baseInfo.queryType = load_balance::DataType::FP4_E2M1;
+        baseInfo.kvType = load_balance::DataType::FP4_E2M1;
     }
     uint32_t sOuterFactor = 0;
     uint32_t sInnerFactor = 0;
     // N2TGD(TND decode) / BN2SGD(BSND decode) 均对应 DECODE 模板;
     // BNSD 仅支持 prefill 模板(USE_DN=true), 不路由 DECODE
     bool isMxfp8Decode = (layoutQDescale_ == "N2TGD" || layoutQDescale_ == "BN2SGD");
+    bool isMxfp4Decode = layoutQDescale_ == "N2TGD";
     if (socVersion_.find("Ascend960") != std::string::npos) {
         // 基本块随 decode/prefill 与 vHeadDim 分级，按 vHeadDim 判档
         optiling::quant_flash_attn::qfa_tiling_util::AdjustSinnerAndSouterArch92(
@@ -315,8 +319,8 @@ bool QuantFlashAttnMetadataCpuKernel::ParamsInit()
     mBaseSize_ = mBaseSize_ * (aivCoreNum_ / aicCoreNum_);
     param.mBaseSize = mBaseSize_;
     param.s2BaseSize = s2BaseSize_;
-    if (quantMode_ == 1 &&
-        socVersion_.find("Ascend960") == std::string::npos) { // 仅 MXFP8 在支持 FlashDecode 的平台开启 FD
+    if ((quantMode_ == 1 || quantMode_ == 5) &&
+        socVersion_.find("Ascend960") == std::string::npos) { // 仅 MXFP8/MXFP4 在支持 FlashDecode 的平台开启 FD
         param.l2Byte = 96U * 1024U * 1024U;                   // 96: 96MB, 1024: Mb2Kb, 1024:Kb2Mb
         param.fdTolerance = 10;                               // 10: tolerance block
         param.fdLeastBlock = 3;                               // 3: least block
@@ -329,7 +333,10 @@ bool QuantFlashAttnMetadataCpuKernel::ParamsInit()
     if (quantMode_ == 1) {
         param.kernelSplitMode =
             isMxfp8Decode ? load_balance::KernelSplitMode::BN2_S1G_S2 : load_balance::KernelSplitMode::BN1_S1_S2;
-    } else {
+    } else if (quantMode_ == 5) {
+        param.kernelSplitMode = 
+            isMxfp4Decode ? load_balance::KernelSplitMode::BN2_S1G_S2 : load_balance::KernelSplitMode::BN1_S1_S2;
+    }else {
         param.kernelSplitMode = load_balance::KernelSplitMode::BN1_S1_S2;
     }
 

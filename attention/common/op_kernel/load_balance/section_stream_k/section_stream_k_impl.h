@@ -330,12 +330,15 @@ inline void SectionStreamKImpl::CalcGridInfoSection(ComputeContext& computeConte
     int64_t headDimV = static_cast<int64_t>(baseInfo.GetHeadDimV());
     int64_t s1TypeCost = static_cast<int64_t>(GetDataTypeByteSize(baseInfo.GetQueryDataType()));
     int64_t s2TypeCost = static_cast<int64_t>(GetDataTypeByteSize(baseInfo.GetKvDataType()));
+    int64_t s1ByteRatio = baseInfo.GetQueryDataType() == DataType::FP4_E2M1 ? 2 : 1; // GetDataTypeByteSize 目前对FP4返回1，所以需要除以2
+    int64_t s2ByteRatio = baseInfo.GetKvDataType() == DataType::FP4_E2M1 ? 2 : 1;
     for (uint32_t bIdx = 0; bIdx < baseInfo.GetBatchSize(); bIdx++) {
         auto gridLength = CalcBatchTokenNum(bIdx, computeContext);
         int64_t s1Size = gridLength.first;
         int64_t s2Size = gridLength.second;
-        int64_t s1Cost = s1Size * headDimQk * s1TypeCost * 2L; // 2: Q和O两份数据
-        int64_t s2vCost = s2Size * (headDimQk + headDimV) * s2TypeCost;
+        // 这里的预估暂时偏小，O的数据应该是bf16，而不是和query一样的类型，并且对于qkv的mxfp4/mxfp8量化，没有计算scale的占用
+        int64_t s1Cost = s1Size * headDimQk * s1TypeCost * 2L / s1ByteRatio; // 2: Q和O两份数据
+        int64_t s2vCost = s2Size * (headDimQk + headDimV) * s2TypeCost / s2ByteRatio;
         int64_t singleHeadCost = s1Cost + s2vCost;
         maxSingleHeadTokenCost = std::max(maxSingleHeadTokenCost, singleHeadCost);
         maxMSize = std::max(maxMSize, GetMSize(bIdx, baseInfo));

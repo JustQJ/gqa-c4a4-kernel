@@ -62,7 +62,10 @@ inline void AdjustSinnerAndSouter(uint32_t vHeadDim, int64_t maxSeqQ, int64_t ma
     if (winRight == -1) {
         winRight = MAX_SEQ_LEN_DEFAULT;
     }
-    if (vHeadDim == DSIZE_256) {
+    if (quantMode == 5) {
+        sOuterFactor = SOUTER_64;
+        sInnerFactor = vHeadDim == DSIZE_256? SINNER_128 : SINNER_256;
+    } else if (vHeadDim == DSIZE_256) {
         sOuterFactor = SOUTER_64;
         sInnerFactor = SINNER_256;
     } else if (quantMode == 0 || quantMode == 6) { // QFA_HIF8_FP32 or GQA_FP8
