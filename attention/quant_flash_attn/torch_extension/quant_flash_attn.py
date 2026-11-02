@@ -305,7 +305,15 @@ class QuantFlashAttnOpBuilder(OpBuilder):
             t_size, b_size, s_size, n_size, d_size = _get_output_shape_sizes(
                 q, v, layout_q, layout_kv
             )
-            if layout_q in ("TND", "NTD"):
+            # Match the packed FP4-to-logical-D conversion in GetQkvDtypeRatio.
+            if int(quant_mode) in (
+                int(QuantMode.A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16),
+                int(QuantMode.A4C4_QKV_HIF4_P_FP8_E4M3_SOFTMAX_FP16),
+            ):
+                d_size *= 2
+            if not return_softmax_lse:
+                softmax_out_size = (0,)
+            elif layout_q in ("TND", "NTD"):
                 # NTD (GQA FP8, quant_mode=6) 的 lse 与 TND 同为 (N, T)
                 softmax_out_size = (n_size, t_size)
             else:

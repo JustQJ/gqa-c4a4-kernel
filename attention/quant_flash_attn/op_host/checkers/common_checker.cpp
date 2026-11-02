@@ -85,8 +85,9 @@ ge::graphStatus CommonChecker::CheckSingleParaDtype(const QfaTilingInfo& qfaInfo
     std::vector<ge::DataType> supportedQuantDtypes;
     std::string supportedQuantDtypesStr;
     if (qfaInfo.npuArch == NpuArch::DAV_3510) {
-        supportedQuantDtypes = {Ops::Transformer::DT_FLOAT8_E4M3FN, Ops::Transformer::DT_HIFLOAT8};
-        supportedQuantDtypesStr = "FLOAT8_E4M3FN/HIFLOAT8";
+        supportedQuantDtypes = {Ops::Transformer::DT_FLOAT8_E4M3FN, Ops::Transformer::DT_HIFLOAT8,
+                               Ops::Transformer::DT_FLOAT4_E2M1};
+        supportedQuantDtypesStr = "FLOAT8_E4M3FN/HIFLOAT8/FLOAT4_E2M1";
     } else if (qfaInfo.npuArch == NpuArch::DAV_9201) {
         supportedQuantDtypes = {Ops::Transformer::DT_FLOAT8_E4M3FN, Ops::Transformer::DT_HIFLOAT4};
         supportedQuantDtypesStr = "FLOAT8_E4M3FN/DT_HIFLOAT4";

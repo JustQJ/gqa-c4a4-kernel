@@ -94,6 +94,7 @@ static ge::graphStatus GetLayoutAxes(std::vector<QfaAxis>& layoutAxes, const Qfa
     return ge::GRAPH_SUCCESS;
 }
 
+// 判断当前layout是否有对应的轴
 bool QfaTilingShape::HasAxis(const QfaAxis& axis) const
 {
     auto layoutIt = QFA_LAYOUT_AXIS_MAP.find(layout_);

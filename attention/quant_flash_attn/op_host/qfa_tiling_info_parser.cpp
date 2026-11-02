@@ -210,8 +210,8 @@ void QfaInfoParser::GetOptionalInputParaInfo()
 
 void QfaInfoParser::GetInputParaInfo()
 {
-    opParamInfo_.query.desc = context_->GetInputDesc(QUERY_INDEX);
-    opParamInfo_.query.shape = context_->GetInputShape(QUERY_INDEX);
+    opParamInfo_.query.desc = context_->GetInputDesc(QUERY_INDEX); // desc 是tensor的描述，可以获取dtype等信息
+    opParamInfo_.query.shape = context_->GetInputShape(QUERY_INDEX); // Tensor 的形状信息，后续解析 T、N、D 等维度。
     opParamInfo_.key.desc = context_->GetInputDesc(KEY_INDEX);
     opParamInfo_.key.shape = context_->GetInputShape(KEY_INDEX);
     opParamInfo_.value.desc = context_->GetInputDesc(VALUE_INDEX);
@@ -285,11 +285,13 @@ ge::graphStatus QfaInfoParser::GetQuantMode()
             quantModeVal !=
                 static_cast<int64_t>(
                     QM::A8C8_QK_FP8_E4M3_PER_TOKEN_HEAD_V_FP8_E4M3_PER_HEAD_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32) &&
-            quantModeVal != static_cast<int64_t>(QM::A8C8_QKV_HIF8_P_PER_TENSOR_SOFTMAX_FP32)) {
+            quantModeVal != static_cast<int64_t>(QM::A8C8_QKV_HIF8_P_PER_TENSOR_SOFTMAX_FP32) &&
+            quantModeVal != static_cast<int64_t>(QM::A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16)) {
             OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "quant_mode", std::to_string(quantModeVal).c_str(),
                                                   "quant_mode must be 0 "
                                                   "(A8C8_QKV_HIF8_P_PER_TENSOR_SOFTMAX_FP32) or "
                                                   "1 (A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32) or "
+                                                  "5 (A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16) or "
                                                   "6 (A8C8_QK_FP8_"
                                                   "E4M3_PER_TOKEN_HEAD_V_FP8_E4M3_PER_HEAD_"
                                                   "P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32)");

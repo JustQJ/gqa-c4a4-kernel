@@ -31,6 +31,7 @@ public:
                 Ops::Transformer::DT_FLOAT8_E4M3FN,
                 Ops::Transformer::DT_FLOAT8_E4M3FN,
                 Ops::Transformer::DT_HIFLOAT8,
+                Ops::Transformer::DT_FLOAT4_E2M1,
             })
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
@@ -40,6 +41,7 @@ public:
                 Ops::Transformer::DT_FLOAT8_E4M3FN,
                 Ops::Transformer::DT_FLOAT8_E4M3FN,
                 Ops::Transformer::DT_HIFLOAT8,
+                Ops::Transformer::DT_FLOAT4_E2M1,
             })
             .FormatList({ge::FORMAT_ND})
             .IgnoreContiguous();
@@ -49,6 +51,7 @@ public:
                 Ops::Transformer::DT_FLOAT8_E4M3FN,
                 Ops::Transformer::DT_FLOAT8_E4M3FN,
                 Ops::Transformer::DT_HIFLOAT8,
+                Ops::Transformer::DT_FLOAT4_E2M1,
             })
             .FormatList({ge::FORMAT_ND})
             .IgnoreContiguous();
@@ -58,6 +61,7 @@ public:
                 Ops::Transformer::DT_FLOAT8_E8M0,
                 Ops::Transformer::DT_FLOAT,
                 Ops::Transformer::DT_FLOAT,
+                Ops::Transformer::DT_FLOAT8_E8M0,
             })
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
@@ -67,6 +71,7 @@ public:
                 Ops::Transformer::DT_FLOAT8_E8M0,
                 Ops::Transformer::DT_FLOAT,
                 Ops::Transformer::DT_FLOAT,
+                Ops::Transformer::DT_FLOAT8_E8M0,
             })
             .FormatList({ge::FORMAT_ND})
             .IgnoreContiguous();
@@ -76,6 +81,7 @@ public:
                 Ops::Transformer::DT_FLOAT8_E8M0,
                 Ops::Transformer::DT_FLOAT,
                 Ops::Transformer::DT_FLOAT,
+                Ops::Transformer::DT_FLOAT8_E8M0,
             })
             .FormatList({ge::FORMAT_ND})
             .IgnoreContiguous();
@@ -142,6 +148,7 @@ public:
         this->Output("attn_out")
             .ParamType(REQUIRED)
             .DataType({
+                Ops::Transformer::DT_BF16,
                 Ops::Transformer::DT_BF16,
                 Ops::Transformer::DT_BF16,
                 Ops::Transformer::DT_BF16,

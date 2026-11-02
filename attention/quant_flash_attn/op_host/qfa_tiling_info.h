@@ -119,18 +119,18 @@ enum class MaskMode : int32_t {
 };
 
 enum class QfaLayout : uint32_t {
-    BSND = 0,
-    BNSD = 1,
-    TND = 2,
-    PA_BBND = 3,
-    PA_BNBD = 4,
-    PA_NZ = 5,
-    LSE_BNS = 6,
-    LSE_NT = 7,
-    N2TGD = 8,
-    NTD = 9,
-    NT = 10,
-    BN2SGD = 11
+    BSND = 0, // [B,S,N,D] batch、序列、head、head 维度
+    BNSD = 1, // [B,N,S,D] head 轴放在序列轴前
+    TND = 2, // [T,N,D] 多个请求的 token 拼接，T 为总 token 数
+    PA_BBND = 3, // [Bn,Bs,N,D]  分页 KV：页数、页内 token、head、D
+    PA_BNBD = 4, // [Bn,N,Bs,D] 分页 KV：页数、head、页内 token、D
+    PA_NZ = 5, // [Bn,N,D1,Bs,D0] 分页 KV，将 D 拆成 D1、D0，D=D1×D0
+    LSE_BNS = 6, // [B,N,S] 按 batch 保存的 LSE
+    LSE_NT = 7, //[N,T] 按总 token 保存的 LSE
+    N2TGD = 8, // [N2,T,G,D] 按 KV head 和组内 Q head 组织的布局，用于 Qscale, G = N1/N2
+    NTD = 9, //[N,T,D] TND 交换 head 轴放在总 token 轴前
+    NT = 10, // head、总 token 两个轴
+    BN2SGD = 11 // [B,N2,S,G,D] 带 batch/序列轴的合头 Qscale 布局
 };
 
 const std::map<std::string, QfaLayout> qfaLayoutMap = {{"BSND", QfaLayout::BSND},       {"BNSD", QfaLayout::BNSD},
@@ -143,15 +143,15 @@ enum class QfaAxis : uint32_t {
     B = 0,
     S = 1,
     N = 2,
-    D = 3,
-    H = 4,
+    D = 3, // head 维度
+    H = 4, // 通常表示合并后的隐藏维度，如 N×D，具体看使用位置
     T = 5,
-    D1 = 6,
+    D1 = 6, // D 的外层、内层分块，D=D1×D0
     D0 = 7,
-    S1 = 8,
-    S2 = 9,
-    Bn = 10,
-    Bs = 11,
+    S1 = 8, // Query 序列轴
+    S2 = 9, // Key/Value 序列轴
+    Bn = 10, // KV cache 的物理页数
+    Bs = 11, // 每页容纳的 token 数
     CONST = 12
 };
 
@@ -159,7 +159,8 @@ enum class QfaQuantMode : uint32_t {
     A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32 = 1,
     A8C8_QK_FP8_E4M3_PER_TOKEN_HEAD_V_FP8_E4M3_PER_HEAD_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32 = 6,
     A8C8_QKV_HIF8_P_PER_TENSOR_SOFTMAX_FP32 = 0,
-    A4C4_QKV_HIF4_P_FP8_E4M3_SOFTMAX_FP16 = 10
+    A4C4_QKV_HIF4_P_FP8_E4M3_SOFTMAX_FP16 = 10,
+    A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16 = 5,
 };
 
 enum class KvStorageMode : uint32_t {
@@ -239,43 +240,43 @@ public:
     QfaParaInfo opParamInfo;
 
     // Base Param
-    int64_t bSize = 0;
-    int64_t n1Size = 0;
-    int64_t n2Size = 0;
-    int64_t s1Size = 0;
-    int64_t s2Size = 0;
-    int64_t qkHeadDim = 0;
-    int64_t vHeadDim = 0;
-    int64_t gSize = 0;
-    int64_t qTSize = 0;
-    int64_t kTSize = 0;
+    int64_t bSize = 0; // batch 中的序列数量 B。TND/NTD 下从 cu_seqlens_q 长度减 1 得到；其他布局从 Q 的 B 轴得到。
+    int64_t n1Size = 0; // Q 的头数 N1
+    int64_t n2Size = 0; // KV 的头数 N2，从 K 的 N 轴解析。
+    int64_t s1Size = 0; // Q 的序列长度信息。BSND/BNSD 下是 Q 的 S 轴；TND/NTD 下直接取 max_seqlen_q 属性（即最长的一个seq），未提供时可以是 -1。不是 Q 的总 token 数。
+    int64_t s2Size = 0; // KV 的存储长度信息。普通 BSND/BNSD 下是 K 的 S 轴；KV TND 下是 K 的总 T；分页下为 maxBlockNumPerBatch × blockSize，表示每个序列页表可覆盖的 token 容量。
+    int64_t qkHeadDim = 0; // Q/K 的逻辑 head dimension D，从 Q 解析。C4 下是 128/256，不是打包后的 64/128。
+    int64_t vHeadDim = 0; // V 的逻辑 head dimension，也决定输出最后一维；当前 C4 要求等于 qkHeadDim。
+    int64_t gSize = 0; // GQA 分组大小，N1 / N2，即一个 KV 头对应多少个 Q 头。
+    int64_t qTSize = 0; // Q 的 T 轴大小，即 TND/NTD 存储的总 token 数；没有 T 轴时为 0。
+    int64_t kTSize = 0; // K 的 T 轴大小；当前 C4 的 PA_NZ 没有 T 轴，因此为 0。
     float softmaxScale = 0;
 
-    uint64_t totalOutputSize = 0;
-    uint64_t totalLseSize = 0;
+    uint64_t totalOutputSize = 0; // 输出 attn_out 的元素总数，不是字节数。TND 下为 T × N1 × Dv。
+    uint64_t totalLseSize = 0; // LSE 输出的元素总数；没有输出 shape 时为 0，开启 TND LSE 时通常为 N1 × T。
 
     // Quant Param
     QfaQuantMode quantMode = QfaQuantMode::A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32;
 
     // PageAttention
-    bool pageAttentionFlag = false;
-    int64_t blockSize = 0;
-    int64_t blockTypeSize = 0;
-    int64_t maxBlockNumPerBatch = 0;
-    int64_t totalBlockNum = 0;
+    bool pageAttentionFlag = false; // 是否使用分页 KV；由 KV layout 是否为 PA 类型决定。
+    int64_t blockSize = 0; // 每个物理页能存储的 token 数 Bs，不是计算基本块的 M/N。
+    int64_t blockTypeSize = 0; // 当前 Parser 固定赋值为 sizeof(uint8_t)，即 1。当前 QFA 目录中未找到后续读取，不能把它理解为 FP4 元素的实际字节数或整页字节数。
+    int64_t maxBlockNumPerBatch = 0; // block_table.shape[1]，每个序列预留的最大页槽数，不是实际使用页数。
+    int64_t totalBlockNum = 0; // KV cache 的物理页总数 Bn，从 K 的页数轴取得。
 
     // Q seq_lens
     int64_t seqUsedQDims = 0;
     int64_t cuSeqLenQDims = 0;
-    int64_t maxSeqQ = 0;
-    int64_t maxSeqKv = 0;
-    int64_t maskMode = 0;
-    int64_t winLeft = 0;
-    int64_t winRight = 0;
+    int64_t maxSeqQ = 0; // 用户传入的 max_seqlen_q 属性，未提供时为 -1；Parser 不通过读取设备长度内容来求最大值。
+    int64_t maxSeqKv = 0; // 用户传入的 max_seqlen_kv 属性，未提供时为 -1。
+    int64_t maskMode = 0; // mask 模式，当前 C4 使用 0（无 mask）或 3（causal）。
+    int64_t winLeft = 0; // 滑窗左侧范围属性；当前 C4 的 mode 0/3 要求为 -1。
+    int64_t winRight = 0; // 滑窗右侧范围属性；当前 C4 的 mode 0/3 要求为 -1。
 
     // Others Flag
-    bool batchContinuousFlag = true;
-    bool softmaxLseFlag = false;
+    bool batchContinuousFlag = true; // KV 是否属于非分页的 BATCH_CONTINUOUS 存储模式。不是判断 Tensor stride 是否连续。 当前 PA_NZ 下为 false。
+    bool softmaxLseFlag = false; // 是否要求返回有效 LSE，来自 return_softmax_lse。
     bool sinksFlag = false;
     bool emptyTensorFlag = false;
 
@@ -389,13 +390,13 @@ const std::map<ge::DataType, std::string> DATATYPE_TO_STRING_MAP = {
 const std::map<std::string, std::vector<ge::DataType>> DTYPE_SUPPORT_MAP = {
     {QUERY_NAME,
      {Ops::Transformer::DT_FLOAT16, Ops::Transformer::DT_BF16, Ops::Transformer::DT_FLOAT8_E4M3FN,
-      Ops::Transformer::DT_HIFLOAT8, Ops::Transformer::DT_HIFLOAT4}},
+      Ops::Transformer::DT_HIFLOAT8, Ops::Transformer::DT_HIFLOAT4, Ops::Transformer::DT_FLOAT4_E2M1}},
     {KEY_NAME,
      {Ops::Transformer::DT_FLOAT16, Ops::Transformer::DT_BF16, Ops::Transformer::DT_FLOAT8_E4M3FN,
-      Ops::Transformer::DT_HIFLOAT8, Ops::Transformer::DT_HIFLOAT4}},
+      Ops::Transformer::DT_HIFLOAT8, Ops::Transformer::DT_HIFLOAT4, Ops::Transformer::DT_FLOAT4_E2M1}},
     {VALUE_NAME,
      {Ops::Transformer::DT_FLOAT16, Ops::Transformer::DT_BF16, Ops::Transformer::DT_FLOAT8_E4M3FN,
-      Ops::Transformer::DT_HIFLOAT8, Ops::Transformer::DT_HIFLOAT4}},
+      Ops::Transformer::DT_HIFLOAT8, Ops::Transformer::DT_HIFLOAT4, Ops::Transformer::DT_FLOAT4_E2M1}},
     {Q_DESCALE_NAME,
      {Ops::Transformer::DT_FLOAT, Ops::Transformer::DT_BF16, Ops::Transformer::DT_FLOAT8_E8M0,
       Ops::Transformer::DT_HIFLOAT4_SCALE}},

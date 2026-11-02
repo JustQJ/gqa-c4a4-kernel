@@ -139,6 +139,21 @@ ge::graphStatus PagedAttentionChecker::CheckBlockSizeGqaFp8(const QfaTilingInfo&
     return ge::GRAPH_SUCCESS;
 }
 
+ge::graphStatus PagedAttentionChecker::CheckBlockSizeMxFp4(const QfaTilingInfo& qfaInfo) const
+{
+    if (qfaInfo.quantMode != QfaQuantMode::A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16) {
+        return ge::GRAPH_SUCCESS;
+    }
+    // MxFP4 场景: blockSize 仅支持 64、128、256、512或1024
+    OP_CHECK_IF(qfaInfo.blockSize != 64 && qfaInfo.blockSize != 128 && qfaInfo.blockSize != 256 &&
+                    qfaInfo.blockSize != 512 && qfaInfo.blockSize != 1024,
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                    qfaInfo.opName, "block_size", std::to_string(qfaInfo.blockSize).c_str(),
+                    "When quant_mode is MxFP4, block_size must be in [64, 128, 256, 512, 1024]"),
+                return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
+
 ge::graphStatus PagedAttentionChecker::CheckFeature(const QfaTilingInfo& qfaInfo)
 {
     // 约束(特性交叉校验列):
@@ -164,7 +179,7 @@ ge::graphStatus PagedAttentionChecker::CheckFeature(const QfaTilingInfo& qfaInfo
             return ge::GRAPH_FAILED);
 
         // 场景: blockSize 校验
-        if (CheckBlockSizeMxFp8(qfaInfo) != ge::GRAPH_SUCCESS || CheckBlockSizeGqaFp8(qfaInfo) != ge::GRAPH_SUCCESS) {
+        if (CheckBlockSizeMxFp8(qfaInfo) != ge::GRAPH_SUCCESS || CheckBlockSizeGqaFp8(qfaInfo) != ge::GRAPH_SUCCESS || CheckBlockSizeMxFp4(qfaInfo) != ge::GRAPH_SUCCESS) {
             return ge::GRAPH_FAILED;
         }
     } else {
