@@ -180,7 +180,7 @@ ge::graphStatus MaskChecker::CheckMaskModeQuantMode(const QfaTilingInfo& qfaInfo
         qfaInfo.quantMode ==
             QfaQuantMode::A8C8_QK_FP8_E4M3_PER_TOKEN_HEAD_V_FP8_E4M3_PER_HEAD_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32 ||
         qfaInfo.quantMode == QfaQuantMode::A8C8_QKV_HIF8_P_PER_TENSOR_SOFTMAX_FP32 ||
-        qfaInfo.quantMode == QfaQuantMode::A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16) {
+        qfaInfo.quantMode == QfaQuantMode::A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32) {
         OP_CHECK_IF(qfaInfo.maskMode == static_cast<int64_t>(MaskMode::SLIDING_WINDOW),
                     OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(qfaInfo.opName, MASK_MODE_NAME.c_str(),
                                                           std::to_string(qfaInfo.maskMode).c_str(),

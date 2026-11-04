@@ -41,8 +41,8 @@ ASCENDC_TPL_ARGS_DECL(QuantFlashAttn,
                       //    2: QFA_MXFP8_FP32_DECODE
                       //    6: QFA_GQA_FP8_FULLQUANT
                       //    0: QFA_HIF8_FP32
-                      //    3: QFA_MXFP4_FP16_PREFILL
-                      //    4: QFA_MXFP4_FP16_DECODE
+                      //    3: QFA_MXFP4_FP32_PREFILL
+                      //    4: QFA_MXFP4_FP32_DECODE
                       ASCENDC_TPL_UINT_DECL(QuantMode, ASCENDC_TPL_5_BW, ASCENDC_TPL_UI_RANGE, 1, 0, 31),
                       //    HasAttenMask
                       //    false / true
@@ -90,9 +90,9 @@ ASCENDC_TPL_SEL(
         ASCENDC_TPL_UINT_SEL(InOutLayoutType, ASCENDC_TPL_UI_LIST, InOutLayoutType_TND_TND),
         ASCENDC_TPL_UINT_SEL(Config, ASCENDC_TPL_UI_LIST, Config_S1Aligned128_S2Aligned256_DAligned128_DVAligned128,
                              Config_S1Aligned128_S2Aligned128_DAligned256_DVAligned256),
-        ASCENDC_TPL_UINT_SEL(QuantMode, ASCENDC_TPL_UI_LIST, QFA_MXFP4_FP16_PREFILL, QFA_MXFP4_FP16_DECODE),
+        ASCENDC_TPL_UINT_SEL(QuantMode, ASCENDC_TPL_UI_LIST, QFA_MXFP4_FP32_PREFILL, QFA_MXFP4_FP32_DECODE),
         ASCENDC_TPL_BOOL_SEL(HasAttenMask, false, true),
-        ASCENDC_TPL_UINT_SEL(KvLayoutType, ASCENDC_TPL_UI_LIST, KvLayoutType_PA_NZ),
+        ASCENDC_TPL_UINT_SEL(KvLayoutType, ASCENDC_TPL_UI_LIST, KvLayoutType_PA_BBND, KvLayoutType_PA_NZ),
         ASCENDC_TPL_BOOL_SEL(IsFd, false, true), ASCENDC_TPL_BOOL_SEL(HasVTail, false),
         ASCENDC_TPL_TILING_STRUCT_SEL(QuantFlashAttnTilingData)),
     // FP8

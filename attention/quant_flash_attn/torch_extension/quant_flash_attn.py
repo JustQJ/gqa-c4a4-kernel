@@ -29,7 +29,7 @@ class QuantMode(IntEnum):
     A8C8_QKV_MXFP8_P_MXFP8_SOFTMAX_FP32 = 2
     A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP16 = 3
     A8C8_QKV_MXFP8_P_MXFP8_SOFTMAX_FP16 = 4
-    A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16 = 5
+    A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32 = 5
     A8C8_QK_FP8_E4M3_PER_TOKEN_HEAD_V_FP8_E4M3_PER_HEAD_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32 = 6
     A4C4_QKV_HIF4_P_HIF4_LEVEL1_SOFTMAX_FP16 = 7
     A4C4_QKV_HIF4_P_HIF4_LEVEL2_SOFTMAX_FP16 = 8
@@ -307,7 +307,7 @@ class QuantFlashAttnOpBuilder(OpBuilder):
             )
             # Match the packed FP4-to-logical-D conversion in GetQkvDtypeRatio.
             if int(quant_mode) in (
-                int(QuantMode.A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16),
+                int(QuantMode.A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32),
                 int(QuantMode.A4C4_QKV_HIF4_P_FP8_E4M3_SOFTMAX_FP16),
             ):
                 d_size *= 2
@@ -390,7 +390,7 @@ def quant_flash_attn_metadata(
         lambda: f"The quant_mode of quant_flash_attn_metadata only supports 0 (A8C8_QKV_HIF8_P_PER_TENSOR_SOFTMAX_FP32), "
         f"1 (A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32), "
         f"3 (A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP16), "
-        f"5 (A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16) "
+        f"5 (A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32) "
         f"6 (A8C8_QK_FP8_E4M3_PER_TOKEN_HEAD_V_FP8_E4M3_PER_HEAD_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32) "
         f"or 10 (A4C4_QKV_HIF4_P_FP8_E4M3_SOFTMAX_FP16), but got {quant_mode}",
     )
@@ -537,7 +537,7 @@ def quant_flash_attn(
         lambda: f"The quant_mode of quant_flash_attn only supports 0 (A8C8_QKV_HIF8_P_PER_TENSOR_SOFTMAX_FP32), "
         f"1 (A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32), "
         f"3 (A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP16), "
-        f"5 (A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16) "
+        f"5 (A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32) "
         f"6 (A8C8_QK_FP8_E4M3_PER_TOKEN_HEAD_V_FP8_E4M3_PER_HEAD_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32) "
         f"or 10 (A4C4_QKV_HIF4_P_FP8_E4M3_SOFTMAX_FP16), but got {quant_mode}",
     )
@@ -601,7 +601,7 @@ def quant_flash_attn(
                 f"got {name}.stride() = {tensor.stride()}"
             )
 
-    if quant_mode == int(QuantMode.A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16):
+    if quant_mode == int(QuantMode.A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32):
         for name, tensor in (("q", q), ("k", k), ("v", v)):
             if tensor.dtype != torch.float4_e2m1fn_x2:
                 raise ValueError(

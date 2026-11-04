@@ -10,7 +10,7 @@
 
 /*!
  * \file quant_flash_attn_tiling_mxfp4.cpp
- * \brief QuantFlashAttn arch35 tiling implementation (A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16)
+ * \brief QuantFlashAttn arch35 tiling implementation (A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32)
  */
 
 #include "quant_flash_attn_tiling_mxfp4.h"
@@ -41,7 +41,7 @@ bool QuantFlashAttnTilingMxfp4Impl::IsCapable()
     if (qfaInfo_ == nullptr) {
         return false;
     }
-    if (qfaInfo_->quantMode != QfaQuantMode::A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16) {
+    if (qfaInfo_->quantMode != QfaQuantMode::A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32) {
         return false;
     }
     return true;
@@ -212,7 +212,7 @@ void QuantFlashAttnTilingMxfp4Impl::UpdateTilingKeyInfo()
 void QuantFlashAttnTilingMxfp4Impl::UpdateTilingKeyQuantMode()
 {
     tilingKeyInfo_.quantMode =
-        decodeS1GMerge_ ? static_cast<uint64_t>(QFA_MXFP4_FP16_DECODE) : static_cast<uint64_t>(QFA_MXFP4_FP16_PREFILL);
+        decodeS1GMerge_ ? static_cast<uint64_t>(QFA_MXFP4_FP32_DECODE) : static_cast<uint64_t>(QFA_MXFP4_FP32_PREFILL);
 }
 
 void QuantFlashAttnTilingMxfp4Impl::GenTilingKey()

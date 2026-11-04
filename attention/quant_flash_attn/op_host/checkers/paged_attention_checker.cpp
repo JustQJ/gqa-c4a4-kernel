@@ -141,7 +141,7 @@ ge::graphStatus PagedAttentionChecker::CheckBlockSizeGqaFp8(const QfaTilingInfo&
 
 ge::graphStatus PagedAttentionChecker::CheckBlockSizeMxFp4(const QfaTilingInfo& qfaInfo) const
 {
-    if (qfaInfo.quantMode != QfaQuantMode::A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16) {
+    if (qfaInfo.quantMode != QfaQuantMode::A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32) {
         return ge::GRAPH_SUCCESS;
     }
     // MxFP4 场景: blockSize 仅支持 64、128、256、512或1024

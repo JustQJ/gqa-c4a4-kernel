@@ -101,17 +101,17 @@ inline aclnnStatus QuantFlashAttnMetadataCheck::CheckBaseAttr(int64_t batchSize,
 
     constexpr int64_t A8C8_QKV_HIF8_P_PER_TENSOR_SOFTMAX_FP32 = 0;
     constexpr int64_t A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32 = 1;
-    constexpr int64_t A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16 = 5;
+    constexpr int64_t A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32 = 5;
     constexpr int64_t A8C8_QK_FP8_E4M3_PER_TOKEN_HEAD_V_FP8_E4M3_PER_HEAD_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32 = 6;
     constexpr int64_t A4C4_QKV_HIF4_P_FP8_E4M3_SOFTMAX_FP16 = 10;
     static const std::unordered_set<int64_t> quantModeSet = {
         A8C8_QKV_HIF8_P_PER_TENSOR_SOFTMAX_FP32, A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32,
-        A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16, A8C8_QK_FP8_E4M3_PER_TOKEN_HEAD_V_FP8_E4M3_PER_HEAD_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32,
+        A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32, A8C8_QK_FP8_E4M3_PER_TOKEN_HEAD_V_FP8_E4M3_PER_HEAD_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32,
         A4C4_QKV_HIF4_P_FP8_E4M3_SOFTMAX_FP16};
     CHECK_COND(quantModeSet.count(quantMode) > 0, ACLNN_ERR_RUNTIME_ERROR,
                "quantMode only supports 0 (A8C8_QKV_HIF8_P_PER_TENSOR_SOFTMAX_FP32), "
                "1 (A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32) "
-               "5 (A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16) "
+               "5 (A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32) "
                "6 (A8C8_QK_FP8_E4M3_PER_TOKEN_HEAD_V_FP8_E4M3_PER_HEAD_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32) "
                "and 10 (A4C4_QKV_HIF4_P_FP8_E4M3_SOFTMAX_FP16) "
                "but got %ld",
@@ -171,38 +171,39 @@ inline aclnnStatus QuantFlashAttnMetadataCheck::CheckBaseAttr(int64_t batchSize,
                layoutQ);
 
     // 一致性校验：MxFP4 (quantMode=5) 场景下，layout_out 暂时只支持 TND
-    CHECK_COND(!(quantMode == A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16 && strcmp(layoutOut, "TND") != 0),
+    CHECK_COND(!(quantMode == A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32 && strcmp(layoutOut, "TND") != 0),
             ACLNN_ERR_RUNTIME_ERROR,
             "When quantMode is %ld (MxFP4), layoutOut only supports TND, but got %s", quantMode,
             layoutOut);
     
     // 一致性校验：MxFP4 (quantMode=5) 场景下，layout_q 暂时只支持 TND
-    CHECK_COND(!(quantMode == A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16 && strcmp(layoutQ, "TND") != 0),
+    CHECK_COND(!(quantMode == A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32 && strcmp(layoutQ, "TND") != 0),
             ACLNN_ERR_RUNTIME_ERROR,
             "When quantMode is %ld (MxFP4), layoutQ only supports TND, but got %s", quantMode,
             layoutQ);
 
-    // 一致性校验：MxFP4 (quantMode=5) 场景下，layoutKv 暂时只支持 PA_NZ
-    CHECK_COND(!(quantMode == A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16 && strcmp(layoutKv, "PA_NZ") != 0),
+    // 一致性校验：MxFP4 (quantMode=5) 场景下，layoutKv 支持 PA_BBND/PA_NZ
+    CHECK_COND(!(quantMode == A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32 &&
+                 strcmp(layoutKv, "PA_BBND") != 0 && strcmp(layoutKv, "PA_NZ") != 0),
             ACLNN_ERR_RUNTIME_ERROR,
-            "When quantMode is %ld (MxFP4), layoutKv only supports PA_NZ, but got %s", quantMode,
+            "When quantMode is %ld (MxFP4), layoutKv only supports PA_BBND/PA_NZ, but got %s", quantMode,
             layoutKv);
 
     // 一致性校验：MxFP4 (quantMode=5) 场景下，layoutQDescale 暂时只支持 TND/N2TGD
-    CHECK_COND(!(quantMode == A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16 && strcmp(layoutQDescale, "TND") != 0 &&
+    CHECK_COND(!(quantMode == A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32 && strcmp(layoutQDescale, "TND") != 0 &&
                 strcmp(layoutQDescale, "N2TGD") != 0),
             ACLNN_ERR_RUNTIME_ERROR,
             "When quantMode is %ld (MxFP4), layoutQDescale only supports TND and N2TGD, but got %s", quantMode,
             layoutQDescale);
     
     // 一致性校验：MxFP4 (quantMode=5) 场景下，headDim 暂时只支持 128/256
-    CHECK_COND(!(quantMode == A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16 && headDim != HEAD_DIM_128 && headDim != HEAD_DIM_256),
+    CHECK_COND(!(quantMode == A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32 && headDim != HEAD_DIM_128 && headDim != HEAD_DIM_256),
             ACLNN_ERR_RUNTIME_ERROR,
             "When quantMode is %ld (MxFP4), headDim only supports 128/256, but got %ld", quantMode,
             headDim);
 
     // 一致性校验：MxFP4 (quantMode=5) 场景下，isGradEnabled 暂时只支持 false
-    CHECK_COND(!(quantMode == A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16 && isGradEnabled),
+    CHECK_COND(!(quantMode == A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32 && isGradEnabled),
             ACLNN_ERR_RUNTIME_ERROR,
             "When quantMode is %ld (MxFP4), isGradEnabled only supports false, but got true", quantMode);
 

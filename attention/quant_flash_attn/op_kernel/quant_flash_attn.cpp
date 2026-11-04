@@ -388,7 +388,7 @@ __aicore__ inline void quant_flash_attn_mxfp4(
     constexpr bool isDAligned = ConfigValue[config].d != inferDTemplateType::NotAligned &&
                                 static_cast<int32_t>(ConfigValue[config].d) % 64 == 0;
 
-    constexpr bool useDn = (quantMode == QFA_MXFP4_FP16_PREFILL);
+    constexpr bool useDn = (quantMode == QFA_MXFP4_FP32_PREFILL);
     
     using CubeBlock =
         BaseApi::QuantFlashAttnBlockCubeMxfp4<INPUT_T, float, inputLayoutType, s1TemplateType, s2TemplateType,
@@ -589,8 +589,8 @@ __global__ __aicore__ void quant_flash_attn(
             cuSeqLensKv, sequsedQ, sequsedKv, sinks, attnMask, metadata, attnOut, softmaxLse, workspace, tilingData);
     }
 #elif (ORIG_DTYPE_Q == DT_FLOAT4_E2M1)
-    if constexpr (quantMode == QFA_MXFP4_FP16_PREFILL ||
-                  quantMode == QFA_MXFP4_FP16_DECODE) {
+    if constexpr (quantMode == QFA_MXFP4_FP32_PREFILL ||
+                  quantMode == QFA_MXFP4_FP32_DECODE) {
         quant_flash_attn_mxfp4<...>(..., tilingData);
     }
 #endif
