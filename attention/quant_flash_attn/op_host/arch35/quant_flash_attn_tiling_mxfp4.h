@@ -56,9 +56,9 @@ private:
     void FillTiling();
     ge::graphStatus SetTilingData(QuantFlashAttnTilingData& tilingData);
 
-    QuantFlashAttnTilingData tilingData_;
-    QfaTilingKeyInfo tilingKeyInfo_;
-    QfaPlatFormInfo platformInfo_;
+    QuantFlashAttnTilingData tilingData_ {};
+    QfaTilingKeyInfo tilingKeyInfo_ {};
+    QfaPlatFormInfo platformInfo_ {};
     uint32_t sOuterFactor_ = 0;
     uint32_t sInnerFactor_ = 0;
     bool flashDecodeFlag_ = false;

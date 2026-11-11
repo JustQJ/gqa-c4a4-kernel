@@ -55,6 +55,9 @@ void QuantFlashAttnTilingMxfp4Impl::CalcScheduleMode()
 
 ge::graphStatus QuantFlashAttnTilingMxfp4Impl::DoOpTiling()
 {
+    OP_CHECK_IF(qfaInfo_->kvLayout != QfaLayout::PA_BBND,
+                OP_LOGE(qfaInfo_->opName, "MXFP4 kernel currently supports PA_BBND KV layout only."),
+                return ge::GRAPH_FAILED);
     OP_CHECK_IF(SetPlatMemoryInfo() != ge::GRAPH_SUCCESS, OP_LOGE(qfaInfo_->opName, "Set plat memory info fail."),
                 return ge::GRAPH_FAILED);
 
@@ -206,7 +209,6 @@ void QuantFlashAttnTilingMxfp4Impl::UpdateTilingKeyInfo()
     tilingKeyInfo_.hasAttenMask = (qfaInfo_->maskMode != static_cast<int64_t>(MaskMode::NO_MASK));
     UpdateTilingKeyKvLayout();
     tilingKeyInfo_.isFd = flashDecodeFlag_;
-    tilingKeyInfo_.hasVTail = qfaInfo_->hasVTail;
 }
 
 void QuantFlashAttnTilingMxfp4Impl::UpdateTilingKeyQuantMode()
@@ -220,14 +222,14 @@ void QuantFlashAttnTilingMxfp4Impl::GenTilingKey()
     UpdateTilingKeyInfo();
     tilingKey_ = GET_TPL_TILING_KEY(tilingKeyInfo_.inputLayout, tilingKeyInfo_.config, tilingKeyInfo_.quantMode,
                                     tilingKeyInfo_.hasAttenMask, tilingKeyInfo_.kvLayoutType, tilingKeyInfo_.isFd,
-                                    tilingKeyInfo_.hasVTail);
+                                    false); // 共享 tiling key 的最后一位仅用于 C8 的尾块能力。
 
     OP_LOGI(qfaInfo_->opName, "The tilingkey is %llu.", tilingKey_);
     OP_LOGI(qfaInfo_->opName,
             "The tilingkey param is inOutLayoutType: %llu, config: %llu, quantMode: %llu, "
-            "hasAttenMask: %u, kvLayoutType: %llu, isFd: %u, hasVTail: %u.",
+            "hasAttenMask: %u, kvLayoutType: %llu, isFd: %u.",
             tilingKeyInfo_.inputLayout, tilingKeyInfo_.config, tilingKeyInfo_.quantMode, tilingKeyInfo_.hasAttenMask,
-            tilingKeyInfo_.kvLayoutType, tilingKeyInfo_.isFd, tilingKeyInfo_.hasVTail);
+            tilingKeyInfo_.kvLayoutType, tilingKeyInfo_.isFd);
 }
 
 void QuantFlashAttnTilingMxfp4Impl::CalcNumBlocks(uint32_t aicNum)
@@ -333,18 +335,6 @@ void QuantFlashAttnTilingMxfp4Impl::SetQFATilingData()
         maxBlockNumPerBatch = qfaInfo_->maxBlockNumPerBatch;
     }
     tilingData_.baseTiling.quantFlashAttnPageAttentionParams.maxBlockNumPerBatch = maxBlockNumPerBatch;
-    tilingData_.baseTiling.quantFlashAttnVTailParams.hasVTail = qfaInfo_->hasVTail ? 1 : 0;
-    tilingData_.baseTiling.quantFlashAttnVTailParams.seqUsedKvTailSize =
-        qfaInfo_->hasVTail ? static_cast<uint32_t>(qfaInfo_->bSize) : 0;
-    tilingData_.baseTiling.quantFlashAttnVTailParams.tailMaxBlockNum =
-        qfaInfo_->hasVTail ? static_cast<uint32_t>(qfaInfo_->tailMaxBlockNum) : 0;
-    auto& vTailStrides = tilingData_.baseTiling.quantFlashAttnVTailParams.vTailStrides;
-    vTailStrides.bnStride = 0;
-    vTailStrides.n2Stride = 0;
-    if (qfaInfo_->hasVTail && qfaInfo_->vTailStrides != nullptr) {
-        vTailStrides.bnStride = qfaInfo_->vTailStrides->GetStride(0);
-        vTailStrides.n2Stride = qfaInfo_->vTailStrides->GetStride(1);
-    }
     if (qfaInfo_->hasStride) {
         tilingData_.baseTiling.quantFlashAttnPageAttentionParams.maxBlockNumPerBatch = maxBlockNumPerBatch;
         tilingData_.baseTiling.quantFlashAttnBaseParams.keyStrides.bnStride = qfaInfo_->keyStrides->GetStride(0);
@@ -411,10 +401,6 @@ void QuantFlashAttnTilingMxfp4Impl::PrintAllTilingData()
     OP_LOGD(qfaInfo_->opName, "accumOutSize:%d", wsParams.accumOutSize);
     OP_LOGD(qfaInfo_->opName, "logSumExpSize:%d", wsParams.logSumExpSize);
 
-    OP_LOGD(qfaInfo_->opName, "hasVTail:%d", tilingData_.baseTiling.quantFlashAttnVTailParams.hasVTail);
-    OP_LOGD(qfaInfo_->opName, "seqUsedKvTailSize:%d",
-            tilingData_.baseTiling.quantFlashAttnVTailParams.seqUsedKvTailSize);
-    OP_LOGD(qfaInfo_->opName, "tailMaxBlockNum:%d", tilingData_.baseTiling.quantFlashAttnVTailParams.tailMaxBlockNum);
 
     OP_LOGD(qfaInfo_->opName, "tilingKey:%llu", tilingKey_);
 }

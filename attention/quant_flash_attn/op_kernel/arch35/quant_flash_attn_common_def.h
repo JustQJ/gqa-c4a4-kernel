@@ -178,37 +178,37 @@ struct FDparamsX {
 };
 
 struct RunInfoX {
-    uint32_t loop = 0;
-    uint32_t mloop = 0;
-    bool isValid = false;
-    bool isChangeBatch = false;
-    bool isFirstS2Loop = false;
-    bool isLastS2Loop = false;
+    uint32_t loop = 0; // 当前 section 内的有效 task 编号，用于流水调度和缓冲槽轮转
+    uint32_t mloop = 0; // M 块状态编号；同一 M 块的多个 S2 task 共用，用于选择 Softmax max/sum 状态槽。
+    bool isValid = false; // 当前任务描述符是否有效
+    bool isChangeBatch = false; // batch 切换标记；当前 MXFP8 CalcParams() 中设置为 false
+    bool isFirstS2Loop = false; // 是否为当前 Q 块／本核分片的第一个 S2 task，需要初始化累积状态
+    bool isLastS2Loop = false; // 是否为当前 Q 块／本核分片的最后一个 S2 task，需要结束累积并输出结果
 
-    uint32_t bIdx = 0;
-    uint32_t n2Idx = 0;
-    uint32_t gS1Idx = 0;
-    uint32_t gIdx = 0;
-    uint32_t s1Idx = 0;
-    uint32_t s2Idx = 0;
-    uint32_t realN2Idx = 0;
-    uint64_t actS1Size = 1;
-    uint64_t actS2Size = 1;
-    uint32_t actMSize = 0;
-    uint32_t actMSizeAlign32;
-    uint32_t actVecMSize;
-    uint32_t vecMbaseIdx;
+    uint32_t bIdx = 0; // batch 编号
+    uint32_t n2Idx = 0; // 原始 KV head 编号
+    uint32_t gS1Idx = 0; // 当前 M 块在合并 Q 行轴上的起始行位置，等于调度 M 块编号乘 mBaseSize
+    uint32_t gIdx = 0; // G 维组内编号的预留字段
+    uint32_t s1Idx = 0; // 当前块起点对应的 Q token 位置，由 gS1Idx 按布局换算
+    uint32_t s2Idx = 0; // 当前 task 的 KV token 起始位置，通常为 S2 块编号乘 s2BaseSize
+    uint32_t realN2Idx = 0; // DN/ND 映射后的调度 head 编号。DN 下可包含原始 G 维的区分
+    uint64_t actS1Size = 1; // 当前 batch 的实际 Q 序列长度
+    uint64_t actS2Size = 1; // 当前 batch 的实际 KV 序列长度
+    uint32_t actMSize = 0; // 当前 M 块的有效 Q 行数；尾块可能小于 mBaseSize
+    uint32_t actMSizeAlign32; // actMSize 向上对齐到 32
+    uint32_t actVecMSize; // 当前 AIV 实际负责的 Q 行数
+    uint32_t vecMbaseIdx; // 当前 AIV 在这个 M 块内的起始行偏移
 
-    uint32_t actSingleLoopS2Size = 0;
-    uint32_t actSingleLoopS2SizeAlign;
-    bool isS2SplitCore = false;
-    uint32_t faTmpOutWsPos = 0;
+    uint32_t actSingleLoopS2Size = 0; // 当前 task 实际处理的 KV token 数；尾块可能不足一个完整 N 块
+    uint32_t actSingleLoopS2SizeAlign; // 上述 KV 长度按当前实现要求对齐后的值
+    bool isS2SplitCore = false; // 当前 Q 块是否只在本核计算部分 S2，需要将部分结果交给 FD 合并
+    uint32_t faTmpOutWsPos = 0; // 当前部分结果写入 FD workspace 的槽位编号
 
-    int64_t preTokensLeftUp = 0;
-    int64_t nextTokensLeftUp = 0;
+    int64_t preTokensLeftUp = 0; // 换算到左上对齐坐标系后的左窗口范围
+    int64_t nextTokensLeftUp = 0; // 换算到左上对齐坐标系后的右窗口范围
 
-    uint64_t qPaddingBeginOffset = 0;
-    uint64_t kvPaddingBeginOffset = 0;
+    uint64_t qPaddingBeginOffset = 0; // Q 左侧 padding 偏移，供 mask 计算使用
+    uint64_t kvPaddingBeginOffset = 0; // KV 左侧 padding 偏移，供 mask 计算使用
 };
 
 struct RunInfoVTailX : RunInfoX {
@@ -223,43 +223,44 @@ struct StridesConstInfo {
 };
 
 struct CommonConstInfo {
-    uint32_t bSize;
-    uint64_t t1Size;
-    uint64_t t2Size;
-    uint32_t dSize;
-    uint32_t dSizeV;
-    uint32_t dBasicBlock;
-    uint32_t gSize;
-    uint32_t n2Size;
-    uint32_t realGSize;
-    uint32_t realN2Size;
-    uint64_t s1Size;
+    uint32_t bSize; // batch 数量
+    uint64_t t1Size; // Q 的 T 轴尺寸，供 TND、NTD 等布局寻址使用
+    uint64_t t2Size; //  KV 的 T 轴尺寸，供 TND、NTD 等布局寻址使用
+    uint32_t dSize; // Q/K 的逻辑 head dimension
+    uint32_t dSizeV; // V 的逻辑 head dimension
+    uint32_t dBasicBlock; // dSizeV 向上对齐
+    uint32_t gSize; // 原始 GQA 分组大小，通常为 Q head 数除以 KV head 数
+    uint32_t n2Size; // 原始 KV head 数
+    uint32_t realGSize; // 实际用于调度及行轴合并的 G，不合轴相当是1，不等于gSize
+    uint32_t realN2Size; // 实际用于调度的 head 数，不合轴相当于是q的head数量，合轴就是kv head的数量
+    uint64_t s1Size; // tiling 提供的 Q/KV 序列尺寸，供默认长度等逻辑使用；不是每个 batch 的实际有效长度。
     uint64_t s2Size;
-    uint64_t cuSeqLensQSize;
-    uint64_t cuSeqLensKVSize;
+    uint64_t cuSeqLensQSize; // Q 累计长度输入的规模信息，就是数组长度
+    uint64_t cuSeqLensKVSize; // KV 累计长度输入的对应规模信息
     uint64_t seqUsedQSize;
     uint64_t seqUsedKvSize;
 
-    uint32_t sparseMode;
-    uint32_t attenMaskBatch;
-    uint32_t attenMaskS1Size;
+    uint32_t sparseMode; // attention 的稀疏／mask 模式
+    uint32_t attenMaskBatch; // mask 的 batch 维尺寸
+    uint32_t attenMaskS1Size; // mask 的 Q/KV 方向尺寸
     uint32_t attenMaskS2Size;
-    int64_t preTokens;
+    int64_t preTokens; // 原始左／右窗口配置
     int64_t nextTokens;
-    float scaleValue;
+    float scaleValue; // attention score 的缩放系数，例如 1 / sqrt(D)
 
-    uint32_t aicIdx;
-    uint32_t aivIdx;
-    uint8_t subBlockIdx;
-    uint32_t coreNum;
+    uint32_t aicIdx; // 当前 AIC 编号；在 AIV 上表示其对应的 AIC 编号
+    uint32_t aivIdx; // 当前 AIV 编号
+    uint8_t subBlockIdx; // 当前 AIV 在所属 AIC 配对中的子核编号，0或1
+    uint32_t coreNum;  // FA 路径参与计算的 AIC 数量
 
-    uint32_t accumOutSize;
-    uint32_t logSumExpSize;
+    uint32_t accumOutSize; // FD 部分输出区域的容量
+    uint32_t logSumExpSize; // FD 统计量区域的容量
 
-    FA_LAYOUT outputLayout;
-    bool needInitOutput;
-    bool enableFlashDecode;
+    FA_LAYOUT outputLayout; // 输出张量布局
+    bool needInitOutput; // 是否需要初始化输出的标记
+    bool enableFlashDecode; // 运行时是否启用 FD 的标记
 
+    // 四个平面的 stride
     StridesConstInfo keyStrides;
     StridesConstInfo valueStrides;
     StridesConstInfo kDescaleStrides;
@@ -267,17 +268,17 @@ struct CommonConstInfo {
 };
 
 struct PAConstInfo {
-    uint32_t blockSize;
-    uint32_t maxBlockNumPerBatch;
-    uint32_t paLayoutType;
+    uint32_t blockSize; // page的大小
+    uint32_t maxBlockNumPerBatch; // block table 每个 batch 的条目数，用于定位对应行
+    uint32_t paLayoutType; // 分页 KV 的布局编码
 };
 
 struct LseConstInfo {
-    bool isSoftmaxLseEnable;
+    bool isSoftmaxLseEnable; // 是否输出 Softmax LSE
 };
 
 struct SinkConstInfo {
-    bool learnableSinkFlag = false;
+    bool learnableSinkFlag = false; // learnable sink 功能标记
 };
 
 struct ConstInfo_t : CommonConstInfo, PAConstInfo, LseConstInfo, SinkConstInfo {};

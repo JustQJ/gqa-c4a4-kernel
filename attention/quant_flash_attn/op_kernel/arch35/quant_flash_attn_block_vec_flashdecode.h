@@ -23,6 +23,8 @@
 #include "lib/matrix/matmul/tiling.h"
 #include "quant_flash_attn_common_def.h"
 #include "../../../common/op_kernel/arch35/vf/vf_flash_decode_arch35.h"
+#include "../../../common/op_kernel/arch35/vf/vf_basic_block_utils.h"
+#include "vf/vf_flash_decode_mxfp4.h"
 
 namespace BaseApi {
 
@@ -33,6 +35,7 @@ template <bool useDn>
 __simd_vf__ inline void CalcMinCheckValueVF(__ubuf__ float* dstUb, const float minValue, const float scaleValue,
                                             const float pScale)
 {
+    using namespace AscendC::Reg;
     RegTensor<float> vregMin;
     MaskReg pregAll = CreateMask<uint16_t, MaskPattern::ALL>();
     Duplicate(vregMin, minValue);
@@ -42,9 +45,9 @@ __simd_vf__ inline void CalcMinCheckValueVF(__ubuf__ float* dstUb, const float m
         Duplicate(vregPScale, pScale);
         Ln(vregLnPScale, vregPScale, pregAll);
         Muls(vregMin, vregMin, scaleValue, pregAll);
-        Muls(vregMin, vregMin, INV_LN2, pregAll);
+        Muls(vregMin, vregMin, FaVectorApi::INV_LN2, pregAll);
         Truncate<float, RoundMode::CAST_CEIL>(vregMin, vregMin, pregAll);
-        Muls(vregMin, vregMin, LN2, pregAll);
+        Muls(vregMin, vregMin, FaVectorApi::LN2, pregAll);
         Sub(vregMin, vregMin, vregLnPScale, pregAll);
     }
     StoreAlign<float, Reg::StoreDist::DIST_NORM_B32>((__ubuf__ float*&)dstUb, vregMin, pregAll);
@@ -79,8 +82,8 @@ public:
         uint32_t actualCombineLoopSize;
     };
 
-    // FD静态Tensor业务区总字节, 须不大于FA vec block的瞬态区(GetTransientUbSize),
-    // 供kernel侧static_assert编译期校验布局容量
+    // FD static UB bytes; the caller checks capacity of its reusable FA region.
+    // C8 uses transient scratch, while C4 uses retired PV reception/history O.
     static __aicore__ inline constexpr uint32_t GetFdTotalUbSize()
     {
         return 5U * FD_LSE_BUF_BYTES + 4U * FD_MM2_BUF_BYTES + 4U * BUFFER_SIZE_BYTE_256B;
@@ -222,9 +225,9 @@ public:
     __aicore__ inline void InitBuffers()
     {
         if ASCEND_IS_AIV {
-            // 静态Tensor布局: FD业务区落在FA vec block的瞬态区(stage2Out/stage1Out/attenMask)内,
-            // 不触碰[0, UB_FD_BASE_OFFSET)的跨核bmm区与FA保留区(softmax/vselr等跨section状态)。
-            // FA与FD分时复用同一UB, 无需TPipe Reset, 多section场景FA buffer全程有效。
+            // The caller supplies a retired FA region and validates its capacity.
+            // Preserve all bytes outside it, especially live score buffers and
+            // cross-section state. Static aliases do not reset TPipe allocations.
             constexpr uint32_t OFF_SUM1 = UB_FD_BASE_OFFSET;
             constexpr uint32_t OFF_SUM2 = OFF_SUM1 + FD_LSE_BUF_BYTES;
             constexpr uint32_t OFF_MAX1 = OFF_SUM2 + FD_LSE_BUF_BYTES;
@@ -364,6 +367,7 @@ protected:
         AscendC::PipeBarrier<PIPE_V>();
     }
 
+    template <bool UseMxfp4CxQuant = true>
     __aicore__ inline void ComputeScaleValue(LocalTensor<T>& lseExp, uint32_t dealRowCount,
                                              uint32_t actualCombineLoopSize, uint32_t cntM, uint32_t startRow)
     {
@@ -371,12 +375,22 @@ protected:
         LocalTensor<T> lseMax = (cntM & 1) == 0 ? fdMaxBuf1_ : fdMaxBuf2_;
         LocalTensor<T> lseMaxUb = (cntM & 1) == 0 ? fdLseMaxUbBuf1_ : fdLseMaxUbBuf2_;
 
+        if constexpr (IsSameType<INPUT_T, fp4x2_e2m1_t>::value) {
+            // The C4 path reuses the 256B min-check area for eight padded sums.
+            Mxfp4Api::PrepareFlashDecodeVf<UseMxfp4CxQuant>(
+                (__ubuf__ float*)lseMax.GetPhyAddr(), (__ubuf__ float*)lseSum.GetPhyAddr(),
+                (__ubuf__ float*)lseExp.GetPhyAddr(), (__ubuf__ float*)fdLseUbBuf_.GetPhyAddr(),
+                (__ubuf__ float*)lseMaxUb.GetPhyAddr(), (__ubuf__ float*)fdMinCheckBuf_.GetPhyAddr(),
+                dealRowCount, actualCombineLoopSize);
+            return;
+        }
+
         LocalTensor<T> sinkExpBuf;
         LocalTensor<T> maxLseUb = fdLseUbBuf_;
         // minCheckValue 经 UB 传入 VF（__simd_vf__ 末位运行时标量在 AIV 首次调用会丢失，
         // 会导致 LSE 在合法的 ln2 量化边界 max=0.0 行误输出 inf）
         CalcMinCheckValue();
-        ComputeScaleValue_VF_FD_MinUb(sinkExpBuf, lseMax, lseSum, lseExp, maxLseUb, lseMaxUb, fdMinCheckBuf_,
+        FaVectorApi::ComputeScaleValue_VF_FD_MinUb(sinkExpBuf, lseMax, lseSum, lseExp, maxLseUb, lseMaxUb, fdMinCheckBuf_,
                                       dealRowCount, actualCombineLoopSize, constInfo_.isSoftmaxLseEnable, false);
     }
 
@@ -433,19 +447,29 @@ protected:
                                           uint32_t cntKV, uint32_t dealRowCount)
     {
         uint64_t dSizeV_Align = (uint64_t)this->dSizeV_Align_;
-        ReduceFinalRes_VF<T>(reduceOut, lseLocal, mm2Res, dealRowCount, dSizeV_Align, cntKV);
+        FaVectorApi::ReduceFinalRes_VF<T>(reduceOut, lseLocal, mm2Res, dealRowCount, dSizeV_Align, cntKV);
     }
     __aicore__ inline void CopyFinalResOut(LocalTensor<T>& accumOutLocal, uint32_t startRow, uint32_t dealRowCount,
                                            uint32_t cntM)
     {
         LocalTensor<OUTPUT_T> tmpBmm2ResCastTensor = fdOutputBuf_;
         AscendC::PipeBarrier<PIPE_V>();
+        if constexpr (IsSameType<INPUT_T, fp4x2_e2m1_t>::value) {
+            Mxfp4Api::NormalizeFlashDecodeVf((__ubuf__ float*)accumOutLocal.GetPhyAddr(),
+                (__ubuf__ float*)fdMinCheckBuf_.GetPhyAddr(), dealRowCount, this->dSizeV_Align_);
+            AscendC::PipeBarrier<PIPE_V>();
+        }
         DealInvalidRows(accumOutLocal, startRow, dealRowCount, this->dSizeV_Align_);
-        DealInvalidMaskRows(accumOutLocal, startRow, dealRowCount, this->dSizeV_Align_, cntM);
+        if constexpr (!IsSameType<INPUT_T, fp4x2_e2m1_t>::value) {
+            DealInvalidMaskRows(accumOutLocal, startRow, dealRowCount, this->dSizeV_Align_, cntM);
+        }
         Mutex::Lock<PIPE_V>(SYNC_FDOUTPUT_BUF_FLAG);
         uint32_t shapeArray[] = {dealRowCount, (uint32_t)constInfo_.dSizeV};
         tmpBmm2ResCastTensor.SetShapeInfo(ShapeInfo(2, shapeArray, DataFormat::ND));
-        if constexpr (IsSameType<OUTPUT_T, bfloat16_t>::value) {
+        // C4 must use the same ties-away conversion as its non-FD V2 output.
+        // Keep the existing ties-even BF16 behavior for the C8 path.
+        if constexpr (IsSameType<OUTPUT_T, bfloat16_t>::value &&
+                      !IsSameType<INPUT_T, fp4x2_e2m1_t>::value) {
             Cast(tmpBmm2ResCastTensor, accumOutLocal, AscendC::RoundMode::CAST_RINT,
                  dealRowCount * this->dSizeV_Align_);
         } else {
@@ -467,10 +491,10 @@ protected:
         fa_base_vector::GetSafeActToken(actSeqLensQ_, actSeqLensKv_, safePreToken, safeNextToken,
                                         constInfo_.sparseMode);
 
-        if (constInfo_.sparseMode == BAND) {
+        if (constInfo_.sparseMode == fa_base_vector::BAND) {
             preTokensPerBatch_ = safePreToken;
             nextTokensPerBatch_ = actSeqLensKv_ - actSeqLensQ_ + safeNextToken;
-        } else if ((constInfo_.sparseMode == DEFAULT_MASK) && HAS_MASK) {
+        } else if ((constInfo_.sparseMode == fa_base_vector::DEFAULT_MASK) && HAS_MASK) {
             nextTokensPerBatch_ = safeNextToken;
             preTokensPerBatch_ = actSeqLensKv_ - actSeqLensQ_ + safePreToken;
         } else {
@@ -487,7 +511,7 @@ protected:
             return;
         }
 
-        if (constInfo_.sparseMode == ALL_MASK || constInfo_.sparseMode == LEFT_UP_CAUSAL) {
+        if (constInfo_.sparseMode == fa_base_vector::ALL_MASK || constInfo_.sparseMode == fa_base_vector::LEFT_UP_CAUSAL) {
             return;
         }
 
@@ -512,7 +536,7 @@ protected:
         if constexpr (!HAS_MASK) {
             return;
         }
-        if (constInfo_.sparseMode != DEFAULT_MASK && constInfo_.sparseMode != ALL_MASK) {
+        if (constInfo_.sparseMode != fa_base_vector::DEFAULT_MASK && constInfo_.sparseMode != fa_base_vector::ALL_MASK) {
             return;
         }
         LocalTensor<T> lseMaxUb = (cntM & 1) == 0 ? fdLseMaxUbBuf1_ : fdLseMaxUbBuf2_;
@@ -526,12 +550,20 @@ protected:
     }
 
 public:
+    template <bool UseMxfp4CxQuant = true>
     __aicore__ inline void FlashDecode(FDparamsX& fd)
     {
         if (!fd.fdCoreEnable) {
             return;
         }
         uint32_t fdBalanceMBaseSize = 8U;
+        if constexpr (IsSameType<INPUT_T, float4_e2m1x2_t>::value) {
+            // Each split carries eight FP32 copies per row. 32 splits require
+            // 8192 bytes for eight rows, exceeding the 6144-byte statistics slot.
+            ASSERT(fd.fdS2SplitNum != 0 && fd.fdS2SplitNum <= FD_LSE_BUF_BYTES / (8U * sizeof(T)));
+            fdBalanceMBaseSize = AttentionCommon::Min(fdBalanceMBaseSize,
+                static_cast<uint32_t>(FD_LSE_BUF_BYTES / (fd.fdS2SplitNum * 8U * sizeof(T))));
+        }
         uint32_t fdBalanceMSplitNum = (fd.mLen + fdBalanceMBaseSize - 1) / fdBalanceMBaseSize;
         uint32_t fdBalanceMTailSize =
             (fd.mLen % fdBalanceMBaseSize == 0) ? fdBalanceMBaseSize : fd.mLen % fdBalanceMBaseSize;
@@ -569,7 +601,7 @@ public:
             }
             Mutex::Lock<PIPE_V>(SYNC_LSE_MAX_SUM_BUF1_FLAG + (reduceMLoop & 1));
             Mutex::Lock<PIPE_V>(SYNC_LSEOUTPUT_BUF_FLAG);
-            ComputeScaleValue(lseExp, actualGSplitSize, taskInfo_.actualCombineLoopSize, reduceMLoop, startRow);
+            ComputeScaleValue<UseMxfp4CxQuant>(lseExp, actualGSplitSize, taskInfo_.actualCombineLoopSize, reduceMLoop, startRow);
             Mutex::Unlock<PIPE_V>(SYNC_LSEOUTPUT_BUF_FLAG);
             Mutex::Unlock<PIPE_V>(SYNC_LSE_MAX_SUM_BUF1_FLAG + (reduceMLoop & 1));
             CalcPreNextTokens();
