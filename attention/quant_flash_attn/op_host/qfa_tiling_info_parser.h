@@ -137,6 +137,7 @@ private:
 
     // Quant
     QfaQuantMode quantMode_ = QfaQuantMode::A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32;
+    int64_t quantSchema_ = 2;
     int64_t blockSize_ = 0;
 
     // Sinks

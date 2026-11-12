@@ -10,8 +10,10 @@
 #ifndef QFA_VF_OUTPUT_UPDATE_FP32_MXFP4_H_
 #define QFA_VF_OUTPUT_UPDATE_FP32_MXFP4_H_
 #include "vf_softmax_fp32_mxfp4.h"
+#include "../quant_flash_attn_mxfp4_common.h"
 
 namespace Mxfp4Api {
+using BaseApi::QuantSchema;
 
 
 // historyOutput/groupResult: FP32 [Dv,64]；groupSum/historySum/multiplier: FP32 [64]。
@@ -525,7 +527,7 @@ __aicore__ inline void processOutNd(const LocalTensor<OutputType>& output,
 }
 
 // LSE 使用自然对数参考；FD 输出 [64,8] 的原始 sum/整数 R，保持 workspace 形状不变。
-template <bool UseCxQuant = true, bool BinaryFdReference = false>
+template <QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT, bool BinaryFdReference = false>
 __simd_vf__ inline void PrepareAttentionStatisticsVf(__ubuf__ float* lseOutput,
     __ubuf__ float* broadcastSum, __ubuf__ float* broadcastReference,
     __ubuf__ float* historySum, __ubuf__ float* groupReference)
@@ -540,8 +542,12 @@ __simd_vf__ inline void PrepareAttentionStatisticsVf(__ubuf__ float* lseOutput,
     Duplicate(invalidValues, INVALID_GROUP_EXPONENT);
     Compares<float, CMPMODE::GT>(nonemptyRows, rowSum, 0.0F, allRows);
     Select(reference, reference, oneValues, nonemptyRows);
+    if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
+        // Pscale includes 2^-ceil(log2(cx)); undo it when restoring score LSE.
+        Adds(reference, reference, MXFP4_CX_SCALE_SHIFT, allRows);
+    }
     Muls(reference, reference, MXFP4_LN2, allRows);
-    if constexpr (UseCxQuant) {
+    if constexpr (QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT) {
         Adds(reference, reference, MXFP4_NEG_LN_DELTA, allRows);
     }
     Select(reference, reference, invalidValues, nonemptyRows);
@@ -575,7 +581,7 @@ __simd_vf__ inline void PrepareAttentionStatisticsVf(__ubuf__ float* lseOutput,
     }
     {
         if constexpr (BinaryFdReference) {
-            // FD combines raw PV with exact powers of two, then normalizes once.
+            // FD builds a_i from binary references, then merges raw PV with a_i / S.
             LoadAlign(reference, groupReference);
             Select(reference, reference, invalidValues, nonemptyRows);
         }
@@ -599,12 +605,12 @@ __simd_vf__ inline void PrepareAttentionStatisticsVf(__ubuf__ float* lseOutput,
 
 // DN/ND 共用：输入[64] FP32；sum/reference输出[64,8]，LSE每行预留8个float但只写第0列。
 // 只转换 LocalTensor 地址；流水同步由调用方负责。
-template <bool UseCxQuant = true, bool BinaryFdReference = false>
+template <QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT, bool BinaryFdReference = false>
 __aicore__ inline void PrepareAttentionStatistics(const LocalTensor<float>& lseOutput,
     const LocalTensor<float>& broadcastSum, const LocalTensor<float>& broadcastReference,
     const LocalTensor<float>& historySum, const LocalTensor<float>& groupReference)
 {
-    PrepareAttentionStatisticsVf<UseCxQuant, BinaryFdReference>((__ubuf__ float*)lseOutput.GetPhyAddr(),
+    PrepareAttentionStatisticsVf<QUANT_SCHEMA, BinaryFdReference>((__ubuf__ float*)lseOutput.GetPhyAddr(),
         (__ubuf__ float*)broadcastSum.GetPhyAddr(), (__ubuf__ float*)broadcastReference.GetPhyAddr(),
         (__ubuf__ float*)historySum.GetPhyAddr(), (__ubuf__ float*)groupReference.GetPhyAddr());
 }

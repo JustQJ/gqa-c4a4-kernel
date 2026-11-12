@@ -101,6 +101,7 @@ constexpr uint32_t ATTR_LAYOUT_Q_DESCALE_INDEX = 8;
 constexpr uint32_t ATTR_LAYOUT_KV_INDEX = 9;
 constexpr uint32_t ATTR_LAYOUT_OUT_INDEX = 10;
 constexpr uint32_t ATTR_RETURN_LSE_INDEX = 11;
+constexpr uint32_t ATTR_QUANT_SCHEMA_INDEX = 12;
 
 // Output Index
 constexpr uint32_t ATTN_OUT_INDEX = 0;
@@ -212,6 +213,7 @@ struct QfaParaInfo {
     QfaOptionalParaInfo sequsedVTail = {nullptr, nullptr};
 
     const int64_t* quantMode = nullptr;
+    const int64_t* quantSchema = nullptr;
     const float* softmaxScale = nullptr;
     const int64_t* maskMode = nullptr;
     const int64_t* winLeft = nullptr;
@@ -257,6 +259,7 @@ public:
 
     // Quant Param
     QfaQuantMode quantMode = QfaQuantMode::A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32;
+    int64_t quantSchema = 2; // MXFP4 P: 0=OCP, 1=CX, 2=CX Delta. Other quant modes use the default only.
 
     // PageAttention
     bool pageAttentionFlag = false; // 是否使用分页 KV；由 KV layout 是否为 PA 类型决定。

@@ -367,7 +367,7 @@ protected:
         AscendC::PipeBarrier<PIPE_V>();
     }
 
-    template <bool UseMxfp4CxQuant = true>
+    template <QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT>
     __aicore__ inline void ComputeScaleValue(LocalTensor<T>& lseExp, uint32_t dealRowCount,
                                              uint32_t actualCombineLoopSize, uint32_t cntM, uint32_t startRow)
     {
@@ -376,12 +376,11 @@ protected:
         LocalTensor<T> lseMaxUb = (cntM & 1) == 0 ? fdLseMaxUbBuf1_ : fdLseMaxUbBuf2_;
 
         if constexpr (IsSameType<INPUT_T, fp4x2_e2m1_t>::value) {
-            // The C4 path reuses the 256B min-check area for eight padded sums.
-            Mxfp4Api::PrepareFlashDecodeVf<UseMxfp4CxQuant>(
+            // C4 merges raw PV with normalized a_i / S multipliers.
+            Mxfp4Api::PrepareFlashDecodeVf<QUANT_SCHEMA>(
                 (__ubuf__ float*)lseMax.GetPhyAddr(), (__ubuf__ float*)lseSum.GetPhyAddr(),
                 (__ubuf__ float*)lseExp.GetPhyAddr(), (__ubuf__ float*)fdLseUbBuf_.GetPhyAddr(),
-                (__ubuf__ float*)lseMaxUb.GetPhyAddr(), (__ubuf__ float*)fdMinCheckBuf_.GetPhyAddr(),
-                dealRowCount, actualCombineLoopSize);
+                (__ubuf__ float*)lseMaxUb.GetPhyAddr(), dealRowCount, actualCombineLoopSize);
             return;
         }
 
@@ -454,11 +453,6 @@ protected:
     {
         LocalTensor<OUTPUT_T> tmpBmm2ResCastTensor = fdOutputBuf_;
         AscendC::PipeBarrier<PIPE_V>();
-        if constexpr (IsSameType<INPUT_T, fp4x2_e2m1_t>::value) {
-            Mxfp4Api::NormalizeFlashDecodeVf((__ubuf__ float*)accumOutLocal.GetPhyAddr(),
-                (__ubuf__ float*)fdMinCheckBuf_.GetPhyAddr(), dealRowCount, this->dSizeV_Align_);
-            AscendC::PipeBarrier<PIPE_V>();
-        }
         DealInvalidRows(accumOutLocal, startRow, dealRowCount, this->dSizeV_Align_);
         if constexpr (!IsSameType<INPUT_T, fp4x2_e2m1_t>::value) {
             DealInvalidMaskRows(accumOutLocal, startRow, dealRowCount, this->dSizeV_Align_, cntM);
@@ -550,7 +544,7 @@ protected:
     }
 
 public:
-    template <bool UseMxfp4CxQuant = true>
+    template <QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT>
     __aicore__ inline void FlashDecode(FDparamsX& fd)
     {
         if (!fd.fdCoreEnable) {
@@ -601,7 +595,7 @@ public:
             }
             Mutex::Lock<PIPE_V>(SYNC_LSE_MAX_SUM_BUF1_FLAG + (reduceMLoop & 1));
             Mutex::Lock<PIPE_V>(SYNC_LSEOUTPUT_BUF_FLAG);
-            ComputeScaleValue<UseMxfp4CxQuant>(lseExp, actualGSplitSize, taskInfo_.actualCombineLoopSize, reduceMLoop, startRow);
+            ComputeScaleValue<QUANT_SCHEMA>(lseExp, actualGSplitSize, taskInfo_.actualCombineLoopSize, reduceMLoop, startRow);
             Mutex::Unlock<PIPE_V>(SYNC_LSEOUTPUT_BUF_FLAG);
             Mutex::Unlock<PIPE_V>(SYNC_LSE_MAX_SUM_BUF1_FLAG + (reduceMLoop & 1));
             CalcPreNextTokens();

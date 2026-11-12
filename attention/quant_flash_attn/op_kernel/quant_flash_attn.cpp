@@ -363,7 +363,8 @@ __aicore__ inline void quant_flash_attn_mxfp8(
 
 // quant flash attn fullquant mxfp4
 template <uint8_t inOutLayoutType, uint16_t config, uint8_t quantMode, bool hasAttenMask, uint8_t KvLayoutType,
-          bool isFd>
+          bool isFd, bool enableQf322F32Pre = false,
+          BaseApi::QuantSchema QUANT_SCHEMA = BaseApi::QuantSchema::CX_DELTA_QUANT>
 __aicore__ inline void quant_flash_attn_mxfp4(
     __gm__ uint8_t* query, __gm__ uint8_t* key, __gm__ uint8_t* value, __gm__ uint8_t* dequantScaleQuery,
     __gm__ uint8_t* dequantScaleKey, __gm__ uint8_t* dequantScaleValue, __gm__ uint8_t* blockTable,
@@ -393,11 +394,12 @@ __aicore__ inline void quant_flash_attn_mxfp4(
     
     using CubeBlock =
         BaseApi::QuantFlashAttnBlockCubeMxfp4<INPUT_T, float, inputLayoutType, s1TemplateType, s2TemplateType,
-                                              dTemplateType, dVTemplateType, KvLayoutType, useDn, isDAligned>;
+                                              dTemplateType, dVTemplateType, KvLayoutType, useDn, isDAligned,
+                                              enableQf322F32Pre>;
     using VecFaBlock =
         BaseApi::QuantFlashAttnBlockVecMxfp4<INPUT_T, float, OUT_T, inputLayoutType, outputLayoutType, s1TemplateType,
                                              s2TemplateType, dTemplateType, dVTemplateType, hasAttenMask, KvLayoutType,
-                                             isFd, useDn, isDAligned>;
+                                             isFd, useDn, isDAligned, QUANT_SCHEMA, enableQf322F32Pre>;
     using VecFdBlock =
         BaseApi::QuantFlashAttnBlockVecFlashDecode<INPUT_T, float, OUT_T, inputLayoutType, outputLayoutType,
                                                    s1TemplateType, s2TemplateType, dTemplateType, dVTemplateType,
@@ -405,11 +407,12 @@ __aicore__ inline void quant_flash_attn_mxfp4(
 
     using CubeBlockDummy =
         BaseApi::QuantFlashAttnBlockCubeMxfp4Dummy<INPUT_T, float, inputLayoutType, s1TemplateType, s2TemplateType,
-                                                   dTemplateType, dVTemplateType, KvLayoutType, useDn>;
+                                                   dTemplateType, dVTemplateType, KvLayoutType, useDn,
+                                                   enableQf322F32Pre>;
     using VecFaBlockDummy =
         BaseApi::QuantFlashAttnBlockVecMxfp4Dummy<INPUT_T, float, OUT_T, inputLayoutType, outputLayoutType,
                                                   s1TemplateType, s2TemplateType, dTemplateType, dVTemplateType,
-                                                  hasAttenMask, KvLayoutType, isFd, useDn>;
+                                                  hasAttenMask, KvLayoutType, isFd, useDn, isDAligned, QUANT_SCHEMA, enableQf322F32Pre>;
     using VecFdBlockDummy =
         BaseApi::QuantFlashAttnBlockVecFlashDecodeDummy<INPUT_T, float, OUT_T, inputLayoutType, outputLayoutType,
                                                         s1TemplateType, s2TemplateType, dTemplateType, dVTemplateType,
@@ -591,9 +594,24 @@ __global__ __aicore__ void quant_flash_attn(
 #elif (ORIG_DTYPE_Q == DT_FLOAT4_E2M1)
     if constexpr (quantMode == QFA_MXFP4_FP32_PREFILL ||
                   quantMode == QFA_MXFP4_FP32_DECODE) {
-        quant_flash_attn_mxfp4<inOutLayoutType, config, quantMode, hasAttenMask, KvLayoutType, isFd>(
-            query, key, value, dequantScaleQuery, dequantScaleKey, dequantScaleValue, blockTable, pScale, cuSeqLensQ,
-            cuSeqLensKv, sequsedQ, sequsedKv, sinks, attnMask, metadata, attnOut, softmaxLse, user, tilingData);
+        // Uniform dispatch before constructing the pipeline; hot loops remain compile-time specialized.
+        const auto quantSchema =
+            static_cast<BaseApi::QuantSchema>(tilingData.baseTiling.quantFlashAttnBaseParams.quantSchema);
+        if (quantSchema == BaseApi::QuantSchema::OCP_QUANT) {
+            quant_flash_attn_mxfp4<inOutLayoutType, config, quantMode, hasAttenMask, KvLayoutType, isFd,
+                                  false, BaseApi::QuantSchema::OCP_QUANT>(
+                query, key, value, dequantScaleQuery, dequantScaleKey, dequantScaleValue, blockTable, pScale, cuSeqLensQ,
+                cuSeqLensKv, sequsedQ, sequsedKv, sinks, attnMask, metadata, attnOut, softmaxLse, user, tilingData);
+        } else if (quantSchema == BaseApi::QuantSchema::CX_QUANT) {
+            quant_flash_attn_mxfp4<inOutLayoutType, config, quantMode, hasAttenMask, KvLayoutType, isFd,
+                                  false, BaseApi::QuantSchema::CX_QUANT>(
+                query, key, value, dequantScaleQuery, dequantScaleKey, dequantScaleValue, blockTable, pScale, cuSeqLensQ,
+                cuSeqLensKv, sequsedQ, sequsedKv, sinks, attnMask, metadata, attnOut, softmaxLse, user, tilingData);
+        } else {
+            quant_flash_attn_mxfp4<inOutLayoutType, config, quantMode, hasAttenMask, KvLayoutType, isFd>(
+                query, key, value, dequantScaleQuery, dequantScaleKey, dequantScaleValue, blockTable, pScale, cuSeqLensQ,
+                cuSeqLensKv, sequsedQ, sequsedKv, sinks, attnMask, metadata, attnOut, softmaxLse, user, tilingData);
+        }
     }
 #endif
 }

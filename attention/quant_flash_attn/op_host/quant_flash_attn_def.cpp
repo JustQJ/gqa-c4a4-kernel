@@ -180,6 +180,7 @@ public:
         this->Attr("layout_kv").AttrType(OPTIONAL).String("BSND");
         this->Attr("layout_out").AttrType(OPTIONAL).String("BSND");
         this->Attr("return_softmax_lse").AttrType(OPTIONAL).Bool(false);
+        this->Attr("quant_schema").AttrType(OPTIONAL).Int(2);
 
         OpAICoreConfig aicore_config_95;
         aicore_config_95.DynamicCompileStaticFlag(true)

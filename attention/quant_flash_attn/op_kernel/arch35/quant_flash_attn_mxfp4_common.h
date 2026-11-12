@@ -23,6 +23,13 @@
 #include "../../../common/op_kernel/vector_common.h"
 
 namespace BaseApi {
+// Values match the public quant_schema attribute. Q/K/V encoding is unchanged.
+enum class QuantSchema : uint8_t {
+    OCP_QUANT = 0,
+    CX_QUANT = 1,
+    CX_DELTA_QUANT = 2,
+};
+
 using fa_base_matmul::Buffer;
 using fa_base_matmul::BufferManager;
 using fa_base_matmul::BufferType;

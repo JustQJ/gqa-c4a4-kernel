@@ -10,8 +10,10 @@
 #ifndef QFA_VF_SOFTMAX_FP32_MXFP4_H_
 #define QFA_VF_SOFTMAX_FP32_MXFP4_H_
 #include "kernel_operator.h"
+#include "../quant_flash_attn_mxfp4_common.h"
 
 namespace Mxfp4Api {
+using BaseApi::QuantSchema;
 using namespace AscendC;
 using namespace AscendC::Reg;
 
@@ -20,7 +22,10 @@ constexpr uint32_t QUANT_GROUP_SIZE = 32;
 constexpr float INVALID_GROUP_EXPONENT = -3.402823466e+38F;
 constexpr float MXFP4_LN2 = 0.6931471805599453F;
 constexpr float MXFP4_INV_LN2 = 1.4426950408889634F;
+constexpr float MXFP4_NEG_LOG2_CX_DELTA = -2.273018494406416F; // -log2(7.25/1.5)
 constexpr float MXFP4_NEG_LOG2_CX = -2.8579809951275723F; // -log2(7.25)
+constexpr float MXFP4_CX_SCALE_SHIFT = 3.0F; // ceil(log2(7.25))，ceil(log2(7.25/1.5))
+constexpr float MXFP4_CX_PSCALE_BIAS = 127.0F - MXFP4_CX_SCALE_SHIFT;
 constexpr float MXFP4_NEG_LN_DELTA = -0.4054651081081644F; // -ln(1.5)
 constexpr float MXFP4_NEG_TWO_VALUE = -2.0F;
 // The final FP32 quotient can lie one ULP below a BF16 midpoint. A one-ULP
@@ -73,7 +78,7 @@ __simd_vf__ inline void InitProbabilityPackingIndicesVf(__ubuf__ uint8_t* byteIn
 
 // Full DN chunks retain only the last eight columns during the S32 max pass.
 // Tail/causal chunks use the general path; this path has no additional UB.
-template <uint32_t ChunkN, bool UseCxQuant, bool ScorePreScaled>
+template <uint32_t ChunkN, QuantSchema QUANT_SCHEMA, bool ScorePreScaled>
 __simd_vf__ inline void SoftmaxDnResidentEightVf(__ubuf__ uint8_t* packedPUb,
     __ubuf__ float* groupMaxUb, __ubuf__ float* globalMaxUb, __ubuf__ float* scoreUb,
     float scoreScale)
@@ -111,17 +116,19 @@ __simd_vf__ inline void SoftmaxDnResidentEightVf(__ubuf__ uint8_t* packedPUb,
             Muls(curr_group_max, curr_group_max, scoreScale, preg_135);
         }
         Muls(curr_group_max, curr_group_max, MXFP4_INV_LN2, preg_135);
-        if constexpr (UseCxQuant) {
-            Adds(curr_group_max, curr_group_max, MXFP4_NEG_LOG2_CX, preg_135);
+        if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
+            Adds(curr_group_max, curr_group_max, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? MXFP4_NEG_LOG2_CX_DELTA : MXFP4_NEG_LOG2_CX, preg_135);
             Truncate<float, RoundMode::CAST_CEIL>(curr_group_max, curr_group_max, preg_135);
         } else {
             Truncate<float, RoundMode::CAST_FLOOR>(curr_group_max, curr_group_max, preg_135);
         }
         Max(global_group_max, global_group_max, curr_group_max, preg_135);
         StoreAlign(groupMaxUb + group * 64, curr_group_max, preg_135);
-        if constexpr (UseCxQuant) {
+        if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
             Muls(curr_group_max, curr_group_max, MXFP4_LN2, preg_135);
-            Adds(curr_group_max, curr_group_max, MXFP4_NEG_LN_DELTA, preg_135);
+            if constexpr (QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT) {
+                Adds(curr_group_max, curr_group_max, MXFP4_NEG_LN_DELTA, preg_135);
+            }
         } else {
             Adds(curr_group_max, curr_group_max, MXFP4_NEG_TWO_VALUE, preg_135);
             Muls(curr_group_max, curr_group_max, MXFP4_LN2, preg_135);
@@ -268,7 +275,7 @@ __simd_vf__ inline void SoftmaxDnResidentEightVf(__ubuf__ uint8_t* packedPUb,
 // validQueryRows 当前仅保留接口，DN始终计算64行；要求0<validKvTokens<=ChunkN，空chunk由调用方跳过。
 // alignedKvTokens32/64 分别为有效KV数量向32/64对齐；调用方预清零P并将小组指数初始化为无效哨兵。
 template <uint32_t ChunkN = 128, uint32_t TaskN = 256,
-          bool HasMask = true, bool UseCxQuant = true,
+          bool HasMask = true, QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT,
           bool ResetGroupMax = false, bool ScorePreScaled = false>
 __simd_vf__ inline void SoftmaxQuantizeDnChunkFp32Vf(
     __ubuf__ uint8_t* packedPUb,
@@ -392,9 +399,9 @@ __simd_vf__ inline void SoftmaxQuantizeDnChunkFp32Vf(
 
     // 基于cx的fp4量化优化
     // cx= 7.25，k_g = ceil(max_valid(s_g)/ln2 - log2(cx))
-    // delta=1.5，u_g = exp(s_g - (k_g*ln2 - ln(delta)))
-    if constexpr (UseCxQuant) {
-        Adds(curr_group_max, curr_group_max, MXFP4_NEG_LOG2_CX, preg_135);
+    // CX_QUANT: u_g=exp(s_g-k_g*ln2); only CX_DELTA_QUANT applies delta=1.5.
+    if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
+        Adds(curr_group_max, curr_group_max, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? MXFP4_NEG_LOG2_CX_DELTA : MXFP4_NEG_LOG2_CX, preg_135);
         Truncate<float, RoundMode::CAST_CEIL>(curr_group_max, curr_group_max, preg_135);
     } else {
         // 标准fp4量化
@@ -406,9 +413,11 @@ __simd_vf__ inline void SoftmaxQuantizeDnChunkFp32Vf(
     Max<float, MaskMergeMode::MERGING>(global_group_max, global_group_max, curr_group_max, group_hasvalid);
     StoreAlign<float, Reg::StoreDist::DIST_NORM_B32>(groupMaxUb, curr_group_max, group_hasvalid);
 
-    if constexpr (UseCxQuant) {
+    if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
         Muls(curr_group_max, curr_group_max, MXFP4_LN2, preg_135); // k_g*ln2
-        Adds(curr_group_max, curr_group_max, MXFP4_NEG_LN_DELTA, preg_135);  // k_g*ln2 - ln(delta)
+        if constexpr (QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT) {
+            Adds(curr_group_max, curr_group_max, MXFP4_NEG_LN_DELTA, preg_135);  // k_g*ln2 - ln(delta)
+        }
     } else {
         Adds(curr_group_max, curr_group_max, MXFP4_NEG_TWO_VALUE, preg_135); // -2
         Muls(curr_group_max, curr_group_max, MXFP4_LN2, preg_135);
@@ -523,8 +532,8 @@ __simd_vf__ inline void SoftmaxQuantizeDnChunkFp32Vf(
             Muls(next_group_max, next_group_max, scoreScale, preg_135); // 乘以scale
         }
         Muls(next_group_max, next_group_max, MXFP4_INV_LN2, preg_135);
-        if constexpr (UseCxQuant) {
-            Adds(next_group_max, next_group_max, MXFP4_NEG_LOG2_CX, preg_135);
+        if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
+            Adds(next_group_max, next_group_max, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? MXFP4_NEG_LOG2_CX_DELTA : MXFP4_NEG_LOG2_CX, preg_135);
             Truncate<float, RoundMode::CAST_CEIL>(next_group_max, next_group_max, preg_135);
         } else {
             Truncate<float, RoundMode::CAST_FLOOR>(next_group_max, next_group_max, preg_135);
@@ -532,9 +541,13 @@ __simd_vf__ inline void SoftmaxQuantizeDnChunkFp32Vf(
         Max<float, MaskMergeMode::MERGING>(global_group_max, global_group_max, next_group_max, group_hasvalid);
         StoreAlign<float, Reg::StoreDist::DIST_NORM_B32>(groupMaxUb + ((i + 1) * VEC1_ROWS), next_group_max, group_hasvalid);
 
-        if constexpr (UseCxQuant) {
-            Muls(next_group_max, next_group_max, MXFP4_LN2, preg_135);
-            Adds(curr_group_max, next_group_max, MXFP4_NEG_LN_DELTA, preg_135);
+        if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
+            if constexpr (QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT) {
+                Muls(next_group_max, next_group_max, MXFP4_LN2, preg_135);
+                Adds(curr_group_max, next_group_max, MXFP4_NEG_LN_DELTA, preg_135);
+            } else {
+                Muls(curr_group_max, next_group_max, MXFP4_LN2, preg_135);
+            }
         } else {
             Adds(next_group_max, next_group_max, MXFP4_NEG_TWO_VALUE, preg_135);
             Muls(curr_group_max, next_group_max, MXFP4_LN2, preg_135);
@@ -644,7 +657,7 @@ __simd_vf__ inline void SoftmaxQuantizeDnChunkFp32Vf(
 // causal可见条件为 queryRow>=causalFirstRow+kvIndex*causalRowStep（HasMask=true）；kvIndex为chunk内索引。
 // causalRowStep为合轴G，causalFirstRow为第一个KV的最早可见本地Q行，可为负数，允许token的G跨M块。
 template <uint32_t ChunkN, uint32_t TaskN,
-          bool HasMask, bool UseCxQuant = true, bool ScorePreScaled = false>
+          bool HasMask, QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT, bool ScorePreScaled = false>
 __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
     __ubuf__ uint8_t* packedPUb, __ubuf__ float* groupMaxUb, __ubuf__ float* globalMaxUb,
     __ubuf__ float* scoreUb, __ubuf__ uint8_t* ByteIdxUb, __ubuf__ uint16_t* HalfIdxUb,
@@ -774,11 +787,11 @@ __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
             Muls(exponent1, exponent1, MXFP4_INV_LN2, groupValid1);
             Muls(exponent2, exponent2, MXFP4_INV_LN2, groupValid2);
             Muls(exponent3, exponent3, MXFP4_INV_LN2, groupValid3);
-            if constexpr (UseCxQuant) {
-                Adds(exponent0, exponent0, MXFP4_NEG_LOG2_CX, groupValid0);
-                Adds(exponent1, exponent1, MXFP4_NEG_LOG2_CX, groupValid1);
-                Adds(exponent2, exponent2, MXFP4_NEG_LOG2_CX, groupValid2);
-                Adds(exponent3, exponent3, MXFP4_NEG_LOG2_CX, groupValid3);
+            if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
+                Adds(exponent0, exponent0, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? MXFP4_NEG_LOG2_CX_DELTA : MXFP4_NEG_LOG2_CX, groupValid0);
+                Adds(exponent1, exponent1, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? MXFP4_NEG_LOG2_CX_DELTA : MXFP4_NEG_LOG2_CX, groupValid1);
+                Adds(exponent2, exponent2, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? MXFP4_NEG_LOG2_CX_DELTA : MXFP4_NEG_LOG2_CX, groupValid2);
+                Adds(exponent3, exponent3, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? MXFP4_NEG_LOG2_CX_DELTA : MXFP4_NEG_LOG2_CX, groupValid3);
                 Truncate<float, RoundMode::CAST_CEIL>(exponent0, exponent0, groupValid0);
                 Truncate<float, RoundMode::CAST_CEIL>(exponent1, exponent1, groupValid1);
                 Truncate<float, RoundMode::CAST_CEIL>(exponent2, exponent2, groupValid2);
@@ -805,15 +818,17 @@ __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
 
 
 
-            if constexpr (UseCxQuant) {
+            if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
                 Muls(exponent0, exponent0, MXFP4_LN2, groupValid0);
                 Muls(exponent1, exponent1, MXFP4_LN2, groupValid1);
                 Muls(exponent2, exponent2, MXFP4_LN2, groupValid2);
                 Muls(exponent3, exponent3, MXFP4_LN2, groupValid3);
-                Adds(exponent0, exponent0, MXFP4_NEG_LN_DELTA, groupValid0);
-                Adds(exponent1, exponent1, MXFP4_NEG_LN_DELTA, groupValid1);
-                Adds(exponent2, exponent2, MXFP4_NEG_LN_DELTA, groupValid2);
-                Adds(exponent3, exponent3, MXFP4_NEG_LN_DELTA, groupValid3);
+                if constexpr (QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT) {
+                    Adds(exponent0, exponent0, MXFP4_NEG_LN_DELTA, groupValid0);
+                    Adds(exponent1, exponent1, MXFP4_NEG_LN_DELTA, groupValid1);
+                    Adds(exponent2, exponent2, MXFP4_NEG_LN_DELTA, groupValid2);
+                    Adds(exponent3, exponent3, MXFP4_NEG_LN_DELTA, groupValid3);
+                }
             } else {
                 Adds(exponent0, exponent0, MXFP4_NEG_TWO_VALUE, groupValid0);
                 Adds(exponent1, exponent1, MXFP4_NEG_TWO_VALUE, groupValid1);
@@ -886,8 +901,8 @@ __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
             Select(exponent0, first0, second0, firstHalf);
             Compares<float, CMPMODE::GT>(groupValid0, exponent0, INVALID_GROUP_EXPONENT, all);
             Muls(exponent0, exponent0, MXFP4_INV_LN2, groupValid0);
-            if constexpr (UseCxQuant) {
-                Adds(exponent0, exponent0, MXFP4_NEG_LOG2_CX, groupValid0);
+            if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
+                Adds(exponent0, exponent0, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? MXFP4_NEG_LOG2_CX_DELTA : MXFP4_NEG_LOG2_CX, groupValid0);
                 Truncate<float, RoundMode::CAST_CEIL>(exponent0, exponent0, groupValid0);
             } else {
                 Truncate<float, RoundMode::CAST_FLOOR>(exponent0, exponent0, groupValid0);
@@ -896,9 +911,11 @@ __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
             Gather(packedExponent0, exponent0, pairIndices);
             Scatter(groupMaxUb + (row + 0) * GROUPS_PER_TASK + firstGroup, packedExponent0, storeOffsets, pairMask);
 
-            if constexpr (UseCxQuant) {
+            if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
                 Muls(exponent0, exponent0, MXFP4_LN2, groupValid0);
-                Adds(exponent0, exponent0, MXFP4_NEG_LN_DELTA, groupValid0);
+                if constexpr (QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT) {
+                    Adds(exponent0, exponent0, MXFP4_NEG_LN_DELTA, groupValid0);
+                }
             } else {
                 Adds(exponent0, exponent0, MXFP4_NEG_TWO_VALUE, groupValid0);
                 Muls(exponent0, exponent0, MXFP4_LN2, groupValid0);
@@ -945,7 +962,7 @@ __aicore__ inline float GetCausalFirstVisibleRow(const SoftmaxFp32Mxfp4Params& p
     return static_cast<float>(firstRow);
 }
 
-template <uint32_t ChunkN, uint32_t TaskN, bool HasMask, bool UseCxQuant = true, bool ScorePreScaled = false>
+template <uint32_t ChunkN, uint32_t TaskN, bool HasMask, QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT, bool ScorePreScaled = false>
 __aicore__ inline void SoftmaxDnChunkFp32(const LocalTensor<uint8_t>& packedProbability,
     const LocalTensor<float>& taskGroupExponent, const LocalTensor<float>& runningGroupMaximum,
     const LocalTensor<float>& score, const LocalTensor<uint8_t>& byteIndices,
@@ -960,7 +977,7 @@ __aicore__ inline void SoftmaxDnChunkFp32(const LocalTensor<uint8_t>& packedProb
         const int64_t firstQuery = static_cast<int64_t>(params.qGs1Start) + params.causalOffset;
         if (firstQuery >= lastKey) {
             // Every real key is visible to every Q row; retain the KV-tail mask only.
-            SoftmaxDnChunkFp32<ChunkN, TaskN, false, UseCxQuant, ScorePreScaled>(packedProbability,
+            SoftmaxDnChunkFp32<ChunkN, TaskN, false, QUANT_SCHEMA, ScorePreScaled>(packedProbability,
                 taskGroupExponent, runningGroupMaximum, score, byteIndices, halfwordIndices, params);
             return;
         }
@@ -981,13 +998,13 @@ __aicore__ inline void SoftmaxDnChunkFp32(const LocalTensor<uint8_t>& packedProb
         params.s2Offset / QUANT_GROUP_SIZE * VEC1_ROWS;
     if constexpr (!HasMask && TaskN == 256) {
         if (params.validN == ChunkN) {
-            SoftmaxDnResidentEightVf<ChunkN, UseCxQuant, ScorePreScaled>(
+            SoftmaxDnResidentEightVf<ChunkN, QUANT_SCHEMA, ScorePreScaled>(
                 chunkProbability, chunkExponent, (__ubuf__ float*)runningGroupMaximum.GetPhyAddr(),
                 (__ubuf__ float*)score.GetPhyAddr(), params.scoreScale);
             return;
         }
     }
-    SoftmaxQuantizeDnChunkFp32Vf<ChunkN, TaskN, HasMask, UseCxQuant, false, ScorePreScaled>(
+    SoftmaxQuantizeDnChunkFp32Vf<ChunkN, TaskN, HasMask, QUANT_SCHEMA, false, ScorePreScaled>(
         chunkProbability, chunkExponent, (__ubuf__ float*)runningGroupMaximum.GetPhyAddr(),
         (__ubuf__ float*)score.GetPhyAddr(),
         (__ubuf__ uint8_t*)byteIndices.GetPhyAddr(), (__ubuf__ uint16_t*)halfwordIndices.GetPhyAddr(),
@@ -995,7 +1012,7 @@ __aicore__ inline void SoftmaxDnChunkFp32(const LocalTensor<uint8_t>& packedProb
         alignedKv32, alignedKv64);
 }
 
-template <uint32_t ChunkN, uint32_t TaskN, bool HasMask, bool UseCxQuant = true, bool ScorePreScaled = false>
+template <uint32_t ChunkN, uint32_t TaskN, bool HasMask, QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT, bool ScorePreScaled = false>
 __aicore__ inline void SoftmaxNdChunkFp32(const LocalTensor<uint8_t>& packedProbability,
     const LocalTensor<float>& taskGroupExponent, const LocalTensor<float>& runningGroupMaximum,
     const LocalTensor<float>& score, const LocalTensor<uint8_t>& byteIndices,
@@ -1005,13 +1022,13 @@ __aicore__ inline void SoftmaxNdChunkFp32(const LocalTensor<uint8_t>& packedProb
         const int64_t lastKey = static_cast<int64_t>(params.kvStart) + params.validN - 1;
         const int64_t firstQuery = static_cast<int64_t>(params.qGs1Start / params.qGroupSize) +
             params.causalOffset;
-        if (params.validN != 0 && firstQuery >= lastKey) {
-            SoftmaxNdChunkFp32<ChunkN, TaskN, false, UseCxQuant, ScorePreScaled>(packedProbability,
+        if (params.validN != 0 && firstQuery >= lastKey) { // 在第一个query能看到所有的kv时，在causal也不需要mask
+            SoftmaxNdChunkFp32<ChunkN, TaskN, false, QUANT_SCHEMA, ScorePreScaled>(packedProbability,
                 taskGroupExponent, runningGroupMaximum, score, byteIndices, halfwordIndices, params);
             return;
         }
     }
-    SoftmaxQuantizeNdChunkFp32Vf<ChunkN, TaskN, HasMask, UseCxQuant, ScorePreScaled>(
+    SoftmaxQuantizeNdChunkFp32Vf<ChunkN, TaskN, HasMask, QUANT_SCHEMA, ScorePreScaled>(
         (__ubuf__ uint8_t*)packedProbability.GetPhyAddr(), (__ubuf__ float*)taskGroupExponent.GetPhyAddr(),
         (__ubuf__ float*)runningGroupMaximum.GetPhyAddr(), (__ubuf__ float*)score.GetPhyAddr(),
         (__ubuf__ uint8_t*)byteIndices.GetPhyAddr(), (__ubuf__ uint16_t*)halfwordIndices.GetPhyAddr(),

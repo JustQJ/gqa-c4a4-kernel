@@ -73,6 +73,14 @@ def _resolve_mask_mode(mask_mode: Union[str, int, "MaskMode", None]) -> int:
     return int(MaskMode(mask_mode))
 
 
+def _resolve_quant_schema(quant_mode: int, quant_schema: int) -> int:
+    if not isinstance(quant_schema, int) or quant_schema not in (0, 1, 2):
+        raise ValueError(f"quant_schema must be 0 (OCP), 1 (CX) or 2 (CX Delta), got {quant_schema!r}")
+    if quant_mode != 5 and quant_schema != 2:
+        raise ValueError("Non-default quant_schema requires quant_mode=5")
+    return int(quant_schema)
+
+
 def _calculate_batch_size(batch_size, cu_seqlens_q, seqused_q):
     if seqused_q is not None:
         return seqused_q.size(0)
@@ -212,7 +220,7 @@ class QuantFlashAttnOpBuilder(OpBuilder):
             "float softmax_scale=1.0, int mask_mode=0, int win_left=-1, int win_right=-1, "
             "int max_seqlen_q=-1, int max_seqlen_kv=-1, "
             'str layout_q="BSND", str layout_q_descale="BSND", str layout_kv="BSND", str layout_out="BSND", '
-            "bool return_softmax_lse=False) -> (Tensor, Tensor)",
+            "bool return_softmax_lse=False, int quant_schema=2) -> (Tensor, Tensor)",
         ]
 
     def register_meta(self):
@@ -280,7 +288,9 @@ class QuantFlashAttnOpBuilder(OpBuilder):
             layout_kv: Optional[str] = "BSND",
             layout_out: Optional[str] = "BSND",
             return_softmax_lse: Optional[bool] = False,
+            quant_schema: int = 2,
         ):
+            _resolve_quant_schema(_resolve_quant_mode(quant_mode), quant_schema)
             # 取 shape 前校验 q/v 非空及维度, 避免 None 或维度不足导致 AttributeError/IndexError
             torch._check(q is not None, lambda: "q must not be None")
             torch._check(v is not None, lambda: "v must not be None")
@@ -527,6 +537,7 @@ def quant_flash_attn(
     layout_kv: Optional[str] = "BSND",
     layout_out: Optional[str] = "BSND",
     return_softmax_lse: Optional[bool] = False,
+    quant_schema: int = 2,
 ):
     """
     dispatcher implementation for NPU.
@@ -609,6 +620,7 @@ def quant_flash_attn(
                     f"float4_e2m1fn_x2, but got {tensor.dtype}"
                 )
 
+    quant_schema = _resolve_quant_schema(quant_mode, quant_schema)
     op_module = quant_flash_attn_op_builder.load()
     return op_module.quant_flash_attn(
         q,
@@ -641,6 +653,7 @@ def quant_flash_attn(
         layout_kv,
         layout_out,
         return_softmax_lse,
+        quant_schema,
     )
 
 

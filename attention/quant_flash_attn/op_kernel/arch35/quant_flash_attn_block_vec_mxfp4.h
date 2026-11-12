@@ -29,7 +29,8 @@ template <typename INPUT_T, typename T, typename OUTPUT_T, LayOutTypeEnum layout
           S2TemplateType s2TemplateType = S2TemplateType::Aligned128,
           DTemplateType dTemplateType = DTemplateType::Aligned128,
           DTemplateType dVTemplateType = DTemplateType::Aligned128, bool hasAtten = false, uint8_t KvLayoutType = 0,
-          bool isFd = false, bool useDn = false, bool isDAligned = true, bool useCxQuant = true>
+          bool isFd = false, bool useDn = false, bool isDAligned = true,
+          QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT, bool enableQf322F32Pre = false>
 class QuantFlashAttnBlockVecMxfp4 {
 public:
     static constexpr uint32_t mBaseSize = static_cast<uint32_t>(s1TemplateType);
@@ -51,7 +52,10 @@ public:
     static constexpr bool HAS_MASK = hasAtten;
     static constexpr bool FLASH_DECODE = isFd;
     static constexpr bool USE_DN = useDn;
-    static constexpr bool USE_CX_QUANT = useCxQuant;
+    static constexpr QuantSchema QUANT_SCHEMA_VALUE = QUANT_SCHEMA;
+    static_assert(QUANT_SCHEMA == QuantSchema::OCP_QUANT || QUANT_SCHEMA == QuantSchema::CX_QUANT ||
+                  QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT, "Unsupported MXFP4 P quantization schema");
+    static constexpr bool ENABLE_QF322F32_PRE = enableQf322F32Pre;
     static constexpr ActualSeqLensMode Q_MODE = GetQActSeqMode<layout>();
     static_assert(mBaseSize == 128 && dBaseSize == dVBaseSize &&
         ((dBaseSize == 128 && s2BaseSize == 256) || (dBaseSize == 256 && s2BaseSize == 128)),
@@ -242,19 +246,19 @@ public:
                 params.scoreScale = constInfo_.scaleValue;
                 LocalTensor<float> score = crossBuffers_.GetBmm1Slot(scoreSlot);
                 if constexpr (USE_DN) {
-                    if (CrossBufferType::CanScaleInFixpipe(params.scoreScale)) {
-                        Mxfp4Api::SoftmaxDnChunkFp32<s2SplitSize, s2BaseSize, HAS_MASK, USE_CX_QUANT, true>(
+                    if (ENABLE_QF322F32_PRE && CrossBufferType::CanScaleInFixpipe(params.scoreScale)) {
+                        Mxfp4Api::SoftmaxDnChunkFp32<s2SplitSize, s2BaseSize, HAS_MASK, QUANT_SCHEMA, true>(
                             packedQuantP, taskExponent, groupMaximum, score, byteIndices, halfwordIndices, params);
                     } else {
-                        Mxfp4Api::SoftmaxDnChunkFp32<s2SplitSize, s2BaseSize, HAS_MASK, USE_CX_QUANT>(
+                        Mxfp4Api::SoftmaxDnChunkFp32<s2SplitSize, s2BaseSize, HAS_MASK, QUANT_SCHEMA, false>(
                             packedQuantP, taskExponent, groupMaximum, score, byteIndices, halfwordIndices, params);
                     }
                 } else {
-                    if (CrossBufferType::CanScaleInFixpipe(params.scoreScale)) {
-                        Mxfp4Api::SoftmaxNdChunkFp32<s2SplitSize, s2BaseSize, HAS_MASK, USE_CX_QUANT, true>(
+                    if (ENABLE_QF322F32_PRE && CrossBufferType::CanScaleInFixpipe(params.scoreScale)) {
+                        Mxfp4Api::SoftmaxNdChunkFp32<s2SplitSize, s2BaseSize, HAS_MASK, QUANT_SCHEMA, true>(
                             packedQuantP, taskExponent, groupMaximum, score, byteIndices, halfwordIndices, params);
                     } else {
-                        Mxfp4Api::SoftmaxNdChunkFp32<s2SplitSize, s2BaseSize, HAS_MASK, USE_CX_QUANT>(
+                        Mxfp4Api::SoftmaxNdChunkFp32<s2SplitSize, s2BaseSize, HAS_MASK, QUANT_SCHEMA, false>(
                             packedQuantP, taskExponent, groupMaximum, score, byteIndices, halfwordIndices, params);
                     }
                 }
@@ -287,11 +291,11 @@ public:
         LocalTensor<float> secondTaskExponent = taskGroupMax_.Get<float>();
         LocalTensor<uint8_t> encodedScale = tempCommBuf_.Get<uint8_t>();
         if constexpr (USE_DN) {
-            Mxfp4Api::UpdatePScaleDn<s2BaseSize, USE_CX_QUANT>(encodedScale,
+            Mxfp4Api::UpdatePScaleDn<s2BaseSize, QUANT_SCHEMA>(encodedScale,
                 firstTaskExponent, secondTaskExponent, reference, previousReference, multiplier,
                 firstTaskCount, secondTaskCount, owner.firstGroup);
         } else {
-            Mxfp4Api::UpdatePScaleNd<s2BaseSize, USE_CX_QUANT>(encodedScale,
+            Mxfp4Api::UpdatePScaleNd<s2BaseSize, QUANT_SCHEMA>(encodedScale,
                 firstTaskExponent, secondTaskExponent, reference, previousReference, multiplier,
                 firstTaskCount, secondTaskCount, owner.firstGroup, GetAivRowCapacity(runInfo));
         }
@@ -482,7 +486,7 @@ private:
         LocalTensor<float> broadcastReference = scratch[statisticsOffset + 2 * STATISTICS_BYTES].ReinterpretCast<float>();
         if (constInfo_.isSoftmaxLseEnable ||
             (FLASH_DECODE && constInfo_.enableFlashDecode && runInfo.isS2SplitCore)) {
-            Mxfp4Api::PrepareAttentionStatistics<USE_CX_QUANT, true>(
+            Mxfp4Api::PrepareAttentionStatistics<QUANT_SCHEMA, true>(
                 lse, broadcastSum, broadcastReference, rowSum, reference);
         }
         if constexpr (FLASH_DECODE) {
@@ -503,7 +507,7 @@ private:
                     }
                     WaitVectorBeforeCopy();
                 } else {
-                    // FD consumes raw FP32 PV. Normalize only after all splits merge.
+                    // FD consumes raw FP32 PV with normalized a_i / S merge multipliers.
                     WaitVectorBeforeCopy();
                     DataCopyExtParams outputCopy {static_cast<uint16_t>(validRows),
                         static_cast<uint32_t>(constInfo_.dSizeV * sizeof(float)), (dVBaseSize - constInfo_.dSizeV) / 8, 0, 0};
@@ -588,9 +592,12 @@ template <typename INPUT_T, typename T, typename OUTPUT_T, LayOutTypeEnum layout
           S2TemplateType s2TemplateType = S2TemplateType::Aligned128,
           DTemplateType dTemplateType = DTemplateType::Aligned128,
           DTemplateType dVTemplateType = DTemplateType::Aligned128, bool hasAtten = false, uint8_t KvLayoutType = 0,
-          bool isFd = false, bool useDn = false, bool isDAligned = true, bool useCxQuant = true>
+          bool isFd = false, bool useDn = false, bool isDAligned = true,
+          QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT, bool enableQf322F32Pre = false>
 class QuantFlashAttnBlockVecMxfp4Dummy {
 public:
+    static constexpr QuantSchema QUANT_SCHEMA_VALUE = QUANT_SCHEMA;
+    static constexpr bool ENABLE_QF322F32_PRE = enableQf322F32Pre;
     static constexpr bool HAS_MASK = hasAtten;
     static constexpr bool FLASH_DECODE = isFd;
     using OUT_T = OUTPUT_T;

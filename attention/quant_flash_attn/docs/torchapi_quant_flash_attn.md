@@ -42,9 +42,10 @@
 
 - **接口功能**：
 
-  `quant_flash_attn`是基于`torch_npu`的`cann_ops_transformer`扩展接口，用于调用`QuantFlashAttn`算子完成量化场景下的全量化注意力计算，训练推理归一化。当前支持三类量化场景：
+  `quant_flash_attn`是基于`torch_npu`的`cann_ops_transformer`扩展接口，用于调用`QuantFlashAttn`算子完成量化场景下的全量化注意力计算，训练推理归一化。当前支持以下量化场景：
   - HIF8场景：Q/K/V 均采用 HIFLOAT8 per-tensor 量化。
   - MxFP8场景：Q/K/V 均采用 MXFP8 量化。支持在Paged Attention的decode/prefill场景下，将最后不足64个token的V保留为BF16高精尾块，通过三个新增尾块参数传入。
+  - MXFP4场景（quant_mode=5）：Q/K/V为MXFP4，P通过quant_schema选择OCP、CX或CX Delta，默认CX Delta。详细输入约束见 [C4 API](c4a4-api-softmax-fp32.md)。
   - FP8场景：Q/K 采用 FP8_E4M3 per-token-head 量化，V 采用 FP8_E4M3 per-head 量化。
 
   `quant_flash_attn_metadata`是`quant_flash_attn`的元数据生成接口，用于在主算子执行前生成metadata。metadata记录AICore/AIVCore的任务切分结果，主算子可选择传入该metadata以优化调度。典型调用流程如下：
@@ -151,9 +152,12 @@ cann_ops_transformer.quant_flash_attn(
     layout_q_descale="BSND",
     layout_kv="BSND",
     layout_out="BSND",
-    return_softmax_lse=False
+    return_softmax_lse=False,
+    quant_schema=2
 ) -> (Tensor, Tensor)
 ```
+
+`quant_schema` 为尾部可选整数参数，取0（普通MXFP4/OCP）、1（CX，不乘1.5）或2（CX Delta，默认）。只对 `quant_mode=5` 生效；其他量化模式仅允许默认2。旧调用省略该参数时行为保持，metadata不需要传入该参数。
 
 ## 枚举说明
 

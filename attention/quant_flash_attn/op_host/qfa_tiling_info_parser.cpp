@@ -261,6 +261,8 @@ ge::graphStatus QfaInfoParser::GetAttrParaInfo()
     opParamInfo_.layoutKV = attrs->GetStr(ATTR_LAYOUT_KV_INDEX);
     opParamInfo_.layoutOut = attrs->GetStr(ATTR_LAYOUT_OUT_INDEX);
     opParamInfo_.returnSoftMaxLse = attrs->GetAttrPointer<bool>(ATTR_RETURN_LSE_INDEX);
+    opParamInfo_.quantSchema = attrs->GetAttrNum() > ATTR_QUANT_SCHEMA_INDEX ?
+        attrs->GetAttrPointer<int64_t>(ATTR_QUANT_SCHEMA_INDEX) : nullptr;
 
     return ge::GRAPH_SUCCESS;
 }
@@ -279,6 +281,12 @@ ge::graphStatus QfaInfoParser::GetQuantMode()
         return ge::GRAPH_FAILED;
     }
     int64_t quantModeVal = *opParamInfo_.quantMode;
+    quantSchema_ = opParamInfo_.quantSchema == nullptr ? 2 : *opParamInfo_.quantSchema;
+    if (quantSchema_ < 0 || quantSchema_ > 2 || (quantModeVal != 5 && quantSchema_ != 2)) {
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "quant_schema", std::to_string(quantSchema_).c_str(),
+            "quant_schema must be 0, 1 or 2; non-default values require quant_mode=5");
+        return ge::GRAPH_FAILED;
+    }
     using QM = QfaQuantMode;
     if (npuArch_ == NpuArch::DAV_3510) {
         if (quantModeVal != static_cast<int64_t>(QM::A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32) &&
@@ -604,6 +612,7 @@ void QfaInfoParser::GenerateLayoutInfo(QfaTilingInfo& qfaInfo)
 void QfaInfoParser::GenerateQuantInfo(QfaTilingInfo& qfaInfo)
 {
     qfaInfo.quantMode = quantMode_;
+    qfaInfo.quantSchema = quantSchema_;
 }
 
 void QfaInfoParser::GenerateAxisInfo(QfaTilingInfo& qfaInfo)

@@ -59,6 +59,8 @@ public:
 
     static constexpr bool USE_DN = CubeBlockType::USE_DN; //DN 模式
     static constexpr bool HAS_MASK = VecFaBlockType::HAS_MASK;
+    static_assert(CubeBlockType::ENABLE_QF322F32_PRE == VecFaBlockType::ENABLE_QF322F32_PRE,
+                  "MXFP4 Cube and Vector must agree on MM1 Fixpipe scaling");
 
     static constexpr uint32_t PRELOAD_N = 20; // C2落后C1 20 轮
     static constexpr uint32_t GROUP_N = 16;  // 16个task的C2在L0C累积，然后执行一次V2
@@ -726,7 +728,7 @@ public:
         vecFdBlock_.template InitBuffers<VecFaBlockType::GetFdReuseUbOffset()>();
         AscendC::ICachePreLoad(2);
         SyncAll();
-        vecFdBlock_.template FlashDecode<VecFaBlockType::USE_CX_QUANT>(fdParams_);
+        vecFdBlock_.template FlashDecode<VecFaBlockType::QUANT_SCHEMA_VALUE>(fdParams_);
         SyncAll(); // 多section场景: 保证所有核FD读workspace完成后, 才能进入下一section FA覆写
     }
 

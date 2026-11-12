@@ -10,11 +10,13 @@
 #ifndef QFA_VF_UPDATE_FP32_MXFP4_H_
 #define QFA_VF_UPDATE_FP32_MXFP4_H_
 #include "vf_softmax_fp32_mxfp4.h"
+#include "../quant_flash_attn_mxfp4_common.h"
 
 namespace Mxfp4Api {
+using BaseApi::QuantSchema;
 // DN：输入每个 task 为 [TaskN/32,Q64] FP32 指数，输出为 [4,TaskN/64+1,16,2] 字节。
 // TaskN256 八路、TaskN128 四路按阶段展开；每路处理一个 S32 小组的全部 Q64。
-template <uint32_t TaskN, bool UseCxQuant = true>
+template <uint32_t TaskN, QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT>
 __simd_vf__ inline void UpdatePScaleDnVf(__ubuf__ uint8_t* encodedScale,
     __ubuf__ float* firstTaskExponent, __ubuf__ float* secondTaskExponent,
     __ubuf__ float* groupReference, __ubuf__ float* previousReference,
@@ -149,16 +151,16 @@ __simd_vf__ inline void UpdatePScaleDnVf(__ubuf__ uint8_t* encodedScale,
                 Sub(vreg_scale7, vreg_scale7, mergedReference, allRows);
             }
 
-            // 普通量化编码为 e-R+125，CX 编码为 e-R+127。
-            Adds(vreg_scale0, vreg_scale0, UseCxQuant ? 127.0F : 125.0F, allRows);
-            Adds(vreg_scale1, vreg_scale1, UseCxQuant ? 127.0F : 125.0F, allRows);
-            Adds(vreg_scale2, vreg_scale2, UseCxQuant ? 127.0F : 125.0F, allRows);
-            Adds(vreg_scale3, vreg_scale3, UseCxQuant ? 127.0F : 125.0F, allRows);
+            // 普通量化编码为 e-R+125，CX 编码为 e-R+127-ceil(log2(7.25)) 或者 e-R+127-ceil(log2(7.25/1.5)) ，即 e-R+124。
+            Adds(vreg_scale0, vreg_scale0, QUANT_SCHEMA != QuantSchema::OCP_QUANT ? MXFP4_CX_PSCALE_BIAS : 125.0F, allRows);
+            Adds(vreg_scale1, vreg_scale1, QUANT_SCHEMA != QuantSchema::OCP_QUANT ? MXFP4_CX_PSCALE_BIAS : 125.0F, allRows);
+            Adds(vreg_scale2, vreg_scale2, QUANT_SCHEMA != QuantSchema::OCP_QUANT ? MXFP4_CX_PSCALE_BIAS : 125.0F, allRows);
+            Adds(vreg_scale3, vreg_scale3, QUANT_SCHEMA != QuantSchema::OCP_QUANT ? MXFP4_CX_PSCALE_BIAS : 125.0F, allRows);
             if constexpr (TaskN == 256) {
-                Adds(vreg_scale4, vreg_scale4, UseCxQuant ? 127.0F : 125.0F, allRows);
-                Adds(vreg_scale5, vreg_scale5, UseCxQuant ? 127.0F : 125.0F, allRows);
-                Adds(vreg_scale6, vreg_scale6, UseCxQuant ? 127.0F : 125.0F, allRows);
-                Adds(vreg_scale7, vreg_scale7, UseCxQuant ? 127.0F : 125.0F, allRows);
+                Adds(vreg_scale4, vreg_scale4, QUANT_SCHEMA != QuantSchema::OCP_QUANT ? MXFP4_CX_PSCALE_BIAS : 125.0F, allRows);
+                Adds(vreg_scale5, vreg_scale5, QUANT_SCHEMA != QuantSchema::OCP_QUANT ? MXFP4_CX_PSCALE_BIAS : 125.0F, allRows);
+                Adds(vreg_scale6, vreg_scale6, QUANT_SCHEMA != QuantSchema::OCP_QUANT ? MXFP4_CX_PSCALE_BIAS : 125.0F, allRows);
+                Adds(vreg_scale7, vreg_scale7, QUANT_SCHEMA != QuantSchema::OCP_QUANT ? MXFP4_CX_PSCALE_BIAS : 125.0F, allRows);
             }
 
             // 编码下界钳制。
@@ -258,7 +260,7 @@ __simd_vf__ inline void UpdatePScaleDnVf(__ubuf__ uint8_t* encodedScale,
 
 // ND：输入每个 task 为 [Q64,TaskN/32] FP32 指数，输出为 [4,TaskN/64+1,16,2] 字节。
 // TaskN256 八路、TaskN128 四路按阶段展开；每路连续读取 [Q8,8] 或 [Q16,4]。
-template <uint32_t TaskN, bool UseCxQuant = true, uint32_t RowCapacity = 64>
+template <uint32_t TaskN, QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT, uint32_t RowCapacity = 64>
 __simd_vf__ inline void UpdatePScaleNdVf(__ubuf__ uint8_t* encodedScale,
     __ubuf__ float* firstTaskExponent, __ubuf__ float* secondTaskExponent,
     __ubuf__ float* groupReference, __ubuf__ float* previousReference,
@@ -502,29 +504,29 @@ __simd_vf__ inline void UpdatePScaleNdVf(__ubuf__ uint8_t* encodedScale,
                 }
             }
 
-            // 普通量化编码为 e-R+125，CX 编码为 e-R+127。
-            Adds(vreg_scale0, vreg_scale0, UseCxQuant ? 127.0F : 125.0F, allRows);
+            // 普通量化编码为 e-R+125，CX 编码为 e-R+127-ceil(log2(7.25)) 或者 e-R+127-ceil(log2(7.25/1.5)) ，即 e-R+124。
+            Adds(vreg_scale0, vreg_scale0, QUANT_SCHEMA != QuantSchema::OCP_QUANT ? MXFP4_CX_PSCALE_BIAS : 125.0F, allRows);
             if constexpr (RowCapacity > 1 * ROWS_PER_REGISTER) {
-                Adds(vreg_scale1, vreg_scale1, UseCxQuant ? 127.0F : 125.0F, allRows);
+                Adds(vreg_scale1, vreg_scale1, QUANT_SCHEMA != QuantSchema::OCP_QUANT ? MXFP4_CX_PSCALE_BIAS : 125.0F, allRows);
             }
             if constexpr (RowCapacity > 2 * ROWS_PER_REGISTER) {
-                Adds(vreg_scale2, vreg_scale2, UseCxQuant ? 127.0F : 125.0F, allRows);
+                Adds(vreg_scale2, vreg_scale2, QUANT_SCHEMA != QuantSchema::OCP_QUANT ? MXFP4_CX_PSCALE_BIAS : 125.0F, allRows);
             }
             if constexpr (RowCapacity > 3 * ROWS_PER_REGISTER) {
-                Adds(vreg_scale3, vreg_scale3, UseCxQuant ? 127.0F : 125.0F, allRows);
+                Adds(vreg_scale3, vreg_scale3, QUANT_SCHEMA != QuantSchema::OCP_QUANT ? MXFP4_CX_PSCALE_BIAS : 125.0F, allRows);
             }
             if constexpr (TaskN == 256) {
                 if constexpr (RowCapacity > 4 * ROWS_PER_REGISTER) {
-                    Adds(vreg_scale4, vreg_scale4, UseCxQuant ? 127.0F : 125.0F, allRows);
+                    Adds(vreg_scale4, vreg_scale4, QUANT_SCHEMA != QuantSchema::OCP_QUANT ? MXFP4_CX_PSCALE_BIAS : 125.0F, allRows);
                 }
                 if constexpr (RowCapacity > 5 * ROWS_PER_REGISTER) {
-                    Adds(vreg_scale5, vreg_scale5, UseCxQuant ? 127.0F : 125.0F, allRows);
+                    Adds(vreg_scale5, vreg_scale5, QUANT_SCHEMA != QuantSchema::OCP_QUANT ? MXFP4_CX_PSCALE_BIAS : 125.0F, allRows);
                 }
                 if constexpr (RowCapacity > 6 * ROWS_PER_REGISTER) {
-                    Adds(vreg_scale6, vreg_scale6, UseCxQuant ? 127.0F : 125.0F, allRows);
+                    Adds(vreg_scale6, vreg_scale6, QUANT_SCHEMA != QuantSchema::OCP_QUANT ? MXFP4_CX_PSCALE_BIAS : 125.0F, allRows);
                 }
                 if constexpr (RowCapacity > 7 * ROWS_PER_REGISTER) {
-                    Adds(vreg_scale7, vreg_scale7, UseCxQuant ? 127.0F : 125.0F, allRows);
+                    Adds(vreg_scale7, vreg_scale7, QUANT_SCHEMA != QuantSchema::OCP_QUANT ? MXFP4_CX_PSCALE_BIAS : 125.0F, allRows);
                 }
             }
 
@@ -733,13 +735,13 @@ __simd_vf__ inline void UpdatePScaleNdVf(__ubuf__ uint8_t* encodedScale,
 }
 
 // DN 包装：接收 UB LocalTensor，跨流水同步仍由调用方负责。
-template <uint32_t TaskN, bool UseCxQuant = true>
+template <uint32_t TaskN, QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT>
 __aicore__ inline void UpdatePScaleDn(const LocalTensor<uint8_t>& encodedScale,
     const LocalTensor<float>& firstTaskExponent, const LocalTensor<float>& secondTaskExponent,
     const LocalTensor<float>& groupReference, const LocalTensor<float>& previousReference,
     const LocalTensor<float>& historyMultiplier, uint16_t firstTaskCount, uint16_t secondTaskCount, bool firstGroup)
 {
-    UpdatePScaleDnVf<TaskN, UseCxQuant>(
+    UpdatePScaleDnVf<TaskN, QUANT_SCHEMA>(
         (__ubuf__ uint8_t*)encodedScale.GetPhyAddr(), (__ubuf__ float*)firstTaskExponent.GetPhyAddr(),
         (__ubuf__ float*)secondTaskExponent.GetPhyAddr(), (__ubuf__ float*)groupReference.GetPhyAddr(),
         (__ubuf__ float*)previousReference.GetPhyAddr(), (__ubuf__ float*)historyMultiplier.GetPhyAddr(),
@@ -747,35 +749,35 @@ __aicore__ inline void UpdatePScaleDn(const LocalTensor<uint8_t>& encodedScale,
 }
 
 // ND 包装：接收 UB LocalTensor，跨流水同步仍由调用方负责。
-template <uint32_t TaskN, bool UseCxQuant = true>
+template <uint32_t TaskN, QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT>
 __aicore__ inline void UpdatePScaleNd(const LocalTensor<uint8_t>& encodedScale,
     const LocalTensor<float>& firstTaskExponent, const LocalTensor<float>& secondTaskExponent,
     const LocalTensor<float>& groupReference, const LocalTensor<float>& previousReference,
     const LocalTensor<float>& historyMultiplier, uint16_t firstTaskCount, uint16_t secondTaskCount, bool firstGroup, uint32_t rowCapacity = 64)
 {
     if (rowCapacity == 16) {
-        UpdatePScaleNdVf<TaskN, UseCxQuant, 16>(
+        UpdatePScaleNdVf<TaskN, QUANT_SCHEMA, 16>(
         (__ubuf__ uint8_t*)encodedScale.GetPhyAddr(), (__ubuf__ float*)firstTaskExponent.GetPhyAddr(),
         (__ubuf__ float*)secondTaskExponent.GetPhyAddr(), (__ubuf__ float*)groupReference.GetPhyAddr(),
         (__ubuf__ float*)previousReference.GetPhyAddr(), (__ubuf__ float*)historyMultiplier.GetPhyAddr(),
         firstTaskCount, secondTaskCount, firstGroup);
     }
     else if (rowCapacity == 32) {
-        UpdatePScaleNdVf<TaskN, UseCxQuant, 32>(
+        UpdatePScaleNdVf<TaskN, QUANT_SCHEMA, 32>(
         (__ubuf__ uint8_t*)encodedScale.GetPhyAddr(), (__ubuf__ float*)firstTaskExponent.GetPhyAddr(),
         (__ubuf__ float*)secondTaskExponent.GetPhyAddr(), (__ubuf__ float*)groupReference.GetPhyAddr(),
         (__ubuf__ float*)previousReference.GetPhyAddr(), (__ubuf__ float*)historyMultiplier.GetPhyAddr(),
         firstTaskCount, secondTaskCount, firstGroup);
     }
     else if (rowCapacity == 48) {
-        UpdatePScaleNdVf<TaskN, UseCxQuant, 48>(
+        UpdatePScaleNdVf<TaskN, QUANT_SCHEMA, 48>(
         (__ubuf__ uint8_t*)encodedScale.GetPhyAddr(), (__ubuf__ float*)firstTaskExponent.GetPhyAddr(),
         (__ubuf__ float*)secondTaskExponent.GetPhyAddr(), (__ubuf__ float*)groupReference.GetPhyAddr(),
         (__ubuf__ float*)previousReference.GetPhyAddr(), (__ubuf__ float*)historyMultiplier.GetPhyAddr(),
         firstTaskCount, secondTaskCount, firstGroup);
     }
     else {
-        UpdatePScaleNdVf<TaskN, UseCxQuant, 64>(
+        UpdatePScaleNdVf<TaskN, QUANT_SCHEMA, 64>(
         (__ubuf__ uint8_t*)encodedScale.GetPhyAddr(), (__ubuf__ float*)firstTaskExponent.GetPhyAddr(),
         (__ubuf__ float*)secondTaskExponent.GetPhyAddr(), (__ubuf__ float*)groupReference.GetPhyAddr(),
         (__ubuf__ float*)previousReference.GetPhyAddr(), (__ubuf__ float*)historyMultiplier.GetPhyAddr(),

@@ -88,8 +88,11 @@ std::tuple<at::Tensor, at::Tensor> quant_flash_attn(
     const c10::optional<at::Tensor>& block_table_tail, const c10::optional<at::Tensor>& seqused_v_tail,
     double softmax_scale, int64_t mask_mode, int64_t win_left, int64_t win_right, int64_t max_seqlen_q,
     int64_t max_seqlen_kv, std::string layout_q, std::string layout_q_descale, std::string layout_kv,
-    std::string layout_out, bool return_softmax_lse)
+    std::string layout_out, bool return_softmax_lse, int64_t quant_schema)
 {
+    TORCH_CHECK(quant_schema >= 0 && quant_schema <= 2, "quant_schema must be 0, 1 or 2");
+    TORCH_CHECK(quant_mode == QUANT_MODE_MXFP4 || quant_schema == 2,
+                "Non-default quant_schema requires quant_mode=5");
     int64_t tSize = 0;
     int64_t nSize = 0;
     int64_t dSize = 0;
@@ -155,7 +158,7 @@ std::tuple<at::Tensor, at::Tensor> quant_flash_attn(
                   v_descale_wrapper, block_table, p_scale, cu_seqlens_q, cu_seqlens_kv, seqused_q, seqused_kv, sinks,
                   attn_mask, metadata, v_tail, block_table_tail, seqused_v_tail, quant_mode, softmax_scale, mask_mode,
                   win_left, win_right, max_seqlen_q, max_seqlen_kv, layout_q_ptr, layout_q_descale_ptr, layout_kv_ptr,
-                  layout_out_ptr, return_softmax_lse, attentionOutput, softmaxLse);
+                  layout_out_ptr, return_softmax_lse, quant_schema, attentionOutput, softmaxLse);
     } else if (quant_mode == QUANT_MODE_HIF8) {
         TensorWrapper q_wrapper = make_wrapper(q, HIFLOAT8);
         TensorWrapper k_wrapper = make_wrapper(k, HIFLOAT8);
@@ -164,7 +167,7 @@ std::tuple<at::Tensor, at::Tensor> quant_flash_attn(
                   p_scale, cu_seqlens_q, cu_seqlens_kv, seqused_q, seqused_kv, sinks, attn_mask, metadata, v_tail,
                   block_table_tail, seqused_v_tail, quant_mode, softmax_scale, mask_mode, win_left, win_right,
                   max_seqlen_q, max_seqlen_kv, layout_q_ptr, layout_q_descale_ptr, layout_kv_ptr, layout_out_ptr,
-                  return_softmax_lse, attentionOutput, softmaxLse);
+                  return_softmax_lse, quant_schema, attentionOutput, softmaxLse);
     } else if (quant_mode == QUANT_MODE_HIF4) {
         TensorWrapper q_wrapper = make_wrapper(q, HIFLOAT4);
         TensorWrapper k_wrapper = make_wrapper(k, HIFLOAT4);
@@ -176,13 +179,13 @@ std::tuple<at::Tensor, at::Tensor> quant_flash_attn(
                   v_descale_wrapper, block_table, p_scale, cu_seqlens_q, cu_seqlens_kv, seqused_q, seqused_kv, sinks,
                   attn_mask, metadata, v_tail, block_table_tail, seqused_v_tail, quant_mode, softmax_scale, mask_mode,
                   win_left, win_right, max_seqlen_q, max_seqlen_kv, layout_q_ptr, layout_q_descale_ptr, layout_kv_ptr,
-                  layout_out_ptr, return_softmax_lse, attentionOutput, softmaxLse);
+                  layout_out_ptr, return_softmax_lse, quant_schema, attentionOutput, softmaxLse);
     } else {
         ACLNN_CMD(aclnnQuantFlashAttn, q, k, v, q_descale, k_descale, v_descale, block_table, p_scale, cu_seqlens_q,
                   cu_seqlens_kv, seqused_q, seqused_kv, sinks, attn_mask, metadata, v_tail, block_table_tail,
                   seqused_v_tail, quant_mode, softmax_scale, mask_mode, win_left, win_right, max_seqlen_q,
                   max_seqlen_kv, layout_q_ptr, layout_q_descale_ptr, layout_kv_ptr, layout_out_ptr, return_softmax_lse,
-                  attentionOutput, softmaxLse);
+                  quant_schema, attentionOutput, softmaxLse);
     }
 
     return std::tuple<at::Tensor, at::Tensor>(attentionOutput, softmaxLse);

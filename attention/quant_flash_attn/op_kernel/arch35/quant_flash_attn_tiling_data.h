@@ -81,6 +81,7 @@ struct QuantFlashAttnBaseParams {
     uint8_t iscuSeqLengthsNull;
     uint8_t iscuSeqLengthsKVNull;
     uint8_t isSoftMaxLseEnable;
+    uint8_t quantSchema = 2; // Uses the former alignment byte; 0=OCP, 1=CX, 2=CX Delta.
     uint32_t coreNum;
     uint32_t outputLayout;
     bool needInitOutput;

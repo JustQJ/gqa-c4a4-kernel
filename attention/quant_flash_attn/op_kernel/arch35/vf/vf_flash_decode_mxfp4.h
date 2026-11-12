@@ -11,15 +11,18 @@
 #define QFA_VF_FLASH_DECODE_MXFP4_H_
 
 #include "vf_softmax_fp32_mxfp4.h"
+#include "../quant_flash_attn_mxfp4_common.h"
 
 namespace Mxfp4Api {
+using BaseApi::QuantSchema;
 
 // Every row is repeated eight times, matching the existing FD workspace ABI.
-// C4 stores integer references R and raw PV; no per-split division is needed.
-template <bool UseCxQuant>
+// C4 stores integer references R and raw PV. Normalize the merge multipliers
+// by the total row sum so ReduceFinalRes produces the final output directly.
+template <QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT>
 __simd_vf__ inline void PrepareFlashDecodeVf(__ubuf__ float* splitReference,
     __ubuf__ float* splitSum, __ubuf__ float* splitMultiplier, __ubuf__ float* finalLse,
-    __ubuf__ float* finalReference, __ubuf__ float* finalSum, uint32_t rowCount, uint32_t splitCount)
+    __ubuf__ float* finalReference, uint32_t rowCount, uint32_t splitCount)
 {
     uint32_t validElements = rowCount * 8;
     MaskReg rows = UpdateMask<float>(validElements);
@@ -56,15 +59,18 @@ __simd_vf__ inline void PrepareFlashDecodeVf(__ubuf__ float* splitReference,
         Mul(sum, sum, factor, rows);
         Add(total, total, sum, rows);
     }
-    StoreAlign(finalSum, total, rows);
     MaskReg nonemptyRows;
     RegTensor<float> safeSum, lse, naturalReference;
     RegTensor<uint32_t> infinityBits;
     Compares<float, CMPMODE::GT>(nonemptyRows, total, 0.0F, rows);
     Select(safeSum, total, one, nonemptyRows);
     Select(naturalReference, maximum, zero, nonemptyRows);
+    if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
+        // Split references remain binary R; only the final LSE restores this shift.
+        Adds(naturalReference, naturalReference, MXFP4_CX_SCALE_SHIFT, rows);
+    }
     Muls(naturalReference, naturalReference, MXFP4_LN2, rows);
-    if constexpr (UseCxQuant) {
+    if constexpr (QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT) {
         Adds(naturalReference, naturalReference, MXFP4_NEG_LN_DELTA, rows);
     }
     Ln(lse, safeSum, rows);
@@ -74,28 +80,16 @@ __simd_vf__ inline void PrepareFlashDecodeVf(__ubuf__ float* splitReference,
     Select(naturalReference, naturalReference, invalid, nonemptyRows);
     StoreAlign(finalLse, lse, rows);
     StoreAlign(finalReference, naturalReference, rows);
-}
 
-__simd_vf__ inline void NormalizeFlashDecodeVf(__ubuf__ float* output,
-    __ubuf__ float* rowSum, uint32_t rowCount, uint32_t dimension)
-{
-    MaskReg all = CreateMask<float, MaskPattern::ALL>();
-    RegTensor<float> zero, one;
-    Duplicate(zero, 0.0F);
-    Duplicate(one, 1.0F);
-    for (uint16_t row = 0; row < rowCount; ++row) {
-        RegTensor<float> denominator;
-        MaskReg nonempty;
-        LoadAlign<float, LoadDist::DIST_BRC_B32>(denominator, rowSum + row * 8);
-        Compares<float, CMPMODE::GT>(nonempty, denominator, 0.0F, all);
-        Select(denominator, denominator, one, nonempty);
-        for (uint16_t channel = 0; channel < dimension; channel += 64) {
-            RegTensor<float> value;
-            LoadAlign(value, output + row * dimension + channel);
-            Div<float, &MXFP4_OUTPUT_DIV>(value, value, denominator, all);
-            Select(value, value, zero, nonempty);
-            StoreAlign(output + row * dimension + channel, value, all);
-        }
+    // Reuse the stored a_i only after all stores complete. LSE above uses the
+    // original S; raw PV below is merged with a_i / S (without a split sum).
+    LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
+    for (uint16_t split = 0; split < splitCount; ++split) {
+        RegTensor<float> weight;
+        LoadAlign(weight, splitMultiplier + split * rowCount * 8);
+        Div<float, &MXFP4_OUTPUT_DIV>(weight, weight, safeSum, rows);
+        Select(weight, weight, zero, nonemptyRows);
+        StoreAlign(splitMultiplier + split * rowCount * 8, weight, rows);
     }
 }
 

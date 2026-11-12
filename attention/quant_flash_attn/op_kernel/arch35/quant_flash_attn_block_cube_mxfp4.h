@@ -36,7 +36,7 @@ template <typename INPUT_T, typename T, LayOutTypeEnum layout = LayOutTypeEnum::
         S2TemplateType s2TemplateType = S2TemplateType::Aligned128,
         DTemplateType dTemplateType = DTemplateType::Aligned128,
         DTemplateType dVTemplateType = DTemplateType::Aligned128, uint8_t KvLayoutType = 0, bool useDn = false,
-        bool isDAligned = true>
+        bool isDAligned = true, bool enableQf322F32Pre = false>
 class QuantFlashAttnBlockCubeMxfp4 {
 public:
     // 基本参数
@@ -59,6 +59,7 @@ public:
     static constexpr LayOutTypeEnum LAYOUT = layout;
     static constexpr bool PAGE_ATTENTION = (KvLayoutType > 0);
     static constexpr bool USE_DN = useDn;
+    static constexpr bool ENABLE_QF322F32_PRE = enableQf322F32Pre;
     static constexpr FixpipeConfig FIXPIPE_CONFIG = {CO2Layout::ROW_MAJOR, true};
 
     using Q_T = INPUT_T;
@@ -422,7 +423,11 @@ public:
                                     uint32_t validQueryRowCount)
     {
         MmadParams qkMmadParams {};
-        qkMmadParams.m = USE_DN ? validKvTokenCount : validQueryRowCount;
+        // ND dual destination splits M equally into the two Q16-aligned AIV
+        // shares. Mmad and Fixpipe must agree on the padded NZ row stride.
+        const uint32_t queryRows = (!USE_DN && !ENABLE_QF322F32_PRE) ?
+            (validQueryRowCount + 31U) / 32U * 32U : validQueryRowCount;
+        qkMmadParams.m = USE_DN ? validKvTokenCount : queryRows;
         qkMmadParams.n = USE_DN ? validQueryRowCount : validKvTokenCount;
         qkMmadParams.k = dBaseSize;
         qkMmadParams.cmatrixInitVal = true;
@@ -449,31 +454,47 @@ public:
     __aicore__ inline void FixpipeMm1(const LocalTensor<float>& scoreUbTensor, const LocalTensor<T>& scoreL0CTensor,
                                      Mxfp4RunInfo& runInfo, uint32_t validKvTokenCount)
     {
-        const uint32_t l0cRowStride = ((USE_DN ? validKvTokenCount : runInfo.actMSize) + 15U) / 16U * 16U;
-        for (uint32_t aivIndex = 0; aivIndex < CV_RATIO; ++aivIndex) {
-            const uint32_t rowsPerAiv = USE_DN ? mBaseSize / CV_RATIO : runInfo.actMSizeAlign32 / CV_RATIO;
-            const uint32_t firstQueryRow = aivIndex * rowsPerAiv;
-            if (firstQueryRow >= runInfo.actMSize) {
-                continue;
-            }
-            const uint32_t validQueryRowCount = AttentionCommon::Min(rowsPerAiv, runInfo.actMSize - firstQueryRow);
+        if constexpr (!ENABLE_QF322F32_PRE) {
+            // Dual destination requires NoQuant. V1 applies the FP32 score
+            // scale exactly once. DN keeps the fixed Q64 split even for tails;
+            // padded Q columns stay inside this L0C slot and are not output.
             FixpipeParamsC310<CO2Layout::ROW_MAJOR> scoreFixpipeParams {};
-            scoreFixpipeParams.mSize = USE_DN ? validKvTokenCount : validQueryRowCount;
-            scoreFixpipeParams.nSize = ((USE_DN ? validQueryRowCount : validKvTokenCount) + 7U) / 8U * 8U;
-            scoreFixpipeParams.srcStride = l0cRowStride;
+            scoreFixpipeParams.mSize = USE_DN ? validKvTokenCount : runInfo.actMSizeAlign32;
+            scoreFixpipeParams.nSize = USE_DN ? mBaseSize : (validKvTokenCount + 7U) / 8U * 8U;
+            scoreFixpipeParams.srcStride = USE_DN ?
+                (validKvTokenCount + 15U) / 16U * 16U : runInfo.actMSizeAlign32;
             scoreFixpipeParams.dstStride = USE_DN ? mBaseSize / CV_RATIO : s2SplitSize;
-            scoreFixpipeParams.dualDstCtl = 0;
-            scoreFixpipeParams.subBlockId = aivIndex;
+            scoreFixpipeParams.dualDstCtl = USE_DN ? 2 : 1;
             scoreFixpipeParams.quantPre = QuantMode_t::NoQuant;
-            if (CrossBufferType::CanScaleInFixpipe(constInfo_.scaleValue)) {
-                scoreFixpipeParams.quantPre = QuantMode_t::QF322F32_PRE;
-                float scale = constInfo_.scaleValue;
-                scoreFixpipeParams.deqScalar = static_cast<uint64_t>(*reinterpret_cast<uint32_t*>(&scale));
-            }
-
             scoreFixpipeParams.params.ndNum = 1;
-            const uint32_t l0cQueryOffset = USE_DN ? firstQueryRow * l0cRowStride : firstQueryRow * 16U;
-            Fixpipe<float, T, FIXPIPE_CONFIG>(scoreUbTensor, scoreL0CTensor[l0cQueryOffset], scoreFixpipeParams);
+            Fixpipe<float, T, FIXPIPE_CONFIG>(scoreUbTensor, scoreL0CTensor, scoreFixpipeParams);
+        } else {
+            const uint32_t l0cRowStride = ((USE_DN ? validKvTokenCount : runInfo.actMSize) + 15U) / 16U * 16U;
+            for (uint32_t aivIndex = 0; aivIndex < CV_RATIO; ++aivIndex) {
+                const uint32_t rowsPerAiv = USE_DN ? mBaseSize / CV_RATIO : runInfo.actMSizeAlign32 / CV_RATIO;
+                const uint32_t firstQueryRow = aivIndex * rowsPerAiv;
+                if (firstQueryRow >= runInfo.actMSize) {
+                    continue;
+                }
+                const uint32_t validQueryRowCount = AttentionCommon::Min(rowsPerAiv, runInfo.actMSize - firstQueryRow);
+                FixpipeParamsC310<CO2Layout::ROW_MAJOR> scoreFixpipeParams {};
+                scoreFixpipeParams.mSize = USE_DN ? validKvTokenCount : validQueryRowCount;
+                scoreFixpipeParams.nSize = ((USE_DN ? validQueryRowCount : validKvTokenCount) + 7U) / 8U * 8U;
+                scoreFixpipeParams.srcStride = l0cRowStride;
+                scoreFixpipeParams.dstStride = USE_DN ? mBaseSize / CV_RATIO : s2SplitSize;
+                scoreFixpipeParams.dualDstCtl = 0;
+                scoreFixpipeParams.subBlockId = aivIndex;
+                scoreFixpipeParams.quantPre = QuantMode_t::NoQuant;
+                if (CrossBufferType::CanScaleInFixpipe(constInfo_.scaleValue)) {
+                    scoreFixpipeParams.quantPre = QuantMode_t::QF322F32_PRE;
+                    float scale = constInfo_.scaleValue;
+                    scoreFixpipeParams.deqScalar = static_cast<uint64_t>(*reinterpret_cast<uint32_t*>(&scale));
+                }
+
+                scoreFixpipeParams.params.ndNum = 1;
+                const uint32_t l0cQueryOffset = USE_DN ? firstQueryRow * l0cRowStride : firstQueryRow * 16U;
+                Fixpipe<float, T, FIXPIPE_CONFIG>(scoreUbTensor, scoreL0CTensor[l0cQueryOffset], scoreFixpipeParams);
+            }
         }
     }
 
@@ -518,7 +539,8 @@ public:
                                    const LocalTensor<SCALE_T>& queryScaleL1Tensor, Mxfp4RunInfo& runInfo)
     {
         LoadData2DParamsV2 queryLoadParams {};
-        queryLoadParams.mStep = (runInfo.actMSize + 15U) / 16U;
+        queryLoadParams.mStep = (!USE_DN && !ENABLE_QF322F32_PRE) ?
+            runInfo.actMSizeAlign32 / 16U : (runInfo.actMSize + 15U) / 16U;
         queryLoadParams.kStep = dBaseSize / 64;
         queryLoadParams.srcStride = runInfo.actMSizeAlign32 / 16;
         queryLoadParams.dstStride = queryLoadParams.mStep;
@@ -876,9 +898,11 @@ template <typename INPUT_T, typename T, LayOutTypeEnum layout = LayOutTypeEnum::
           S1TemplateType s1TemplateType = S1TemplateType::Aligned128,
           S2TemplateType s2TemplateType = S2TemplateType::Aligned128,
           DTemplateType dTemplateType = DTemplateType::Aligned128,
-          DTemplateType dVTemplateType = DTemplateType::Aligned128, uint8_t KvLayoutType = 0, bool useDn = false>
+          DTemplateType dVTemplateType = DTemplateType::Aligned128, uint8_t KvLayoutType = 0, bool useDn = false,
+          bool enableQf322F32Pre = false>
 class QuantFlashAttnBlockCubeMxfp4Dummy {
 public:
+    static constexpr bool ENABLE_QF322F32_PRE = enableQf322F32Pre;
     static constexpr uint32_t mBaseSize = static_cast<uint32_t>(s1TemplateType);
     static constexpr uint32_t s2BaseSize = static_cast<uint32_t>(s2TemplateType);
     static constexpr uint32_t dBaseSize = static_cast<uint32_t>(dTemplateType);

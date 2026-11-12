@@ -36,7 +36,7 @@ extern aclnnStatus aclnnInnerQuantFlashAttnGetWorkspaceSize(
     const aclTensor* metadataOptional, const aclTensor* vTailOptional, const aclTensor* blockTableTailOptional,
     const aclTensor* sequsedVTailOptional, int64_t quantMode, double softmaxScale, int64_t maskMode, int64_t winLeft,
     int64_t winRight, int64_t maxSeqlenQ, int64_t maxSeqlenKV, const char* layoutQ, const char* layoutQDescale,
-    const char* layoutKv, const char* layoutOut, bool returnSoftmaxLse, const aclTensor* attnOut,
+    const char* layoutKv, const char* layoutOut, bool returnSoftmaxLse, int64_t quantSchema, const aclTensor* attnOut,
     const aclTensor* softmaxLse, uint64_t* workspaceSize, aclOpExecutor** executor);
 
 extern aclnnStatus aclnnInnerQuantFlashAttn(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
@@ -108,10 +108,14 @@ aclnnStatus aclnnQuantFlashAttnGetWorkspaceSize(
     const aclTensor* metadataOptional, const aclTensor* vTailOptional, const aclTensor* blockTableTailOptional,
     const aclTensor* sequsedVTailOptional, int64_t quantMode, double softmaxScale, int64_t maskMode, int64_t winLeft,
     int64_t winRight, int64_t maxSeqlenQ, int64_t maxSeqlenKV, const char* layoutQ, const char* layoutQDescale,
-    const char* layoutKv, const char* layoutOut, bool returnSoftmaxLse, const aclTensor* attnOut,
+    const char* layoutKv, const char* layoutOut, bool returnSoftmaxLse, int64_t quantSchema, const aclTensor* attnOut,
     const aclTensor* softmaxLseOptional, uint64_t* workspaceSize, aclOpExecutor** executor)
 {
     OP_LOGD("start aclnnQuantFlashAttnGetWorkspaceSize");
+    if (quantSchema < 0 || quantSchema > 2 || (quantMode != 5 && quantSchema != 2)) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "quant_schema must be 0, 1 or 2; non-default requires quant_mode=5.");
+        return ACLNN_ERR_PARAM_INVALID;
+    }
 
     // sinks shape为{0}时置nullptr
     QuantFlashAttnProcessSinks(sinksOptional);
@@ -136,7 +140,7 @@ aclnnStatus aclnnQuantFlashAttnGetWorkspaceSize(
         q, k, v, qDescale, kDescale, vDescale, blockTableOptional, pScaleOptional, cuSeqlensQOptional,
         cuSeqlensKvOptional, sequsedQOptional, sequsedKvOptional, sinksOptional, attnMaskOptional, metadataOptional,
         vTailOptional, blockTableTailOptional, sequsedVTailOptional, quantMode, softmaxScale, maskMode, winLeft,
-        winRight, maxSeqlenQ, maxSeqlenKV, layoutQ, layoutQDescale, layoutKv, layoutOut, returnSoftmaxLse, attnOut,
+        winRight, maxSeqlenQ, maxSeqlenKV, layoutQ, layoutQDescale, layoutKv, layoutOut, returnSoftmaxLse, quantSchema, attnOut,
         placeHolder, workspaceSize, executor);
 
     // 销毁占位符

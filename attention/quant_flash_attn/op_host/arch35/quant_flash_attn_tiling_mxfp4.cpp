@@ -314,6 +314,7 @@ void QuantFlashAttnTilingMxfp4Impl::SetQFATilingData()
     tilingData_.baseTiling.quantFlashAttnBaseParams.seqUsedQSize = seqUsedQFlag_ ? qfaInfo_->bSize : 0;
     tilingData_.baseTiling.quantFlashAttnBaseParams.seqUsedKvSize = seqUsedKvFlag_ ? qfaInfo_->bSize : 0;
     tilingData_.baseTiling.quantFlashAttnBaseParams.isSoftMaxLseEnable = qfaInfo_->softmaxLseFlag;
+    tilingData_.baseTiling.quantFlashAttnBaseParams.quantSchema = static_cast<uint8_t>(qfaInfo_->quantSchema);
     tilingData_.baseTiling.quantFlashAttnBaseParams.iscuSeqLengthsNull =
         !(cuSeqLenQFlag_ && qfaInfo_->qLayout == QfaLayout::TND);
     tilingData_.baseTiling.quantFlashAttnBaseParams.iscuSeqLengthsKVNull =
