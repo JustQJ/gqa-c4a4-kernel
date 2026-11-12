@@ -1,0 +1,83 @@
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+# -----------------------------------------------------------------------------------------------------------
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+"""Accuracy options and dependency-free case collection."""
+import os
+import pytest
+from .quant_flash_attn_paramset_common import P_QUANT_SCHEMES, resolve_quantization
+
+_VALID_MODES = {'gen', 'cpu', 'npu', 'compare'}
+# This is a runner module, not a pytest entry. Keep collection free of torch.
+collect_ignore = ['common/test_runner.py']
+
+
+def _parse_golden_mode(raw):
+    parts = {part.strip() for part in raw.split(',') if part.strip()}
+    if not parts or parts - (_VALID_MODES | {'all'}):
+        raise pytest.UsageError('golden-mode must be all or a combination of gen,cpu,npu,compare')
+    return set(_VALID_MODES) if 'all' in parts else parts
+
+
+def pytest_addoption(parser):
+    group = parser.getgroup('qfa_mxfp4 accuracy')
+    group.addoption('--golden-mode', default='all', help='all or comma-separated gen,cpu,npu,compare')
+    group.addoption('--cache-dir', default=None, help='Input and reference .pt cache directory')
+    group.addoption('--scope', choices=('full', 'small'), default='full')
+    group.addoption('--quant-schema', type=int, choices=(0, 1, 2), default=None,
+                    help='Public API and references: 0=OCP, 1=CX, 2=CX Delta (default)')
+    group.addoption('--p-quant-scheme', choices=P_QUANT_SCHEMES, default=None,
+                    help='Named alias for quant-schema; must agree if both options are supplied')
+    group.addoption('--reference-backend', choices=('global', 'kernel'), default='kernel',
+                    help='Actual-metadata/16-task kernel model (default) or preserved global CPU golden')
+    group.addoption('--triton-reference', action='store_true', help='Also compare against the metadata-based Triton reference')
+    group.addoption('--fp64-reference', action='store_true', help='After precision passes, measure the gap to unquantized-P FP64')
+    group.addoption('--device-id', type=int, default=0)
+    group.addoption('--package', default=os.environ.get('QFA_PACKAGE', 'cann_ops_transformer'),
+                    help='Installed package that registers torch.ops.cann_ops_transformer')
+    group.addoption('--reference-threads', type=int, default=1)
+
+
+def pytest_generate_tests(metafunc):
+    if 'params' not in metafunc.fixturenames:
+        return
+    try:
+        schema, scheme = resolve_quantization(metafunc.config.getoption('--quant-schema'),
+                                             metafunc.config.getoption('--p-quant-scheme'))
+    except ValueError as error:
+        raise pytest.UsageError(str(error)) from error
+    cases = [dict(case, quant_schema=schema, p_quant_scheme=scheme,
+                  reference_backend=metafunc.config.getoption('--reference-backend'))
+             for case in metafunc.module.paramset.get_cases(metafunc.config.getoption('--scope'))]
+    skipped = metafunc.module.paramset.SKIP_CASES
+    metafunc.parametrize('params', [pytest.param(case, id=case['name'],
+        marks=pytest.mark.skip(reason='in SKIP_CASES') if case['name'] in skipped else ()) for case in cases])
+
+
+@pytest.fixture
+def golden_mode(request):
+    return _parse_golden_mode(request.config.getoption('--golden-mode'))
+
+
+@pytest.fixture
+def cache_dir(request):
+    return request.config.getoption('--cache-dir')
+
+
+@pytest.fixture
+def execution_options(request):
+    threads = request.config.getoption('--reference-threads')
+    device = request.config.getoption('--device-id')
+    if threads < 1 or device < 0:
+        raise pytest.UsageError('reference-threads must be positive; device-id must be nonnegative')
+    return dict(package=request.config.getoption('--package'), device_id=device, reference_threads=threads,
+                triton_reference=request.config.getoption('--triton-reference'),
+                fp64_reference=request.config.getoption('--fp64-reference'))
