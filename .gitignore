@@ -52,3 +52,7 @@ third_party/
 # pre-commit log
 log/
 pre-commit_reports/
+
+# Local QFA experiments and profiling artifacts
+/attention/quant_flash_attn/tests/pytest/mxfp4_vector/
+/operators/

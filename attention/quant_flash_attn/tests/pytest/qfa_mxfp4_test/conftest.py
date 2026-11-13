@@ -44,9 +44,51 @@ def pytest_addoption(parser):
     group.addoption('--package', default=os.environ.get('QFA_PACKAGE', 'cann_ops_transformer'),
                     help='Installed package that registers torch.ops.cann_ops_transformer')
     group.addoption('--reference-threads', type=int, default=1)
+    perf = parser.getgroup('qfa_mxfp4 performance')
+    perf.addoption('--run-perf', action='store_true', help='Explicitly enable performance tests')
+    perf.addoption('--perf-case-set', choices=('document', 'mxfp8'), default='document',
+                   help='Document small/full scope, or all imported MXFP8 cases (scope ignored)')
+    perf.addoption('--perf-kind', choices=('all', 'prefill', 'decode'), default='all')
+    perf.addoption('--perf-backends', default='c4,c8,bf16')
+    perf.addoption('--perf-mode', choices=('graph', 'eager', 'msprof'), default='graph')
+    perf.addoption('--perf-warmup', type=int, default=3)
+    perf.addoption('--perf-rounds', type=int, default=5)
+    perf.addoption('--perf-repeats', type=int, default=20)
+    perf.addoption('--perf-output', default='perf_output')
+    perf.addoption('--perf-shard-index', type=int, default=0)
+    perf.addoption('--perf-shard-count', type=int, default=1)
+    perf.addoption('--msprof', action='store_true', help='Collect paired eager kernel timings with msprof')
+    perf.addoption('--parse-prof', default=None, help='Parse an existing msprof directory against perf-output records')
+    perf.addoption('--perf-baseline', default=None, help='Compare against a compatible summary.json')
+    perf.addoption('--perf-threshold', type=float, default=8.0)
+
+
+def pytest_configure(config):
+    if config.getoption('--msprof') or config.getoption('--parse-prof'):
+        from .common.perf_profiler import run_or_parse
+        try:
+            code = run_or_parse(config)
+        except (ValueError, RuntimeError) as error:
+            raise pytest.UsageError(str(error)) from error
+        pytest.exit('msprof collection and validation complete', returncode=code)
 
 
 def pytest_generate_tests(metafunc):
+    if 'perf_params' in metafunc.fixturenames:
+        from .quant_flash_attn_paramset_perf_rdv import get_cases, shard_cases
+        config = metafunc.config
+        try:
+            schema, _ = resolve_quantization(config.getoption('--quant-schema'), config.getoption('--p-quant-scheme'))
+            cases = shard_cases(get_cases(config.getoption('--scope'), config.getoption('--perf-kind'),
+                                         config.getoption('--perf-case-set')),
+                                config.getoption('--perf-shard-index'), config.getoption('--perf-shard-count'))
+        except ValueError as error:
+            raise pytest.UsageError(str(error)) from error
+        metafunc.parametrize('perf_params', [pytest.param(dict(case, quant_schema=schema), id=case['name'],
+            marks=pytest.mark.skip(reason=case.get('skip_reason') or 'Requires --run-perf')
+                if case.get('skip_reason') or not config.getoption('--run-perf') else ())
+                                             for case in cases])
+        return
     if 'params' not in metafunc.fixturenames:
         return
     try:
@@ -81,3 +123,20 @@ def execution_options(request):
     return dict(package=request.config.getoption('--package'), device_id=device, reference_threads=threads,
                 triton_reference=request.config.getoption('--triton-reference'),
                 fp64_reference=request.config.getoption('--fp64-reference'))
+
+
+@pytest.fixture(scope='session')
+def perf_options(request):
+    from pathlib import Path
+    from .quant_flash_attn_paramset_perf_rdv import BACKENDS
+    config = request.config
+    backends = config.getoption('--perf-backends').split(',')
+    if not backends or len(set(backends)) != len(backends) or any(b not in BACKENDS for b in backends):
+        raise pytest.UsageError('perf-backends must select unique c4,c8,bf16 backends')
+    values = {name: config.getoption('--perf-'+name) for name in ('warmup', 'rounds', 'repeats')}
+    if min(values.values()) <= 0 or config.getoption('--device-id') < 0:
+        raise pytest.UsageError('Performance counts must be positive; device-id must be nonnegative')
+    return dict(values, backends=backends, mode=config.getoption('--perf-mode'),
+                case_set=config.getoption('--perf-case-set'),
+                output_dir=str(Path(config.getoption('--perf-output')).resolve()),
+                package=config.getoption('--package'), device_id=config.getoption('--device-id'))

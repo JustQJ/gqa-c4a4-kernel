@@ -1,6 +1,6 @@
 # QFA MXFP4 精度测试
 
-沿用相邻 `qfa_mxfp8_test` 的参数集、pytest 入口、公共 runner、CPU golden、缓存、结果比较结构，调用公开的 `quant_flash_attn_metadata` 和 `quant_flash_attn`。当前仅提供精度测试，不含性能采集或 V-tail 测试。
+沿用相邻 `qfa_mxfp8_test` 的参数集、pytest 入口、公共 runner、CPU golden、缓存、结果比较结构，调用公开的 `quant_flash_attn_metadata` 和 `quant_flash_attn`。本 README 介绍精度测试，不含 V-tail 测试；性能对比、msprof / msprof op 采集与历史结果统一见 [Pref_Readme.md](Pref_Readme.md)。
 
 ## 文件结构
 
@@ -13,6 +13,8 @@ qfa_mxfp4_test/
 ├── quant_flash_attn_paramset_func_rdv.py # 全量/小量功能矩阵
 ├── test_quant_flash_attn_debug.py        # debug 入口
 ├── test_quant_flash_attn_func_rdv.py     # 功能入口
+├── prof_quant_flash_attn.py             # 单C4/C8场景的msprof op采集入口
+├── Pref_Readme.md                       # 性能测试方法及实测记录
 └── common/
     ├── quant_flash_attn_golden.py        # 数据生成、解码、CPU CX参考、公开API调用
     ├── cpu_mxfp4_golden_kernel.py        # metadata/16-task CPU 分块参考
@@ -465,3 +467,7 @@ attention_op = qfa.quant_flash_attn
 assert metadata_op is torch.ops.cann_ops_transformer.quant_flash_attn_metadata
 assert attention_op is torch.ops.cann_ops_transformer.quant_flash_attn
 ```
+
+## 性能测试与采集
+
+原第7、8、9节已移至 [Pref_Readme.md](Pref_Readme.md)，包含独立 msprof op 采集、文档性能集合、MXFP8迁入集合及历史对比结果。
