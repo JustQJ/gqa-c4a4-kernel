@@ -32,6 +32,8 @@ def pytest_addoption(parser):
     group.addoption('--golden-mode', default='all', help='all or comma-separated gen,cpu,npu,compare')
     group.addoption('--cache-dir', default=None, help='Input and reference .pt cache directory')
     group.addoption('--scope', choices=('full', 'small'), default='full')
+    group.addoption('--accuracy-case-set', choices=('document', 'bench16k'), default='document',
+                    help='Functional accuracy cases: existing matrix or the explicit bench16k cases')
     group.addoption('--quant-schema', type=int, choices=(0, 1, 2), default=None,
                     help='Public API and references: 0=OCP, 1=CX, 2=CX Delta (default)')
     group.addoption('--p-quant-scheme', choices=P_QUANT_SCHEMES, default=None,
@@ -46,9 +48,9 @@ def pytest_addoption(parser):
     group.addoption('--reference-threads', type=int, default=1)
     perf = parser.getgroup('qfa_mxfp4 performance')
     perf.addoption('--run-perf', action='store_true', help='Explicitly enable performance tests')
-    perf.addoption('--perf-case-set', choices=('document', 'mxfp8'), default='document',
-                   help='Document small/full scope, or all imported MXFP8 cases (scope ignored)')
-    perf.addoption('--perf-kind', choices=('all', 'prefill', 'decode'), default='all')
+    perf.addoption('--perf-case-set', choices=('document', 'mxfp8', 'bench16k'), default='document',
+                   help='Document small/full scope; MXFP8 and fixed bench16k cases ignore scope')
+    perf.addoption('--perf-kind', choices=('all', 'prefill', 'decode', 'mixed'), default='all')
     perf.addoption('--perf-backends', default='c4,c8,bf16')
     perf.addoption('--perf-mode', choices=('graph', 'eager', 'msprof'), default='graph')
     perf.addoption('--perf-warmup', type=int, default=3)
@@ -82,7 +84,7 @@ def pytest_generate_tests(metafunc):
             cases = shard_cases(get_cases(config.getoption('--scope'), config.getoption('--perf-kind'),
                                          config.getoption('--perf-case-set')),
                                 config.getoption('--perf-shard-index'), config.getoption('--perf-shard-count'))
-        except ValueError as error:
+        except (ValueError, OSError) as error:
             raise pytest.UsageError(str(error)) from error
         metafunc.parametrize('perf_params', [pytest.param(dict(case, quant_schema=schema), id=case['name'],
             marks=pytest.mark.skip(reason=case.get('skip_reason') or 'Requires --run-perf')
@@ -94,11 +96,18 @@ def pytest_generate_tests(metafunc):
     try:
         schema, scheme = resolve_quantization(metafunc.config.getoption('--quant-schema'),
                                              metafunc.config.getoption('--p-quant-scheme'))
-    except ValueError as error:
+        paramset = metafunc.module.paramset
+        # Debug retains its original matrix; the functional suite owns case-set selection.
+        if hasattr(paramset, 'CASE_SETS'):
+            selected = paramset.get_cases(
+                metafunc.config.getoption('--scope'), metafunc.config.getoption('--accuracy-case-set'))
+        else:
+            selected = paramset.get_cases(metafunc.config.getoption('--scope'))
+    except (ValueError, OSError) as error:
         raise pytest.UsageError(str(error)) from error
     cases = [dict(case, quant_schema=schema, p_quant_scheme=scheme,
                   reference_backend=metafunc.config.getoption('--reference-backend'))
-             for case in metafunc.module.paramset.get_cases(metafunc.config.getoption('--scope'))]
+             for case in selected]
     skipped = metafunc.module.paramset.SKIP_CASES
     metafunc.parametrize('params', [pytest.param(case, id=case['name'],
         marks=pytest.mark.skip(reason='in SKIP_CASES') if case['name'] in skipped else ()) for case in cases])

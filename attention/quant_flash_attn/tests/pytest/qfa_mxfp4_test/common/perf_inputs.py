@@ -13,6 +13,7 @@
 """One CPU packed input, materialized for only one NPU backend at a time."""
 import hashlib
 from ..quant_flash_attn_paramset_perf_rdv import sequence_lengths
+from ..quant_flash_attn_paramset_common import paged_kv_pool_size
 
 
 def generate_inputs(case):
@@ -21,7 +22,7 @@ def generate_inputs(case):
     cu, _, kv_lengths = sequence_lengths(case)
     counts = [(length+page-1)//page for length in kv_lengths]
     pages_per_seq = max(counts)
-    pages = sum(counts)
+    pages = paged_kv_pool_size(kv_lengths, page, case.get('kv_cache_num_blocks'))
     generator = torch.Generator().manual_seed(case['seed'])
     shapes = ((cu[-1], h, d//2), (pages, page, hk, d//2), (pages, page, hk, d//2))
     raw = [torch.randint(0, 256, shape, dtype=torch.uint8, generator=generator) for shape in shapes]

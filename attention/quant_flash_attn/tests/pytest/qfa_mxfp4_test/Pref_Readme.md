@@ -4,18 +4,54 @@
 
 | 目标 | 入口 | 产物与计时口径 |
 | --- | --- | --- |
-| 单个 C4/C8 kernel 耗时、PMU、核内流水 | [prof_quant_flash_attn.py](prof_quant_flash_attn.py)，调用 msprof op | OpBasicInfo、7组 PMU CSV 或 PipeTimeline |
+| 按case采普通msprof、PMU或核内流水 | [prof_quant_flash_attn.py](prof_quant_flash_attn.py)，--profiler msprof/op/both | 普通op_summary、7组PMU或PipeTimeline，输入来源一致 |
 | C4/C8/BF16 文档集合性能对比 | test_quant_flash_attn_perf_rdv.py --run-perf | graph_replay_us：NPUGraph + Event |
 | MXFP8 迁入集合的 C4/C8 对比 | 同一 pytest 入口，--perf-case-set mxfp8 | page512、PA_BBND，205个非skip场景 |
+| 16k bench场景对比 | 同一 pytest 入口，--perf-case-set bench16k | 固定12项，包含mixed；见第4节 |
 | 批量成对 kernel 耗时 | 同一 pytest 入口加 --msprof | msprof_task_us：普通 msprof 的 Task Duration |
 
 普通 msprof 的 PipeUtilization 是流水占用指标；核内时间线使用 msprof op 的 PipeTimeline。不同口径分别报告，不混算加速比。
 
-## 1. 使用 msprof op 查看耗时和核内流水
+## 1. 统一单例采集入口
 
-### 1.1 单算子采集入口
+[prof_quant_flash_attn.py](prof_quant_flash_attn.py) 支持普通msprof和msprof op。默认仍为op，原手工Q/KV参数保留。命名case直接读取当前bench16k集合，复用perf_inputs/prepare_call，保持随机输入、固定scale、页表、mask和31374页池与性能测试一致；采集不运行CPU/Triton参考。
 
-[prof_quant_flash_attn.py](prof_quant_flash_attn.py) 直接启动 msprof op，随后校验采集结果。每次选择一个C4或C8场景，默认C4；批量性能对比的启动方法见第2节，实测结果见第3节。
+先配置CANN和配套算子包，从tests/pytest目录运行：
+
+```bash
+# 离线列出当前12个case及完整参数，无需device或NPU。
+python3 -m qfa_mxfp4_test.prof_quant_flash_attn --list-cases
+
+# 一个case同时采两种工具、C4/C8，共4组，按顺序执行。
+python3 -m qfa_mxfp4_test.prof_quant_flash_attn --device 7 --package "$QFA_PACKAGE" --case decode_3 --profiler both --backend both --metrics Default --output "$QFA_WORK/decode3-both-run01"
+
+# 只用普通msprof；--app-metrics控制普通采集的指标组。
+python3 -m qfa_mxfp4_test.prof_quant_flash_attn --device 7 --package "$QFA_PACKAGE" --case decode_3 --profiler msprof --backend c4 --app-metrics PipeUtilization --repeat 10 --output "$QFA_WORK/decode3-msprof-run01"
+
+# msprof op核内流水；Default=7组PMU，PipeTimeline=核内时间线。
+python3 -m qfa_mxfp4_test.prof_quant_flash_attn --device 7 --package "$QFA_PACKAGE" --case decode_3 --profiler op --backend c4 --metrics PipeTimeline --output "$QFA_WORK/decode3-timeline-run01"
+
+# 指令时间线（需目标工具支持InstrTimeline），C4/C8各采1个launch。
+python3 -m qfa_mxfp4_test.prof_quant_flash_attn --device 7 --package "$QFA_PACKAGE" --case dual_prefill_1 --profiler op --backend both --metrics InstrTimeline --warmup 20 --repeat 1 --prof-warmup 3 --launch-count 1 --output "$QFA_WORK/dual-prefill1-instr-run01"
+
+# 多case或完整集合；每次output必须是新目录。
+python3 -m qfa_mxfp4_test.prof_quant_flash_attn --device 7 --package "$QFA_PACKAGE" --case decode_3 decode_4 --profiler both --backend both --metrics Default --dry-run
+python3 -m qfa_mxfp4_test.prof_quant_flash_attn --device 7 --package "$QFA_PACKAGE" --case all --profiler both --backend both --metrics Default --output "$QFA_WORK/bench16k-all-prof-run01"
+```
+
+case支持短名decode_3或完整名bench16k_decode_3，--case-name是--case的别名。可选择12项中的任意一项或多项；all选择完整集合。命名case不接受--q-lens、--kv-lens、--heads、--layout等形状覆盖，防止同名case静默变化；--seed、--quant-schema及C8专用--p-scale可显式覆盖，并记录到解析后参数和指纹中。手工输入可选--kv-cache-num-blocks固定物理池，不指定时沿用精度生成器的紧凑池+3页和随机scale。
+
+单工具/单后端/单case沿用output根目录。多组合按output/case/backend/profiler分目录，并写collection_summary.json；每个叶目录都有invocation.json、profile.log、worker_record.json、profile_summary.json及原始PROF/OPPROF产物。worker_record记录实际case、指纹、CPU输入SHA、真实张量形状、dtype、算子包环境及释放前后allocated。命名case在两种工具/C4/C8之间使用相同FP4编码和页表；C8按同一数据精确展开。
+
+普通msprof要求Eager，严格核对warmup+repeat以及可选post-range-check的主算子任务数，报告只统计预热后的repeat次；默认warmup20，repeat沿用launch-count默认值（BasicInfo1、Default5），可显式设置。summary标记eager_single_case_diagnostic，属于单例诊断，不替代标准性能验收，也不与NPUGraph/Event或msprof op耗时混算。
+
+msprof op沿用MSTX区间过滤、工具预热与产物检查；--metrics只控制op，普通msprof由--app-metrics控制。若某环境的MSTX过滤导致空采，可显式加--no-mstx，仅使用kernel过滤；这可能捕获应用预热调用，summary会标明capture_scope，不能冒充原MSTX区间。图模式仅保留op诊断支持。空采、缺指标、无效耗时或has data loss仍按失败/partial报告，不自动吞掉错误。
+
+InstrTimeline在2026-11-16的200容器卡7、Ascend950PR_958b及msopprof26.2.0上，对dual_prefill_1的C4/C8均出现data loss和aivec error259，worker异常退出。工具仍返回0并导出trace，但入口因缺少完成记录而拒绝；这些产物只能用于故障诊断，不能作为有效完整流水。该组合尚未完成成功验证。
+
+### 1.1 原手工单例用法
+
+以下手工参数示例沿用默认--profiler op，随后校验采集结果。默认C4，批量性能对比见第2节，历史实测见第3节。
 
 先按[主 README 构建与运行说明](README.md#新机器编译安装精度测试与-python-调用2026-11-12)配置CANN、配套OPP/Python包和 QFA_PACKAGE，再进入包含 qfa_mxfp4_test 的pytest父目录。确认目标卡没有其他任务后运行；设备号只作示例。也支持从任意目录使用脚本绝对路径启动。
 
@@ -130,19 +166,20 @@ Q1024/KV4096的首次PipeTimeline产生5954条事件，但日志报告 channel20
 
 ### 2.1 选择测试集合
 
-`--perf-case-set` 决定用例集合；`--scope` 只对 `document` 集合生效。参数定义见 [quant_flash_attn_paramset_perf_rdv.py](quant_flash_attn_paramset_perf_rdv.py)。
+`--perf-case-set` 决定用例集合；`--scope` 对 `document` 集合生效，`mxfp8` 和 `bench16k` 忽略此选项。参数定义见 [quant_flash_attn_paramset_perf_rdv.py](quant_flash_attn_paramset_perf_rdv.py)。
 
 | 集合与范围 | 用例数 | 主要配置 |
 | --- | ---: | --- |
 | `--perf-case-set document --scope small` | 75：Prefill15、Decode/MTP60 | Qwen3.6 TP2，D256、Q头8/KV头1；page256、causal、LSE关闭 |
 | `--perf-case-set document --scope full` | 1395：Prefill135、Decode/MTP1260 | 三个模型各TP1/2/4；D128/256；page256、causal、LSE关闭 |
 | `--perf-case-set mxfp8` | 211：6项skip，实际205 | page512、PA_BBND；逐序列变长、零Q、mask0/3、两种Q-scale布局及LSE组合 |
+| `--perf-case-set bench16k` | 12 | 固定长度和31374页KV池、Nq16/Nkv2/D256、page128，包含mixed；见第4节 |
 
 document集合的Prefill覆盖Q8192、B1/2/4、KV8192至262144；Decode/MTP覆盖Q1/2/4/6/8、KV32768/65536/131072/262144。small的Decode batch为1/2/16，full为1/2/4/8/16/32/64。默认 `--scope full`；小量测试需要显式写 `--scope small`。
 
 MXFP8集合保存在本目录 [perf_cases_mxfp8.json](perf_cases_mxfp8.json)，包含来源SHA和source_case_id，运行时不依赖兄弟目录。211项中Prefill102、Decode109；跳过6项耗时过长用例后为Prefill98、Decode107。`--scope small` 不会缩小此集合。参数保留逐序列Q/KV长度、max长度提示、头数、D128/256、mask、Q-scale布局、LSE及C8的p_scale；194项常规case的p_scale=1且LSE关闭，17项D256红线case中7项开启LSE。
 
-可用 `--perf-kind prefill` / `decode` / `all` 筛选场景类型，默认all；pytest `-k` 可进一步按case ID筛选。两张卡的分片按选定集合与类型拆分，skip用例仍保留其分片位置。
+可用 `--perf-kind prefill` / `decode` / `mixed` / `all` 筛选场景类型，默认all；mixed目前由bench16k集合提供。pytest `-k` 可进一步按case ID筛选。两张卡的分片按选定集合与类型拆分，skip用例仍保留其分片位置。
 
 ### 2.2 选择被测实现与输入方式
 
@@ -156,7 +193,7 @@ MXFP8集合保存在本目录 [perf_cases_mxfp8.json](perf_cases_mxfp8.json)，�
 
 同一case的各路始终使用同一张卡，双卡只拆分case。CPU保留一份随机FP4编码及页表；C8精确转成E4M3，BF16解码后乘相同scale（Q/K为1/16，V为1/4）。每条序列按实际KV长度分配独占物理页，页号随机打乱，页表未使用位置填-1；Q按cu_seqlens打包。数据转换、H2D/D2H、metadata、mask、首次JIT、检查及落盘均在计时外。
 
-C4与C8使用 `--package` 指定的同一配套QFA包，分别为mode5和mode1。C4默认 `--quant-schema 2`；C8的p_scale在document集合为448，在mxfp8集合使用各case配置，C4不传此参数。缩放默认1/sqrt(D)，Q/输出为TND，C4/C8的KV为PA_BBND。
+C4与C8使用 `--package` 指定的同一配套QFA包，分别为mode5和mode1。C4默认 `--quant-schema 2`；C8的p_scale在document和bench16k集合为448，在mxfp8集合使用各case配置，C4不传此参数。缩放默认1/sqrt(D)，Q/输出为TND，C4/C8的KV为PA_BBND。
 
 BF16使用torch_npu的FIA V2非量化分页接口，Q为TND、KV为BnBsH，使用同一页表和对应mask语义。三路的P算法不同，性能完成检查不要求三路输出逐位一致。
 
@@ -187,9 +224,9 @@ BF16使用torch_npu的FIA V2非量化分页接口，Q为TND、KV为BnBsH，使�
 | 参数 | 默认值 | 控制内容 |
 | --- | --- | --- |
 | `--run-perf` | 关闭 | 启用性能case；未指定时跳过性能测试 |
-| `--perf-case-set` | document | 选择document或mxfp8用例集合 |
-| `--scope` | full | document的small/full范围；mxfp8忽略此选项 |
-| `--perf-kind` | all | prefill、decode或all |
+| `--perf-case-set` | document | 选择document、mxfp8或bench16k用例集合 |
+| `--scope` | full | document的small/full范围；mxfp8与bench16k忽略此选项 |
+| `--perf-kind` | all | prefill、decode、mixed或all |
 | `--perf-backends` | c4,c8,bf16 | 被测实现及逐路执行顺序；只比较C4/C8时显式写c4,c8 |
 | `--perf-mode` | graph | graph/eager的Event计时；工具采集使用--msprof |
 | `--perf-warmup` | 3 | Eager预热次数；graph模式另做同次数的整图预热 |
@@ -410,3 +447,40 @@ Default四组均完整通过，各5次主算子，每次7份PMU CSV、各96行�
 | Decode/MTP，N2TGD | 134.686264 | 218.225433 | validated，11,070事件 | partial，26,233事件 |
 
 8组均执行完成，5组完整通过、3组流水为partial。Prefill C4在channel17/20、Prefill C8在channel17/26报告has data loss；Decode C8也有多通道数据丢失提示。三份时间线保留，可查看已采到的片段，但不能作为完整核内流水；采集入口按预期返回非零并保存partial摘要。Decode C4流水无数据丢失提示。
+
+## 4. 16k bench 性能集合
+
+通过 `--perf-case-set bench16k` 启用固定12项：Prefill6、Decode4、Mixed2；`small`和`full`均为12项。完整长度及固定属性见 [README.md](README.md) 的16k bench精度集合。使用Nq16/Nkv2/D256/page128、causal、softmax_scale=1/16、LSE关闭；Prefill/Mixed的Q-scale为TND，Decode为N2TGD。
+
+所有case的K、V各分配固定逻辑池 `[31374,128,512]`，只改变请求的有效Q/KV长度。FP4按两个元素打包，FP8及可选BF16按各自dtype存储，物理页数始终为31374。每路输入、scale、转换及metadata均在主算子计时区域外准备，逐路测完释放。结果中保留完整长度、kv_cache_num_blocks、logical_kv_cache_shape和实际input_shapes，便于核对分配。
+
+在pytest父目录、已配置CANN和算子包的环境中执行；变量沿用主README：
+
+```bash
+python3 -m qfa_mxfp4_test.quant_flash_attn_paramset_bench16k
+
+BENCH16K_PERF_ROOT="$QFA_WORK/bench16k-perf"
+python3 -m pytest qfa_mxfp4_test/test_quant_flash_attn_perf_rdv.py --run-perf --perf-case-set bench16k --perf-backends c4,c8 --perf-mode graph --quant-schema 2 --device-id "$DEVICE" --package "$QFA_PACKAGE" --perf-output "$BENCH16K_PERF_ROOT"
+
+python3 -m qfa_mxfp4_test.common.perf_report "$BENCH16K_PERF_ROOT" --case-set bench16k --expected 12 --output "$BENCH16K_PERF_ROOT/report"
+```
+
+沿用3次预热、5轮×20次调用取中位数的计时口径。需要BF16时显式使用 `--perf-backends c4,c8,bf16`，集合仍为12项；FIA BF16基线在同一场景和输入上实测。
+
+`--perf-kind prefill/decode/mixed`分别选择6/4/2项，汇总同时使用`--kind`及对应`--expected`。跨设备分片沿用`--perf-shard-index`、`--perf-shard-count`，结果目录分开，最后一起传给perf_report。
+
+普通msprof单独执行和汇总，不与Graph结果合并：
+
+```bash
+python3 -m pytest qfa_mxfp4_test/test_quant_flash_attn_perf_rdv.py --run-perf --perf-case-set bench16k --perf-backends c4,c8 --msprof --device-id "$DEVICE" --package "$QFA_PACKAGE" --perf-output "$QFA_WORK/bench16k-msprof"
+```
+
+汇总核对完整case参数指纹，拒绝同名但长度、页池容量或其他参数不一致的结果。旧`fia`集合及`--fia-shapes`入口已移除，原document、mxfp8范围保持原样。初始10项于2026-11-16在200容器卡7使用默认schema2，10/10精度和10/10 C4/C8 Graph性能均通过；真实固定池形状和20路显存释放已核对。完整10项耗时与证据见[本次设备验证报告](../../../../../operators/quant_flash_attn/bench16k_npu_validation_20261116_card7_01/README.md)。
+
+新增短KV Decode项为decode_3（B32/Q1）和decode_4（B33/Q4含单条长KV），两项分别补测；此前10项报告为扩展前的历史结果。
+
+此前新增两项在200容器卡7的独立补测已完成，见[历史新增Decode补测报告](../../../../../operators/quant_flash_attn/bench16k_decode_extra_20261116_card7_01/README.md)。decode_3后16条KV现改为256+25i，其旧测量与缓存仅对应修改前的长度；其余11项参数保留。
+
+修订后的decode_3已在200容器卡7独立重测：三方精度1/1、C4/C8 Graph性能1/1通过；C4/C8耗时48.793/41.291μs，固定池形状与两路显存释放已核对。见[256起始短尾KV新版报告](../../../../../operators/quant_flash_attn/bench16k_decode3_shorttail_20261116_card7_01/README.md)。
+
+2026-11-16统一入口验证：200容器卡7上decode_3的普通msprof/op Default×C4/C8四组合及原手工入口通过，输入SHA与原Graph一致；PipeTimeline出现数据丢失，标partial并拒绝。38项离线契约通过，原始产物见[统一采集入口验证报告](../../../../../operators/quant_flash_attn/unified_profiler_validation_20261116_card7_01/README.md)。

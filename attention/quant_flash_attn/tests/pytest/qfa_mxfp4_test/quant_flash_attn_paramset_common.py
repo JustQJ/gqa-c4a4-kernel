@@ -51,6 +51,16 @@ def resolve_quantization(quant_schema=None, p_quant_scheme=None):
     return quant_schema, scheme
 
 
+def paged_kv_pool_size(kv_lengths, page, requested=None, extra_pages=0):
+    """Resolve physical capacity independently of the effective KV lengths."""
+    required = sum((length + page - 1) // page for length in kv_lengths)
+    if requested is None:
+        return required + extra_pages
+    if type(requested) is not int or requested <= 0 or requested < required:
+        raise ValueError('kv_cache_num_blocks must be a positive integer covering all requested KV pages')
+    return requested
+
+
 def normalize_params(params):
     result = {key: copy.deepcopy(value[0]) for key, value in TEST_PARAMS_DEFAULTS.items()}
     result.update(copy.deepcopy(params))
@@ -88,6 +98,11 @@ def normalize_params(params):
         raise ValueError('Effective Q lengths must fit their storage segments')
     if any(k < 0 for k in kv):
         raise ValueError('KV lengths must be nonnegative')
+    paged_kv_pool_size(kv, result['block_size'], result.get('kv_cache_num_blocks'))
+    logical_shape = result.get('logical_kv_cache_shape')
+    if logical_shape is not None and logical_shape != [result.get('kv_cache_num_blocks'),
+                                                       result['block_size'], result['N_kv'] * result['D']]:
+        raise ValueError('logical_kv_cache_shape must match the page count, page size and KV heads')
     for name, lengths in [('max_seqlen_q', stored), ('max_seqlen_kv', kv)]:
         if result[name] != -1 and result[name] < max(lengths):
             raise ValueError(f'{name} is smaller than the represented lengths')

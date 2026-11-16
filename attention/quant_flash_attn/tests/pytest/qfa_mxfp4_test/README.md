@@ -11,9 +11,10 @@ qfa_mxfp4_test/
 ├── quant_flash_attn_paramset_common.py   # 公共默认值、约束和展开
 ├── quant_flash_attn_paramset_debug.py    # 冒烟与接口边界
 ├── quant_flash_attn_paramset_func_rdv.py # 全量/小量功能矩阵
+├── quant_flash_attn_paramset_bench16k.py # 12个固定16k bench精度/性能case及KV页池
 ├── test_quant_flash_attn_debug.py        # debug 入口
 ├── test_quant_flash_attn_func_rdv.py     # 功能入口
-├── prof_quant_flash_attn.py             # 单C4/C8场景的msprof op采集入口
+├── prof_quant_flash_attn.py             # 按case统一msprof/op采集，支持C4/C8
 ├── Pref_Readme.md                       # 性能测试方法及实测记录
 └── common/
     ├── quant_flash_attn_golden.py        # 数据生成、解码、CPU CX参考、公开API调用
@@ -471,3 +472,51 @@ assert attention_op is torch.ops.cann_ops_transformer.quant_flash_attn
 ## 性能测试与采集
 
 原第7、8、9节已移至 [Pref_Readme.md](Pref_Readme.md)，包含独立 msprof op 采集、文档性能集合、MXFP8迁入集合及历史对比结果。
+
+## 16k bench 精度集合
+
+通过 `--accuracy-case-set bench16k` 选择用户指定的 12 个场景，替代原 336 个 FIA 合成 case。实现见 [quant_flash_attn_paramset_bench16k.py](quant_flash_attn_paramset_bench16k.py)。默认 document 和 debug 集合沿用原范围。
+
+固定 Q 头数16、KV头数2、D256、page128、causal mask_mode=3、softmax_scale=1/16、LSE关闭、seed421；每个场景保留一份。Prefill和混合请求使用TND Q-scale，Decode使用N2TGD；Q及输出为TND，KV为PA_BBND。默认quant-schema=2，也可显式选择0/1。
+
+所有场景的K、V各使用固定逻辑页池 `[15687*2,128,512] = [31374,128,512]`，512=2个KV头×D256。FP4实际打包形状为 `[31374,128,2,128]`，uint8存储；FP8为 `[31374,128,2,256]`。scale覆盖整个物理池，实际有效长度由下面的数组决定。精度生成器不再额外增加3页，性能生成器也不会缩小物理池。页表仅分配实际最大请求需要的列数，并从整个页池随机选择不共享的物理页。
+
+| 场景 | Q长度 | KV长度 |
+| --- | --- | --- |
+| single_prefill_1 | [4096] | [4096] |
+| single_prefill_2 | [3972] | [12072] |
+| single_prefill_3 | [3980] | [16168] |
+| dual_prefill_1 | [4096,3988] | [4096,12056] |
+| dual_prefill_2 | [2048,2400] | [20264,7960] |
+| dual_prefill_3 | [2083,2900] | [24252,16152] |
+| decode_1 | [4]×32 | [8192+107i, i=0..15] + [16384+125i, i=0..15] |
+| decode_2 | [4]×24 | [32768+32i, i=0..13] + [65536+444i, i=0..9] |
+| decode_3 | [1]×32 | [2048+11i, i=0..15]+[256+25i, i=0..15] |
+| decode_4 | [4]×33 | [2048+9i, i=0..31]+[16409] |
+| mixed_1 | [2044]+[4]×26 | [2044]+[10240+117i, i=0..15]+[18432+125i, i=0..9] |
+| mixed_2 | [4096]+[4]×22 | [8192]+[32768+137i, i=0..11]+[22528+100i, i=0..9] |
+
+上表的“+”表示列表拼接，k按1024计算。bench16k是集合名称，实际KV长度可超过16k。`small`和`full`均选取全部12项（Prefill6、Decode4、Mixed2），不再扩展模型、TP或布局组合。cu_seqlens_q由逐请求Q累计得到，seqused_q无padding，seqused_kv保留各条实际长度。
+
+在pytest父目录、已配置CANN和算子包的环境中执行；变量沿用前面的环境配置：
+
+```bash
+# 离线枚举，不导入Torch或访问NPU；--output可导出完整参数，拒绝覆盖已有文件。
+python3 -m qfa_mxfp4_test.quant_flash_attn_paramset_bench16k --accuracy
+
+# 每种schema使用独立缓存目录。
+python3 -m pytest qfa_mxfp4_test/test_quant_flash_attn_func_rdv.py --accuracy-case-set bench16k --quant-schema 2 --device-id "$DEVICE" --package "$QFA_PACKAGE" --triton-reference --cache-dir "$QFA_WORK/bench16k-accuracy-schema2"
+
+# 离线契约与原有性能/采集回归检查。
+python3 -m unittest qfa_mxfp4_test.common.bench16k_contract_test qfa_mxfp4_test.common.perf_contract_test qfa_mxfp4_test.common.prof_contract_test
+```
+
+沿用既有CPU/kernel/Triton参考、比较门限和golden-mode分阶段入口；默认kernel CPU参考首次获取metadata仍需要可用NPU。精度和性能共享长度、头数及池容量，分别使用既有随机数生成器；同一性能场景的C4/C8使用同一组FP4编码展开。固定池容量进入缓存及性能参数指纹，旧集合缓存和结果不能冒充新集合。
+
+初始10项于2026-11-16在200容器卡7使用默认schema2，10/10精度和10/10 C4/C8 Graph性能均通过；真实固定池形状和20路显存释放已核对。详见[本次设备验证报告](../../../../../operators/quant_flash_attn/bench16k_npu_validation_20261116_card7_01/README.md)。性能执行和汇总见 [Pref_Readme.md](Pref_Readme.md) 的16k bench集合。
+
+此前decode_3、decode_4在200容器卡7补测通过，见[历史新增Decode补测报告](../../../../../operators/quant_flash_attn/bench16k_decode_extra_20261116_card7_01/README.md)。decode_3现将后16条KV改为256+25i；旧decode_3耗时和缓存对应修改前的长度。
+
+修订后的decode_3已在200容器卡7独立重测：三方精度1/1、C4/C8 Graph性能1/1通过；C4/C8耗时48.793/41.291μs，固定池形状与两路显存释放已核对。见[256起始短尾KV新版报告](../../../../../operators/quant_flash_attn/bench16k_decode3_shorttail_20261116_card7_01/README.md)。
+
+统一采集入口支持按case选择普通msprof、msprof op或两者，使用 `--case decode_3 --profiler both --backend both`；命名case沿用本节固定池和性能输入生成器，使用说明见[Pref_Readme.md](Pref_Readme.md)第1节。

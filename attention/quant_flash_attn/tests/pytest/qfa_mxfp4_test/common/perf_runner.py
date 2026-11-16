@@ -87,6 +87,7 @@ def _measure_backend(source, case, backend, options):
     import torch
     device = f"npu:{options['device_id']}"
     data = prepare_inputs(source, case, backend, device)
+    input_shapes = {name: list(tensor.shape) for name, tensor in data.items() if tensor is not None}
     call, metadata = prepare_call(data, case, backend)
     header = metadata.cpu().reshape(-1).tolist()[:16] if metadata is not None else None
     graph = None
@@ -121,7 +122,7 @@ def _measure_backend(source, case, backend, options):
             for _ in range(options['rounds']*options['repeats']):
                 output = invoke()
             torch.npu.synchronize()
-            return dict(profile_invocations=options['warmup']+options['rounds']*options['repeats'],
+            return dict(profile_invocations=options['warmup']+options['rounds']*options['repeats'], input_shapes=input_shapes,
                         metadata_header=header, finite=True, output_shape=list(expected),
                         peak_allocated_bytes=torch.npu.max_memory_allocated())
         start = torch.npu.Event(enable_timing=True)
@@ -138,7 +139,7 @@ def _measure_backend(source, case, backend, options):
                 raise AssertionError(f'{backend}: invalid latency {us}')
             samples.append(us)
         median = statistics.median(samples)
-        return dict(median_us=median, samples_us=samples, min_us=min(samples), max_us=max(samples),
+        return dict(median_us=median, samples_us=samples, min_us=min(samples), max_us=max(samples), input_shapes=input_shapes,
                     spread_pct=(max(samples)-min(samples))/median*100,
                     metadata_header=header, finite=True, output_shape=list(expected),
                     captured_calls_per_graph=options['repeats'] if graph is not None else 0,

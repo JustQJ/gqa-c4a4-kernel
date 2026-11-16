@@ -18,7 +18,7 @@ CPU cache payloads always use portable uint8 storage for FP4 and E8M0.
 import importlib
 import math
 import torch
-from ..quant_flash_attn_paramset_common import normalize_params
+from ..quant_flash_attn_paramset_common import normalize_params, paged_kv_pool_size
 
 LEVELS = (0., .5, 1., 1.5, 2., 3., 4., 6.)
 
@@ -50,7 +50,7 @@ def generate_data(params):
     gen = torch.Generator().manual_seed(p['seed'])
     total, heads, kv_heads, dimension, page = (p['cu_seqlens_q'][-1], p['N_q'], p['N_kv'], p['D'], p['block_size'])
     counts = [(length + page - 1)//page for length in p['seqused_kv']]
-    pages = sum(counts) + 3
+    pages = paged_kv_pool_size(p['seqused_kv'], page, p.get('kv_cache_num_blocks'), extra_pages=3)
     # Randomize unused pages and tails too: an erroneous padding read is observable.
     q = torch.randint(0, 256, (total, heads, dimension//2), dtype=torch.uint8, generator=gen)
     k = torch.randint(0, 256, (pages, page, kv_heads, dimension//2), dtype=torch.uint8, generator=gen)

@@ -22,13 +22,19 @@ BACKENDS = ('c4', 'c8', 'bf16')
 
 
 def get_cases(scope='full', kind='all', case_set='document'):
-    if kind not in ('all', 'prefill', 'decode'):
-        raise ValueError('kind must be all, prefill or decode')
+    if kind not in ('all', 'prefill', 'decode', 'mixed'):
+        raise ValueError('kind must be all, prefill, decode or mixed')
+    if case_set == 'bench16k':
+        from .quant_flash_attn_paramset_bench16k import get_performance_cases
+        cases = get_performance_cases(scope)
+        return [c for c in cases if kind == 'all' or c['kind'] == kind]
     if case_set == 'mxfp8':
         cases = json.loads(Path(__file__).with_name('perf_cases_mxfp8.json').read_text())['cases']
         return [c for c in cases if kind == 'all' or c['kind'] == kind]
     if case_set != 'document':
-        raise ValueError('case-set must be document or mxfp8')
+        raise ValueError('case-set must be document, mxfp8 or bench16k')
+    if kind == 'mixed':
+        return []
     prefill = [('prefill', b, 8192, k) for b, k in itertools.product(
         (1, 2, 4), (8192, 32768, 65536, 131072, 262144))]
     batches = (1, 2, 16) if scope == 'small' else (1, 2, 4, 8, 16, 32, 64)

@@ -32,6 +32,7 @@ def summarize(records):
                        options['rounds'], options['repeats'], case['quant_schema'],
                        tuple(options.get('backends', ('c4', 'c8', 'bf16'))),
                        options.get('case_set', 'document'),
+                       case.get('kv_cache_num_blocks'),
                        json.dumps(record['environment']['opapi'], sort_keys=True)))
         row = {k: case[k] for k in ('name', 'model', 'tp', 'kind', 'B', 'Q', 'KV', 'D', 'N_q', 'N_kv', 'q_scale_layout', 'quant_schema')}
         row.update(device=options['device_id'], status=record['status'], metric=record['metric'])
@@ -40,6 +41,9 @@ def summarize(records):
                    case_fingerprint=record.get('case_fingerprint'), layout_kv='PA_BBND',
                    cu_seqlens_q=json.dumps(case.get('cu_seqlens_q')),
                    seqused_q=json.dumps(case.get('seqused_q')), seqused_kv=json.dumps(case.get('seqused_kv')))
+        row.update(case_set=options.get('case_set', 'document'),
+                   kv_cache_num_blocks=case.get('kv_cache_num_blocks'),
+                   logical_kv_cache_shape=json.dumps(case.get('logical_kv_cache_shape')))
         required = options.get('backends', ('c4', 'c8', 'bf16'))
         for backend in ('c4', 'c8', 'bf16'):
             result = record['backends'].get(backend, {})
@@ -61,7 +65,7 @@ def summarize(records):
     if len(contracts) > 1:
         raise ValueError('Mixed timing contracts or operator libraries cannot share a comparison report')
     groups = {}
-    for kind in ('all', 'prefill', 'decode'):
+    for kind in ('all', 'prefill', 'decode', 'mixed'):
         selected = [r for r in rows if r['complete'] and (kind == 'all' or r['kind'] == kind)]
         if not selected:
             continue
@@ -82,15 +86,25 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--expected', type=int, required=True)
     parser.add_argument('--scope', choices=('small', 'full'), default='small')
-    parser.add_argument('--case-set', choices=('document', 'mxfp8'), default='document')
-    parser.add_argument('--kind', choices=('all', 'prefill', 'decode'), default='all')
+    parser.add_argument('--case-set', choices=('document', 'mxfp8', 'bench16k'), default='document')
+    parser.add_argument('--kind', choices=('all', 'prefill', 'decode', 'mixed'), default='all')
     args = parser.parse_args()
     records = [json.loads(p.read_text()) for directory in args.directories for p in sorted(directory.glob('*.json'))]
-    report = summarize(records)
-    from ..quant_flash_attn_paramset_perf_rdv import get_cases
-    expected_ids = {case['name'] for case in get_cases(args.scope, args.kind, args.case_set) if not case.get('skip_reason')}
+    from ..quant_flash_attn_paramset_perf_rdv import get_cases, case_fingerprint
+    expected_cases = {case['name']: case for case in get_cases(
+        args.scope, args.kind, args.case_set) if not case.get('skip_reason')}
+    expected_ids = set(expected_cases)
     if {record['case']['name'] for record in records} != expected_ids:
         raise SystemExit('Case IDs do not exactly cover the selected performance scope')
+    if args.case_set == 'bench16k':
+        for record in records:
+            expected = dict(expected_cases[record['case']['name']],
+                            quant_schema=record['case']['quant_schema'])
+            fingerprint = case_fingerprint(expected)
+            if (record.get('case_fingerprint') != fingerprint or
+                    case_fingerprint(record['case']) != fingerprint):
+                raise SystemExit('bench16k case parameters do not match the selected fixed scope')
+    report = summarize(records)
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output/'summary.json').write_text(json.dumps(report, indent=2, allow_nan=False)+'\n')
     if report['rows']:
