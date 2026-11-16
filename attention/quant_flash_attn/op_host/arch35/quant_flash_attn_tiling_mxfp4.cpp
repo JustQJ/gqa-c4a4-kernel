@@ -55,18 +55,29 @@ void QuantFlashAttnTilingMxfp4Impl::CalcScheduleMode()
 
 ge::graphStatus QuantFlashAttnTilingMxfp4Impl::DoOpTiling()
 {
-    OP_CHECK_IF(qfaInfo_->kvLayout != QfaLayout::PA_BBND && qfaInfo_->kvLayout != QfaLayout::PA_NZ,
-                OP_LOGE(qfaInfo_->opName, "MXFP4 kernel currently supports PA_BBND and PA_NZ KV layouts only."),
+    OP_LOGI(qfaInfo_->opName, "DoOpTiling start, kvLayout=%d", static_cast<int>(qfaInfo_->kvLayout));
+    OP_CHECK_IF(qfaInfo_->kvLayout != QfaLayout::PA_BBND && qfaInfo_->kvLayout != QfaLayout::PA_BNBD &&
+                qfaInfo_->kvLayout != QfaLayout::PA_NZ,
+                OP_LOGE(qfaInfo_->opName, "MXFP4 kernel currently supports PA_BBND, PA_BNBD and PA_NZ KV layouts only."),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(SetPlatMemoryInfo() != ge::GRAPH_SUCCESS, OP_LOGE(qfaInfo_->opName, "Set plat memory info fail."),
                 return ge::GRAPH_FAILED);
+    OP_LOGI(qfaInfo_->opName, "SetPlatMemoryInfo done");
 
     InitImplParam();
+    OP_LOGI(qfaInfo_->opName, "InitImplParam done, bSize=%d, n2Size=%d, s2Size=%d, blockSize=%d",
+            static_cast<int>(qfaInfo_->bSize), static_cast<int>(qfaInfo_->n2Size),
+            static_cast<int>(qfaInfo_->s2Size), static_cast<int>(qfaInfo_->blockSize));
     SplitPolicy();
+    OP_LOGI(qfaInfo_->opName, "SplitPolicy done");
     FillTiling();
+    OP_LOGI(qfaInfo_->opName, "FillTiling done");
     CalcScheduleMode();
+    OP_LOGI(qfaInfo_->opName, "CalcScheduleMode done");
     CalcWorkspaceSize();
+    OP_LOGI(qfaInfo_->opName, "CalcWorkspaceSize done, workspaceSize=%lu", workspaceSize_);
     GenTilingKey();
+    OP_LOGI(qfaInfo_->opName, "GenTilingKey done, tilingKey=%llu", tilingKey_);
     if ((SetNumBlocks(numBlocks_) != ge::GRAPH_SUCCESS) || (SetTilingKey(tilingKey_) != ge::GRAPH_SUCCESS) ||
         (SetWorkspaceSize(workspaceSize_) != ge::GRAPH_SUCCESS) || (SetTilingData(tilingData_) != ge::GRAPH_SUCCESS) ||
         (SetScheduleMode(scheduleMode_) != ge::GRAPH_SUCCESS)) {

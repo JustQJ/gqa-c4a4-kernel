@@ -25,7 +25,7 @@ constexpr float MXFP4_INV_LN2 = 1.4426950408889634F;
 constexpr float MXFP4_NEG_LOG2_CX_DELTA = -2.273018494406416F; // -log2(7.25/1.5)
 constexpr float MXFP4_NEG_LOG2_CX = -2.8579809951275723F; // -log2(7.25)
 constexpr float MXFP4_CX_SCALE_SHIFT = 3.0F; // ceil(log2(7.25))，ceil(log2(7.25/1.5))
-constexpr float MXFP4_CX_PSCALE_BIAS = 127.0F - MXFP4_CX_SCALE_SHIFT;
+constexpr float MXFP4_CX_PSCALE_BIAS = 127.0F - ::Mxfp4Api::MXFP4_CX_SCALE_SHIFT;
 constexpr float MXFP4_NEG_LN_DELTA = -0.4054651081081644F; // -ln(1.5)
 constexpr float MXFP4_NEG_TWO_VALUE = -2.0F;
 // The final FP32 quotient can lie one ULP below a BF16 midpoint. A one-ULP
@@ -115,9 +115,9 @@ __simd_vf__ inline void SoftmaxDnResidentEightVf(__ubuf__ uint8_t* packedPUb,
         if constexpr (!ScorePreScaled) {
             Muls(curr_group_max, curr_group_max, scoreScale, preg_135);
         }
-        Muls(curr_group_max, curr_group_max, MXFP4_INV_LN2, preg_135);
+        Muls(curr_group_max, curr_group_max, ::Mxfp4Api::MXFP4_INV_LN2, preg_135);
         if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
-            Adds(curr_group_max, curr_group_max, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? MXFP4_NEG_LOG2_CX_DELTA : MXFP4_NEG_LOG2_CX, preg_135);
+            Adds(curr_group_max, curr_group_max, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? ::Mxfp4Api::MXFP4_NEG_LOG2_CX_DELTA : ::Mxfp4Api::MXFP4_NEG_LOG2_CX, preg_135);
             Truncate<float, RoundMode::CAST_CEIL>(curr_group_max, curr_group_max, preg_135);
         } else {
             Truncate<float, RoundMode::CAST_FLOOR>(curr_group_max, curr_group_max, preg_135);
@@ -125,13 +125,13 @@ __simd_vf__ inline void SoftmaxDnResidentEightVf(__ubuf__ uint8_t* packedPUb,
         Max(global_group_max, global_group_max, curr_group_max, preg_135);
         StoreAlign(groupMaxUb + group * 64, curr_group_max, preg_135);
         if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
-            Muls(curr_group_max, curr_group_max, MXFP4_LN2, preg_135);
+            Muls(curr_group_max, curr_group_max, ::Mxfp4Api::MXFP4_LN2, preg_135);
             if constexpr (QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT) {
-                Adds(curr_group_max, curr_group_max, MXFP4_NEG_LN_DELTA, preg_135);
+                Adds(curr_group_max, curr_group_max, ::Mxfp4Api::MXFP4_NEG_LN_DELTA, preg_135);
             }
         } else {
-            Adds(curr_group_max, curr_group_max, MXFP4_NEG_TWO_VALUE, preg_135);
-            Muls(curr_group_max, curr_group_max, MXFP4_LN2, preg_135);
+            Adds(curr_group_max, curr_group_max, ::Mxfp4Api::MXFP4_NEG_TWO_VALUE, preg_135);
+            Muls(curr_group_max, curr_group_max, ::Mxfp4Api::MXFP4_LN2, preg_135);
         }
             if constexpr (!ScorePreScaled) {
                 Muls(src0, src0, scoreScale, preg_135);
@@ -160,25 +160,25 @@ __simd_vf__ inline void SoftmaxDnResidentEightVf(__ubuf__ uint8_t* packedPUb,
             Exp(src6, src6, preg_135);
             Exp(src7, src7, preg_135);
             // 压缩4bit， 先转成 bf16
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_0, src0, preg_135);
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_1, src1, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_0, src0, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_1, src1, preg_135);
             DeInterleave(src_bf16_0, src_bf16_1, src_bf16_0, src_bf16_1);
-            Cast<float4_e2m1x2_t, bfloat16_t, MXFP4_CAST_ZERO>(quant_0, src_bf16_0, preg_all_16bit);
+            Cast<float4_e2m1x2_t, bfloat16_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(quant_0, src_bf16_0, preg_all_16bit);
 
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_2, src2, preg_135);
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_3, src3, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_2, src2, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_3, src3, preg_135);
             DeInterleave(src_bf16_2, src_bf16_3, src_bf16_2, src_bf16_3);
-            Cast<float4_e2m1x2_t, bfloat16_t, MXFP4_CAST_ZERO>(quant_1, src_bf16_2, preg_all_16bit);
+            Cast<float4_e2m1x2_t, bfloat16_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(quant_1, src_bf16_2, preg_all_16bit);
 
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_0, src4, preg_135);
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_1, src5, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_0, src4, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_1, src5, preg_135);
             DeInterleave(src_bf16_0, src_bf16_1, src_bf16_0, src_bf16_1);
-            Cast<float4_e2m1x2_t, bfloat16_t, MXFP4_CAST_ZERO>(quant_2, src_bf16_0, preg_all_16bit);
+            Cast<float4_e2m1x2_t, bfloat16_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(quant_2, src_bf16_0, preg_all_16bit);
 
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_2, src6, preg_135);
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_3, src7, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_2, src6, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_3, src7, preg_135);
             DeInterleave(src_bf16_2, src_bf16_3, src_bf16_2, src_bf16_3);
-            Cast<float4_e2m1x2_t, bfloat16_t, MXFP4_CAST_ZERO>(quant_3, src_bf16_2, preg_all_16bit);
+            Cast<float4_e2m1x2_t, bfloat16_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(quant_3, src_bf16_2, preg_all_16bit);
 
             // Each FP4 cast writes one packed byte per 32-bit lane. Two fixed
             // deinterleave stages compact the four Q64 column pairs into 256B.
@@ -227,25 +227,25 @@ __simd_vf__ inline void SoftmaxDnResidentEightVf(__ubuf__ uint8_t* packedPUb,
             Exp(src6, src6, preg_135);
             Exp(src7, src7, preg_135);
             // 压缩4bit， 先转成 bf16
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_0, src0, preg_135);
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_1, src1, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_0, src0, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_1, src1, preg_135);
             DeInterleave(src_bf16_0, src_bf16_1, src_bf16_0, src_bf16_1);
-            Cast<float4_e2m1x2_t, bfloat16_t, MXFP4_CAST_ZERO>(quant_0, src_bf16_0, preg_all_16bit);
+            Cast<float4_e2m1x2_t, bfloat16_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(quant_0, src_bf16_0, preg_all_16bit);
 
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_2, src2, preg_135);
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_3, src3, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_2, src2, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_3, src3, preg_135);
             DeInterleave(src_bf16_2, src_bf16_3, src_bf16_2, src_bf16_3);
-            Cast<float4_e2m1x2_t, bfloat16_t, MXFP4_CAST_ZERO>(quant_1, src_bf16_2, preg_all_16bit);
+            Cast<float4_e2m1x2_t, bfloat16_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(quant_1, src_bf16_2, preg_all_16bit);
 
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_0, src4, preg_135);
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_1, src5, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_0, src4, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_1, src5, preg_135);
             DeInterleave(src_bf16_0, src_bf16_1, src_bf16_0, src_bf16_1);
-            Cast<float4_e2m1x2_t, bfloat16_t, MXFP4_CAST_ZERO>(quant_2, src_bf16_0, preg_all_16bit);
+            Cast<float4_e2m1x2_t, bfloat16_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(quant_2, src_bf16_0, preg_all_16bit);
 
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_2, src6, preg_135);
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_3, src7, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_2, src6, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_3, src7, preg_135);
             DeInterleave(src_bf16_2, src_bf16_3, src_bf16_2, src_bf16_3);
-            Cast<float4_e2m1x2_t, bfloat16_t, MXFP4_CAST_ZERO>(quant_3, src_bf16_2, preg_all_16bit);
+            Cast<float4_e2m1x2_t, bfloat16_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(quant_3, src_bf16_2, preg_all_16bit);
 
             // Each FP4 cast writes one packed byte per 32-bit lane. Two fixed
             // deinterleave stages compact the four Q64 column pairs into 256B.
@@ -395,13 +395,13 @@ __simd_vf__ inline void SoftmaxQuantizeDnChunkFp32Vf(
     if constexpr (!ScorePreScaled) {
         Muls(curr_group_max, curr_group_max, scoreScale, preg_135); // 乘以scale
     }
-    Muls(curr_group_max, curr_group_max, MXFP4_INV_LN2, preg_135); // 对齐到ln2
+    Muls(curr_group_max, curr_group_max, ::Mxfp4Api::MXFP4_INV_LN2, preg_135); // 对齐到ln2
 
     // 基于cx的fp4量化优化
     // cx= 7.25，k_g = ceil(max_valid(s_g)/ln2 - log2(cx))
     // CX_QUANT: u_g=exp(s_g-k_g*ln2); only CX_DELTA_QUANT applies delta=1.5.
     if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
-        Adds(curr_group_max, curr_group_max, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? MXFP4_NEG_LOG2_CX_DELTA : MXFP4_NEG_LOG2_CX, preg_135);
+        Adds(curr_group_max, curr_group_max, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? ::Mxfp4Api::MXFP4_NEG_LOG2_CX_DELTA : ::Mxfp4Api::MXFP4_NEG_LOG2_CX, preg_135);
         Truncate<float, RoundMode::CAST_CEIL>(curr_group_max, curr_group_max, preg_135);
     } else {
         // 标准fp4量化
@@ -414,13 +414,13 @@ __simd_vf__ inline void SoftmaxQuantizeDnChunkFp32Vf(
     StoreAlign<float, Reg::StoreDist::DIST_NORM_B32>(groupMaxUb, curr_group_max, group_hasvalid);
 
     if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
-        Muls(curr_group_max, curr_group_max, MXFP4_LN2, preg_135); // k_g*ln2
+        Muls(curr_group_max, curr_group_max, ::Mxfp4Api::MXFP4_LN2, preg_135); // k_g*ln2
         if constexpr (QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT) {
-            Adds(curr_group_max, curr_group_max, MXFP4_NEG_LN_DELTA, preg_135);  // k_g*ln2 - ln(delta)
+            Adds(curr_group_max, curr_group_max, ::Mxfp4Api::MXFP4_NEG_LN_DELTA, preg_135);  // k_g*ln2 - ln(delta)
         }
     } else {
-        Adds(curr_group_max, curr_group_max, MXFP4_NEG_TWO_VALUE, preg_135); // -2
-        Muls(curr_group_max, curr_group_max, MXFP4_LN2, preg_135);
+        Adds(curr_group_max, curr_group_max, ::Mxfp4Api::MXFP4_NEG_TWO_VALUE, preg_135); // -2
+        Muls(curr_group_max, curr_group_max, ::Mxfp4Api::MXFP4_LN2, preg_135);
     }
 
     for (uint16_t i = 0; i < GROUP_COUNT-1; ++i) { // 最后一组单独处理，不需要预取
@@ -491,25 +491,25 @@ __simd_vf__ inline void SoftmaxQuantizeDnChunkFp32Vf(
             Exp(src7, src7, group_hasvalid);
 
             // 压缩4bit， 先转成 bf16
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_0, src0, preg_135);
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_1, src1, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_0, src0, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_1, src1, preg_135);
             DeInterleave(src_bf16_0, src_bf16_1, src_bf16_0, src_bf16_1);
-            Cast<float4_e2m1x2_t, bfloat16_t, MXFP4_CAST_ZERO>(quant_0, src_bf16_0, preg_all_16bit);
+            Cast<float4_e2m1x2_t, bfloat16_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(quant_0, src_bf16_0, preg_all_16bit);
 
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_2, src2, preg_135);
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_3, src3, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_2, src2, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_3, src3, preg_135);
             DeInterleave(src_bf16_2, src_bf16_3, src_bf16_2, src_bf16_3);
-            Cast<float4_e2m1x2_t, bfloat16_t, MXFP4_CAST_ZERO>(quant_1, src_bf16_2, preg_all_16bit);
+            Cast<float4_e2m1x2_t, bfloat16_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(quant_1, src_bf16_2, preg_all_16bit);
 
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_0, src4, preg_135);
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_1, src5, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_0, src4, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_1, src5, preg_135);
             DeInterleave(src_bf16_0, src_bf16_1, src_bf16_0, src_bf16_1);
-            Cast<float4_e2m1x2_t, bfloat16_t, MXFP4_CAST_ZERO>(quant_2, src_bf16_0, preg_all_16bit);
+            Cast<float4_e2m1x2_t, bfloat16_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(quant_2, src_bf16_0, preg_all_16bit);
 
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_2, src6, preg_135);
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_3, src7, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_2, src6, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_3, src7, preg_135);
             DeInterleave(src_bf16_2, src_bf16_3, src_bf16_2, src_bf16_3);
-            Cast<float4_e2m1x2_t, bfloat16_t, MXFP4_CAST_ZERO>(quant_3, src_bf16_2, preg_all_16bit);
+            Cast<float4_e2m1x2_t, bfloat16_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(quant_3, src_bf16_2, preg_all_16bit);
 
             // Each FP4 cast writes one packed byte per 32-bit lane. Two fixed
             // deinterleave stages compact the four Q64 column pairs into 256B.
@@ -531,9 +531,9 @@ __simd_vf__ inline void SoftmaxQuantizeDnChunkFp32Vf(
         if constexpr (!ScorePreScaled) {
             Muls(next_group_max, next_group_max, scoreScale, preg_135); // 乘以scale
         }
-        Muls(next_group_max, next_group_max, MXFP4_INV_LN2, preg_135);
+        Muls(next_group_max, next_group_max, ::Mxfp4Api::MXFP4_INV_LN2, preg_135);
         if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
-            Adds(next_group_max, next_group_max, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? MXFP4_NEG_LOG2_CX_DELTA : MXFP4_NEG_LOG2_CX, preg_135);
+            Adds(next_group_max, next_group_max, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? ::Mxfp4Api::MXFP4_NEG_LOG2_CX_DELTA : ::Mxfp4Api::MXFP4_NEG_LOG2_CX, preg_135);
             Truncate<float, RoundMode::CAST_CEIL>(next_group_max, next_group_max, preg_135);
         } else {
             Truncate<float, RoundMode::CAST_FLOOR>(next_group_max, next_group_max, preg_135);
@@ -543,14 +543,14 @@ __simd_vf__ inline void SoftmaxQuantizeDnChunkFp32Vf(
 
         if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
             if constexpr (QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT) {
-                Muls(next_group_max, next_group_max, MXFP4_LN2, preg_135);
-                Adds(curr_group_max, next_group_max, MXFP4_NEG_LN_DELTA, preg_135);
+                Muls(next_group_max, next_group_max, ::Mxfp4Api::MXFP4_LN2, preg_135);
+                Adds(curr_group_max, next_group_max, ::Mxfp4Api::MXFP4_NEG_LN_DELTA, preg_135);
             } else {
-                Muls(curr_group_max, next_group_max, MXFP4_LN2, preg_135);
+                Muls(curr_group_max, next_group_max, ::Mxfp4Api::MXFP4_LN2, preg_135);
             }
         } else {
-            Adds(next_group_max, next_group_max, MXFP4_NEG_TWO_VALUE, preg_135);
-            Muls(curr_group_max, next_group_max, MXFP4_LN2, preg_135);
+            Adds(next_group_max, next_group_max, ::Mxfp4Api::MXFP4_NEG_TWO_VALUE, preg_135);
+            Muls(curr_group_max, next_group_max, ::Mxfp4Api::MXFP4_LN2, preg_135);
         }
     }
 
@@ -603,25 +603,25 @@ __simd_vf__ inline void SoftmaxQuantizeDnChunkFp32Vf(
 
 
             // 压缩4bit， 先转成 bf16
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_0, src0, preg_135);
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_1, src1, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_0, src0, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_1, src1, preg_135);
             DeInterleave(src_bf16_0, src_bf16_1, src_bf16_0, src_bf16_1);
-            Cast<float4_e2m1x2_t, bfloat16_t, MXFP4_CAST_ZERO>(quant_0, src_bf16_0, preg_all_16bit);
+            Cast<float4_e2m1x2_t, bfloat16_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(quant_0, src_bf16_0, preg_all_16bit);
 
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_2, src2, preg_135);
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_3, src3, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_2, src2, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_3, src3, preg_135);
             DeInterleave(src_bf16_2, src_bf16_3, src_bf16_2, src_bf16_3);
-            Cast<float4_e2m1x2_t, bfloat16_t, MXFP4_CAST_ZERO>(quant_1, src_bf16_2, preg_all_16bit);
+            Cast<float4_e2m1x2_t, bfloat16_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(quant_1, src_bf16_2, preg_all_16bit);
 
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_0, src4, preg_135);
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_1, src5, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_0, src4, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_1, src5, preg_135);
             DeInterleave(src_bf16_0, src_bf16_1, src_bf16_0, src_bf16_1);
-            Cast<float4_e2m1x2_t, bfloat16_t, MXFP4_CAST_ZERO>(quant_2, src_bf16_0, preg_all_16bit);
+            Cast<float4_e2m1x2_t, bfloat16_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(quant_2, src_bf16_0, preg_all_16bit);
 
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_2, src6, preg_135);
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_3, src7, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_2, src6, preg_135);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(src_bf16_3, src7, preg_135);
             DeInterleave(src_bf16_2, src_bf16_3, src_bf16_2, src_bf16_3);
-            Cast<float4_e2m1x2_t, bfloat16_t, MXFP4_CAST_ZERO>(quant_3, src_bf16_2, preg_all_16bit);
+            Cast<float4_e2m1x2_t, bfloat16_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(quant_3, src_bf16_2, preg_all_16bit);
 
             // Each FP4 cast writes one packed byte per 32-bit lane. Two fixed
             // deinterleave stages compact the four Q64 column pairs into 256B.
@@ -717,7 +717,7 @@ __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
         Adds(chunkIndices, keyIndices, static_cast<int32_t>(firstToken), all);
         Compares<int32_t, CMPMODE::LT>(validKv, chunkIndices, static_cast<int32_t>(validKvTokens), all);
         if constexpr (HasMask) {
-            Cast<float, int32_t, MXFP4_CAST_ZERO>(causalRows, chunkIndices, all);
+            Cast<float, int32_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(causalRows, chunkIndices, all);
             Muls(causalRows, causalRows, causalRowStep, all);
             Adds(causalRows, causalRows, causalFirstRow, all);
         }
@@ -731,10 +731,10 @@ __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
                 Duplicate(queryIndex1, static_cast<int32_t>(row + 1));
                 Duplicate(queryIndex2, static_cast<int32_t>(row + 2));
                 Duplicate(queryIndex3, static_cast<int32_t>(row + 3));
-                Cast<float, int32_t, MXFP4_CAST_ZERO>(first0, queryIndex0, all);
-                Cast<float, int32_t, MXFP4_CAST_ZERO>(first1, queryIndex1, all);
-                Cast<float, int32_t, MXFP4_CAST_ZERO>(first2, queryIndex2, all);
-                Cast<float, int32_t, MXFP4_CAST_ZERO>(first3, queryIndex3, all);
+                Cast<float, int32_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(first0, queryIndex0, all);
+                Cast<float, int32_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(first1, queryIndex1, all);
+                Cast<float, int32_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(first2, queryIndex2, all);
+                Cast<float, int32_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(first3, queryIndex3, all);
                 Compare<float, CMPMODE::GE>(visible0, first0, causalRows, all);
                 Compare<float, CMPMODE::GE>(visible1, first1, causalRows, all);
                 Compare<float, CMPMODE::GE>(visible2, first2, causalRows, all);
@@ -783,15 +783,15 @@ __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
             Compares<float, CMPMODE::GT>(groupValid1, exponent1, INVALID_GROUP_EXPONENT, all);
             Compares<float, CMPMODE::GT>(groupValid2, exponent2, INVALID_GROUP_EXPONENT, all);
             Compares<float, CMPMODE::GT>(groupValid3, exponent3, INVALID_GROUP_EXPONENT, all);
-            Muls(exponent0, exponent0, MXFP4_INV_LN2, groupValid0);
-            Muls(exponent1, exponent1, MXFP4_INV_LN2, groupValid1);
-            Muls(exponent2, exponent2, MXFP4_INV_LN2, groupValid2);
-            Muls(exponent3, exponent3, MXFP4_INV_LN2, groupValid3);
+            Muls(exponent0, exponent0, ::Mxfp4Api::MXFP4_INV_LN2, groupValid0);
+            Muls(exponent1, exponent1, ::Mxfp4Api::MXFP4_INV_LN2, groupValid1);
+            Muls(exponent2, exponent2, ::Mxfp4Api::MXFP4_INV_LN2, groupValid2);
+            Muls(exponent3, exponent3, ::Mxfp4Api::MXFP4_INV_LN2, groupValid3);
             if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
-                Adds(exponent0, exponent0, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? MXFP4_NEG_LOG2_CX_DELTA : MXFP4_NEG_LOG2_CX, groupValid0);
-                Adds(exponent1, exponent1, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? MXFP4_NEG_LOG2_CX_DELTA : MXFP4_NEG_LOG2_CX, groupValid1);
-                Adds(exponent2, exponent2, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? MXFP4_NEG_LOG2_CX_DELTA : MXFP4_NEG_LOG2_CX, groupValid2);
-                Adds(exponent3, exponent3, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? MXFP4_NEG_LOG2_CX_DELTA : MXFP4_NEG_LOG2_CX, groupValid3);
+                Adds(exponent0, exponent0, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? ::Mxfp4Api::MXFP4_NEG_LOG2_CX_DELTA : ::Mxfp4Api::MXFP4_NEG_LOG2_CX, groupValid0);
+                Adds(exponent1, exponent1, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? ::Mxfp4Api::MXFP4_NEG_LOG2_CX_DELTA : ::Mxfp4Api::MXFP4_NEG_LOG2_CX, groupValid1);
+                Adds(exponent2, exponent2, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? ::Mxfp4Api::MXFP4_NEG_LOG2_CX_DELTA : ::Mxfp4Api::MXFP4_NEG_LOG2_CX, groupValid2);
+                Adds(exponent3, exponent3, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? ::Mxfp4Api::MXFP4_NEG_LOG2_CX_DELTA : ::Mxfp4Api::MXFP4_NEG_LOG2_CX, groupValid3);
                 Truncate<float, RoundMode::CAST_CEIL>(exponent0, exponent0, groupValid0);
                 Truncate<float, RoundMode::CAST_CEIL>(exponent1, exponent1, groupValid1);
                 Truncate<float, RoundMode::CAST_CEIL>(exponent2, exponent2, groupValid2);
@@ -819,25 +819,25 @@ __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
 
 
             if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
-                Muls(exponent0, exponent0, MXFP4_LN2, groupValid0);
-                Muls(exponent1, exponent1, MXFP4_LN2, groupValid1);
-                Muls(exponent2, exponent2, MXFP4_LN2, groupValid2);
-                Muls(exponent3, exponent3, MXFP4_LN2, groupValid3);
+                Muls(exponent0, exponent0, ::Mxfp4Api::MXFP4_LN2, groupValid0);
+                Muls(exponent1, exponent1, ::Mxfp4Api::MXFP4_LN2, groupValid1);
+                Muls(exponent2, exponent2, ::Mxfp4Api::MXFP4_LN2, groupValid2);
+                Muls(exponent3, exponent3, ::Mxfp4Api::MXFP4_LN2, groupValid3);
                 if constexpr (QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT) {
-                    Adds(exponent0, exponent0, MXFP4_NEG_LN_DELTA, groupValid0);
-                    Adds(exponent1, exponent1, MXFP4_NEG_LN_DELTA, groupValid1);
-                    Adds(exponent2, exponent2, MXFP4_NEG_LN_DELTA, groupValid2);
-                    Adds(exponent3, exponent3, MXFP4_NEG_LN_DELTA, groupValid3);
+                    Adds(exponent0, exponent0, ::Mxfp4Api::MXFP4_NEG_LN_DELTA, groupValid0);
+                    Adds(exponent1, exponent1, ::Mxfp4Api::MXFP4_NEG_LN_DELTA, groupValid1);
+                    Adds(exponent2, exponent2, ::Mxfp4Api::MXFP4_NEG_LN_DELTA, groupValid2);
+                    Adds(exponent3, exponent3, ::Mxfp4Api::MXFP4_NEG_LN_DELTA, groupValid3);
                 }
             } else {
-                Adds(exponent0, exponent0, MXFP4_NEG_TWO_VALUE, groupValid0);
-                Adds(exponent1, exponent1, MXFP4_NEG_TWO_VALUE, groupValid1);
-                Adds(exponent2, exponent2, MXFP4_NEG_TWO_VALUE, groupValid2);
-                Adds(exponent3, exponent3, MXFP4_NEG_TWO_VALUE, groupValid3);
-                Muls(exponent0, exponent0, MXFP4_LN2, groupValid0);
-                Muls(exponent1, exponent1, MXFP4_LN2, groupValid1);
-                Muls(exponent2, exponent2, MXFP4_LN2, groupValid2);
-                Muls(exponent3, exponent3, MXFP4_LN2, groupValid3);
+                Adds(exponent0, exponent0, ::Mxfp4Api::MXFP4_NEG_TWO_VALUE, groupValid0);
+                Adds(exponent1, exponent1, ::Mxfp4Api::MXFP4_NEG_TWO_VALUE, groupValid1);
+                Adds(exponent2, exponent2, ::Mxfp4Api::MXFP4_NEG_TWO_VALUE, groupValid2);
+                Adds(exponent3, exponent3, ::Mxfp4Api::MXFP4_NEG_TWO_VALUE, groupValid3);
+                Muls(exponent0, exponent0, ::Mxfp4Api::MXFP4_LN2, groupValid0);
+                Muls(exponent1, exponent1, ::Mxfp4Api::MXFP4_LN2, groupValid1);
+                Muls(exponent2, exponent2, ::Mxfp4Api::MXFP4_LN2, groupValid2);
+                Muls(exponent3, exponent3, ::Mxfp4Api::MXFP4_LN2, groupValid3);
             }
             MaskAnd(expValid0, groupValid0, visible0, all);
             MaskAnd(expValid1, groupValid1, visible1, all);
@@ -851,18 +851,18 @@ __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
             Exp(score1, score1, expValid1);
             Exp(score2, score2, expValid2);
             Exp(score3, score3, expValid3);
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(bf0, score0, all);
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(bf1, score1, all);
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(bf2, score2, all);
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(bf3, score3, all);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(bf0, score0, all);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(bf1, score1, all);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(bf2, score2, all);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(bf3, score3, all);
             DeInterleave(compactBf0, bf0, bf0, bf0);
             DeInterleave(compactBf1, bf1, bf1, bf1);
             DeInterleave(compactBf2, bf2, bf2, bf2);
             DeInterleave(compactBf3, bf3, bf3, bf3);
-            Cast<float4_e2m1x2_t, bfloat16_t, MXFP4_CAST_ZERO>(fp0, compactBf0, allHalf);
-            Cast<float4_e2m1x2_t, bfloat16_t, MXFP4_CAST_ZERO>(fp1, compactBf1, allHalf);
-            Cast<float4_e2m1x2_t, bfloat16_t, MXFP4_CAST_ZERO>(fp2, compactBf2, allHalf);
-            Cast<float4_e2m1x2_t, bfloat16_t, MXFP4_CAST_ZERO>(fp3, compactBf3, allHalf);
+            Cast<float4_e2m1x2_t, bfloat16_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(fp0, compactBf0, allHalf);
+            Cast<float4_e2m1x2_t, bfloat16_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(fp1, compactBf1, allHalf);
+            Cast<float4_e2m1x2_t, bfloat16_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(fp2, compactBf2, allHalf);
+            Cast<float4_e2m1x2_t, bfloat16_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(fp3, compactBf3, allHalf);
             // PACK4 extracts one byte per FP4 32-bit lane; the low 32 lanes write exactly 32B.
             StoreAlign<int8_t, StoreDist::DIST_PACK4_B32>(
                 reinterpret_cast<__ubuf__ int8_t*>(packedBlock + (row + 0) * 32),
@@ -884,7 +884,7 @@ __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
             LoadAlign(score0, scoreUb + (row + 0) * ChunkN + firstToken);
             if constexpr (HasMask) {
                 Duplicate(queryIndex0, static_cast<int32_t>(row + 0));
-                Cast<float, int32_t, MXFP4_CAST_ZERO>(first0, queryIndex0, all);
+                Cast<float, int32_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(first0, queryIndex0, all);
                 Compare<float, CMPMODE::GE>(visible0, first0, causalRows, all);
                 MaskAnd(visible0, visible0, validKv, all);
             } else {
@@ -900,9 +900,9 @@ __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
             Duplicate(second0, second0, all);
             Select(exponent0, first0, second0, firstHalf);
             Compares<float, CMPMODE::GT>(groupValid0, exponent0, INVALID_GROUP_EXPONENT, all);
-            Muls(exponent0, exponent0, MXFP4_INV_LN2, groupValid0);
+            Muls(exponent0, exponent0, ::Mxfp4Api::MXFP4_INV_LN2, groupValid0);
             if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
-                Adds(exponent0, exponent0, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? MXFP4_NEG_LOG2_CX_DELTA : MXFP4_NEG_LOG2_CX, groupValid0);
+                Adds(exponent0, exponent0, QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT ? ::Mxfp4Api::MXFP4_NEG_LOG2_CX_DELTA : ::Mxfp4Api::MXFP4_NEG_LOG2_CX, groupValid0);
                 Truncate<float, RoundMode::CAST_CEIL>(exponent0, exponent0, groupValid0);
             } else {
                 Truncate<float, RoundMode::CAST_FLOOR>(exponent0, exponent0, groupValid0);
@@ -912,20 +912,20 @@ __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
             Scatter(groupMaxUb + (row + 0) * GROUPS_PER_TASK + firstGroup, packedExponent0, storeOffsets, pairMask);
 
             if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
-                Muls(exponent0, exponent0, MXFP4_LN2, groupValid0);
+                Muls(exponent0, exponent0, ::Mxfp4Api::MXFP4_LN2, groupValid0);
                 if constexpr (QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT) {
-                    Adds(exponent0, exponent0, MXFP4_NEG_LN_DELTA, groupValid0);
+                    Adds(exponent0, exponent0, ::Mxfp4Api::MXFP4_NEG_LN_DELTA, groupValid0);
                 }
             } else {
-                Adds(exponent0, exponent0, MXFP4_NEG_TWO_VALUE, groupValid0);
-                Muls(exponent0, exponent0, MXFP4_LN2, groupValid0);
+                Adds(exponent0, exponent0, ::Mxfp4Api::MXFP4_NEG_TWO_VALUE, groupValid0);
+                Muls(exponent0, exponent0, ::Mxfp4Api::MXFP4_LN2, groupValid0);
             }
             MaskAnd(expValid0, groupValid0, visible0, all);
             Sub(score0, score0, exponent0, expValid0);
             Exp(score0, score0, expValid0);
-            Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(bf0, score0, all);
+            Cast<bfloat16_t, float, ::Mxfp4Api::MXFP4_CAST_ZERO>(bf0, score0, all);
             DeInterleave(compactBf0, bf0, bf0, bf0);
-            Cast<float4_e2m1x2_t, bfloat16_t, MXFP4_CAST_ZERO>(fp0, compactBf0, allHalf);
+            Cast<float4_e2m1x2_t, bfloat16_t, ::Mxfp4Api::MXFP4_CAST_ZERO>(fp0, compactBf0, allHalf);
             // PACK4 extracts one byte per FP4 32-bit lane; the low 32 lanes write exactly 32B.
             StoreAlign<int8_t, StoreDist::DIST_PACK4_B32>(
                 reinterpret_cast<__ubuf__ int8_t*>(packedBlock + (row + 0) * 32),
