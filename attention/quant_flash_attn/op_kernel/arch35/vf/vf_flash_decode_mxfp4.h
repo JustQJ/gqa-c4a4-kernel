@@ -56,8 +56,7 @@ __simd_vf__ inline void PrepareFlashDecodeVf(__ubuf__ float* splitReference,
         Select(factor, reinterpret_cast<RegTensor<float>&>(exponentBits), fallback, normalPower);
         Select(factor, factor, zero, nonempty);
         StoreAlign(splitMultiplier + split * rowCount * 8, factor, rows);
-        Mul(sum, sum, factor, rows);
-        Add(total, total, sum, rows);
+        MulAddDst(total, sum, factor, rows);
     }
     MaskReg nonemptyRows;
     RegTensor<float> safeSum, lse, naturalReference;

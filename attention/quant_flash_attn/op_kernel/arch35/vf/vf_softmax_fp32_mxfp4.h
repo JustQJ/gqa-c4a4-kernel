@@ -142,22 +142,14 @@ __simd_vf__ inline void SoftmaxDnResidentEightVf(__ubuf__ uint8_t* packedPUb,
                 Muls(src6, src6, scoreScale, preg_135);
                 Muls(src7, src7, scoreScale, preg_135);
             }
-            Sub(src0, src0, curr_group_max, preg_135);
-            Sub(src1, src1, curr_group_max, preg_135);
-            Sub(src2, src2, curr_group_max, preg_135);
-            Sub(src3, src3, curr_group_max, preg_135);
-            Sub(src4, src4, curr_group_max, preg_135);
-            Sub(src5, src5, curr_group_max, preg_135);
-            Sub(src6, src6, curr_group_max, preg_135);
-            Sub(src7, src7, curr_group_max, preg_135);
-            Exp(src0, src0, preg_135);
-            Exp(src1, src1, preg_135);
-            Exp(src2, src2, preg_135);
-            Exp(src3, src3, preg_135);
-            Exp(src4, src4, preg_135);
-            Exp(src5, src5, preg_135);
-            Exp(src6, src6, preg_135);
-            Exp(src7, src7, preg_135);
+            AscendC::Reg::ExpSub(src0, src0, curr_group_max, preg_135);
+            AscendC::Reg::ExpSub(src1, src1, curr_group_max, preg_135);
+            AscendC::Reg::ExpSub(src2, src2, curr_group_max, preg_135);
+            AscendC::Reg::ExpSub(src3, src3, curr_group_max, preg_135);
+            AscendC::Reg::ExpSub(src4, src4, curr_group_max, preg_135);
+            AscendC::Reg::ExpSub(src5, src5, curr_group_max, preg_135);
+            AscendC::Reg::ExpSub(src6, src6, curr_group_max, preg_135);
+            AscendC::Reg::ExpSub(src7, src7, curr_group_max, preg_135);
             // 压缩4bit， 先转成 bf16
             Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_0, src0, preg_135);
             Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_1, src1, preg_135);
@@ -209,22 +201,14 @@ __simd_vf__ inline void SoftmaxDnResidentEightVf(__ubuf__ uint8_t* packedPUb,
                 Muls(src6, src6, scoreScale, preg_135);
                 Muls(src7, src7, scoreScale, preg_135);
             }
-            Sub(src0, src0, curr_group_max, preg_135);
-            Sub(src1, src1, curr_group_max, preg_135);
-            Sub(src2, src2, curr_group_max, preg_135);
-            Sub(src3, src3, curr_group_max, preg_135);
-            Sub(src4, src4, curr_group_max, preg_135);
-            Sub(src5, src5, curr_group_max, preg_135);
-            Sub(src6, src6, curr_group_max, preg_135);
-            Sub(src7, src7, curr_group_max, preg_135);
-            Exp(src0, src0, preg_135);
-            Exp(src1, src1, preg_135);
-            Exp(src2, src2, preg_135);
-            Exp(src3, src3, preg_135);
-            Exp(src4, src4, preg_135);
-            Exp(src5, src5, preg_135);
-            Exp(src6, src6, preg_135);
-            Exp(src7, src7, preg_135);
+            AscendC::Reg::ExpSub(src0, src0, curr_group_max, preg_135);
+            AscendC::Reg::ExpSub(src1, src1, curr_group_max, preg_135);
+            AscendC::Reg::ExpSub(src2, src2, curr_group_max, preg_135);
+            AscendC::Reg::ExpSub(src3, src3, curr_group_max, preg_135);
+            AscendC::Reg::ExpSub(src4, src4, curr_group_max, preg_135);
+            AscendC::Reg::ExpSub(src5, src5, curr_group_max, preg_135);
+            AscendC::Reg::ExpSub(src6, src6, curr_group_max, preg_135);
+            AscendC::Reg::ExpSub(src7, src7, curr_group_max, preg_135);
             // 压缩4bit， 先转成 bf16
             Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_0, src0, preg_135);
             Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_1, src1, preg_135);
@@ -469,25 +453,15 @@ __simd_vf__ inline void SoftmaxQuantizeDnChunkFp32Vf(
                 Muls(src7, src7, scoreScale, group_hasvalid);
             }
 
-            // s-max
-            Sub(src0, src0, curr_group_max, group_hasvalid);
-            Sub(src1, src1, curr_group_max, group_hasvalid);
-            Sub(src2, src2, curr_group_max, group_hasvalid);
-            Sub(src3, src3, curr_group_max, group_hasvalid);
-            Sub(src4, src4, curr_group_max, group_hasvalid);
-            Sub(src5, src5, curr_group_max, group_hasvalid);
-            Sub(src6, src6, curr_group_max, group_hasvalid);
-            Sub(src7, src7, curr_group_max, group_hasvalid);
-
-            // exp(s-max)
-            Exp(src0, src0, group_hasvalid);
-            Exp(src1, src1, group_hasvalid);
-            Exp(src2, src2, group_hasvalid);
-            Exp(src3, src3, group_hasvalid);
-            Exp(src4, src4, group_hasvalid);
-            Exp(src5, src5, group_hasvalid);
-            Exp(src6, src6, group_hasvalid);
-            Exp(src7, src7, group_hasvalid);
+            // exp(s-max)：使用减法与指数复合指令。
+            AscendC::Reg::ExpSub(src0, src0, curr_group_max, group_hasvalid);
+            AscendC::Reg::ExpSub(src1, src1, curr_group_max, group_hasvalid);
+            AscendC::Reg::ExpSub(src2, src2, curr_group_max, group_hasvalid);
+            AscendC::Reg::ExpSub(src3, src3, curr_group_max, group_hasvalid);
+            AscendC::Reg::ExpSub(src4, src4, curr_group_max, group_hasvalid);
+            AscendC::Reg::ExpSub(src5, src5, curr_group_max, group_hasvalid);
+            AscendC::Reg::ExpSub(src6, src6, curr_group_max, group_hasvalid);
+            AscendC::Reg::ExpSub(src7, src7, curr_group_max, group_hasvalid);
 
             // 压缩4bit， 先转成 bf16
             Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(src_bf16_0, src0, preg_135);
@@ -580,25 +554,15 @@ __simd_vf__ inline void SoftmaxQuantizeDnChunkFp32Vf(
                 Muls(src7, src7, scoreScale, group_hasvalid);
             }
 
-            // s-max
-            Sub(src0, src0, curr_group_max, group_hasvalid);
-            Sub(src1, src1, curr_group_max, group_hasvalid);
-            Sub(src2, src2, curr_group_max, group_hasvalid);
-            Sub(src3, src3, curr_group_max, group_hasvalid);
-            Sub(src4, src4, curr_group_max, group_hasvalid);
-            Sub(src5, src5, curr_group_max, group_hasvalid);
-            Sub(src6, src6, curr_group_max, group_hasvalid);
-            Sub(src7, src7, curr_group_max, group_hasvalid);
-
-            // exp(s-max)
-            Exp(src0, src0, group_hasvalid);
-            Exp(src1, src1, group_hasvalid);
-            Exp(src2, src2, group_hasvalid);
-            Exp(src3, src3, group_hasvalid);
-            Exp(src4, src4, group_hasvalid);
-            Exp(src5, src5, group_hasvalid);
-            Exp(src6, src6, group_hasvalid);
-            Exp(src7, src7, group_hasvalid);
+            // exp(s-max)：使用减法与指数复合指令。
+            AscendC::Reg::ExpSub(src0, src0, curr_group_max, group_hasvalid);
+            AscendC::Reg::ExpSub(src1, src1, curr_group_max, group_hasvalid);
+            AscendC::Reg::ExpSub(src2, src2, curr_group_max, group_hasvalid);
+            AscendC::Reg::ExpSub(src3, src3, curr_group_max, group_hasvalid);
+            AscendC::Reg::ExpSub(src4, src4, curr_group_max, group_hasvalid);
+            AscendC::Reg::ExpSub(src5, src5, curr_group_max, group_hasvalid);
+            AscendC::Reg::ExpSub(src6, src6, curr_group_max, group_hasvalid);
+            AscendC::Reg::ExpSub(src7, src7, curr_group_max, group_hasvalid);
 
 
             // 压缩4bit， 先转成 bf16
@@ -842,14 +806,10 @@ __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
             MaskAnd(expValid1, groupValid1, visible1, all);
             MaskAnd(expValid2, groupValid2, visible2, all);
             MaskAnd(expValid3, groupValid3, visible3, all);
-            Sub(score0, score0, exponent0, expValid0);
-            Sub(score1, score1, exponent1, expValid1);
-            Sub(score2, score2, exponent2, expValid2);
-            Sub(score3, score3, exponent3, expValid3);
-            Exp(score0, score0, expValid0);
-            Exp(score1, score1, expValid1);
-            Exp(score2, score2, expValid2);
-            Exp(score3, score3, expValid3);
+            AscendC::Reg::ExpSub(score0, score0, exponent0, expValid0);
+            AscendC::Reg::ExpSub(score1, score1, exponent1, expValid1);
+            AscendC::Reg::ExpSub(score2, score2, exponent2, expValid2);
+            AscendC::Reg::ExpSub(score3, score3, exponent3, expValid3);
             Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(bf0, score0, all);
             Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(bf1, score1, all);
             Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(bf2, score2, all);
@@ -920,8 +880,7 @@ __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
                 Muls(exponent0, exponent0, MXFP4_LN2, groupValid0);
             }
             MaskAnd(expValid0, groupValid0, visible0, all);
-            Sub(score0, score0, exponent0, expValid0);
-            Exp(score0, score0, expValid0);
+            AscendC::Reg::ExpSub(score0, score0, exponent0, expValid0);
             Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(bf0, score0, all);
             DeInterleave(compactBf0, bf0, bf0, bf0);
             Cast<float4_e2m1x2_t, bfloat16_t, MXFP4_CAST_ZERO>(fp0, compactBf0, allHalf);

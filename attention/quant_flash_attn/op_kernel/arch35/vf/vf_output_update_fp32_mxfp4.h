@@ -37,8 +37,7 @@ __simd_vf__ inline void processUpdateDnVF(__ubuf__ float *historyOutputUb, __ubu
         RegTensor<float> vreg_multiplier, vreg_history_sum;
         LoadAlign(vreg_multiplier, (__ubuf__ float *)historyMultiplierUb);
         LoadAlign(vreg_history_sum, (__ubuf__ float *)historySumUb);
-        Mul(vreg_history_sum, vreg_history_sum, vreg_multiplier, preg_all32);
-        Add(vreg_history_sum, vreg_history_sum, vreg_current_sum, preg_all32);
+        MulDstAdd(vreg_history_sum, vreg_multiplier, vreg_current_sum, preg_all32);
 
         StoreAlign((__ubuf__ float *)historySumUb, vreg_history_sum, preg_all32);
 
@@ -50,10 +49,6 @@ __simd_vf__ inline void processUpdateDnVF(__ubuf__ float *historyOutputUb, __ubu
             LoadAlign(vreg_out3, (__ubuf__ float *)historyOutputUb + (channel + 2) * 64);
             LoadAlign(vreg_out4, (__ubuf__ float *)historyOutputUb + (channel + 3) * 64);
 
-            Mul(vreg_out1, vreg_out1, vreg_multiplier, preg_all32);
-            Mul(vreg_out2, vreg_out2, vreg_multiplier, preg_all32);
-            Mul(vreg_out3, vreg_out3, vreg_multiplier, preg_all32);
-            Mul(vreg_out4, vreg_out4, vreg_multiplier, preg_all32);
 
             LoadAlign(vreg_pv1, (__ubuf__ float *)groupResultUb + (channel + 0) * 64);
             Select(vreg_pv1, vreg_pv1, vreg_zero, preg_nonempty_rows);
@@ -64,10 +59,10 @@ __simd_vf__ inline void processUpdateDnVF(__ubuf__ float *historyOutputUb, __ubu
             LoadAlign(vreg_pv4, (__ubuf__ float *)groupResultUb + (channel + 3) * 64);
             Select(vreg_pv4, vreg_pv4, vreg_zero, preg_nonempty_rows);
 
-            Add(vreg_out1, vreg_out1, vreg_pv1, preg_all32);
-            Add(vreg_out2, vreg_out2, vreg_pv2, preg_all32);
-            Add(vreg_out3, vreg_out3, vreg_pv3, preg_all32);
-            Add(vreg_out4, vreg_out4, vreg_pv4, preg_all32);
+            MulDstAdd(vreg_out1, vreg_multiplier, vreg_pv1, preg_all32);
+            MulDstAdd(vreg_out2, vreg_multiplier, vreg_pv2, preg_all32);
+            MulDstAdd(vreg_out3, vreg_multiplier, vreg_pv3, preg_all32);
+            MulDstAdd(vreg_out4, vreg_multiplier, vreg_pv4, preg_all32);
 
             StoreAlign((__ubuf__ float *)historyOutputUb + (channel + 0) * 64, vreg_out1, preg_all32);
             StoreAlign((__ubuf__ float *)historyOutputUb + (channel + 1) * 64, vreg_out2, preg_all32);
@@ -324,8 +319,7 @@ __simd_vf__ inline void processUpdateNdVF(__ubuf__ float* historyOutputUb,
         if constexpr (UpdateHistory) {
             LoadAlign(vreg_history_sums, historySumUb);
             LoadAlign(vreg_multipliers, historyMultiplierUb);
-            Mul(vreg_history_sums, vreg_history_sums, vreg_multipliers, preg_valid_rows);
-            Add(vreg_group_sums, vreg_history_sums, vreg_group_sums, preg_valid_rows);
+            MulAddDst(vreg_group_sums, vreg_history_sums, vreg_multipliers, preg_valid_rows);
             Select(vreg_group_sums, vreg_group_sums, vreg_zero, preg_valid_rows);
         }
         StoreAlign(historySumUb, vreg_group_sums, preg_all32);
@@ -344,7 +338,7 @@ __simd_vf__ inline void processUpdateNdVF(__ubuf__ float* historyOutputUb,
             Duplicate(vreg_multiplier_indices, static_cast<uint32_t>(queryRow));
             Gather(vreg_multiplier, vreg_multipliers, vreg_multiplier_indices);
         }
-        // Dv128两路、Dv256四路，按加载/选择/乘法/加法/写回阶段交错。
+        // Dv128两路、Dv256四路，按加载/选择/乘加/写回阶段交错。
         LoadAlign(vreg_current_output0, currentRowUb);
         LoadAlign(vreg_current_output1, currentRowUb + 64);
         if constexpr (ValueDimension == 256) {
@@ -366,17 +360,11 @@ __simd_vf__ inline void processUpdateNdVF(__ubuf__ float* historyOutputUb,
                 LoadAlign(vreg_history_output2, historyRowUb + 128);
                 LoadAlign(vreg_history_output3, historyRowUb + 192);
             }
-            Mul(vreg_history_output0, vreg_history_output0, vreg_multiplier, preg_all32);
-            Mul(vreg_history_output1, vreg_history_output1, vreg_multiplier, preg_all32);
+            MulAddDst(vreg_current_output0, vreg_history_output0, vreg_multiplier, preg_all32);
+            MulAddDst(vreg_current_output1, vreg_history_output1, vreg_multiplier, preg_all32);
             if constexpr (ValueDimension == 256) {
-                Mul(vreg_history_output2, vreg_history_output2, vreg_multiplier, preg_all32);
-                Mul(vreg_history_output3, vreg_history_output3, vreg_multiplier, preg_all32);
-            }
-            Add(vreg_current_output0, vreg_history_output0, vreg_current_output0, preg_all32);
-            Add(vreg_current_output1, vreg_history_output1, vreg_current_output1, preg_all32);
-            if constexpr (ValueDimension == 256) {
-                Add(vreg_current_output2, vreg_history_output2, vreg_current_output2, preg_all32);
-                Add(vreg_current_output3, vreg_history_output3, vreg_current_output3, preg_all32);
+                MulAddDst(vreg_current_output2, vreg_history_output2, vreg_multiplier, preg_all32);
+                MulAddDst(vreg_current_output3, vreg_history_output3, vreg_multiplier, preg_all32);
             }
         }
         StoreAlign(historyRowUb, vreg_current_output0, preg_all32);
