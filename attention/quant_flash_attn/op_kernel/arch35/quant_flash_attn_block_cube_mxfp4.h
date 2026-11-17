@@ -53,7 +53,7 @@ public:
     static_assert(isDAligned, "MXFP4 unaligned D is not implemented");
     static_assert(std::is_same<T, float>::value && std::is_same<INPUT_T, fp4x2_e2m1_t>::value,
                   "MXFP4 requires FP4 E2M1 input and FP32 accumulation");
-    static constexpr uint32_t s2SplitSize = dBaseSize == 256 ? 64U : 128U;
+    static constexpr uint32_t s2SplitSize = 128U;
     static constexpr uint32_t MXFP_GROUP_SIZE = 32U;
     static constexpr uint32_t MXFP_DIVISOR_SIZE = 64U;
     static constexpr LayOutTypeEnum LAYOUT = layout;
@@ -68,7 +68,7 @@ public:
     using MM_T = T;
 
     using CrossBufferType = CVCrossBuffer<20, useDn, s1TemplateType, s2TemplateType, dTemplateType, dVTemplateType>;
-    static constexpr uint32_t QK_L0_SLOT_COUNT = 2U;
+    static constexpr uint32_t QK_L0_SLOT_COUNT = dBaseSize == 256 ? 1U : 2U;
 
     static constexpr bool IS_TND_LAYOUT =
         (LAYOUT == LayOutTypeEnum::LAYOUT_TND || LAYOUT == LayOutTypeEnum::LAYOUT_NTD);
@@ -112,13 +112,16 @@ public:
     BuffersPolicySingleBuffer<BufferType::L1> l1VPaddingBuffers_; // rowsum需要的常数1
 
     // L0 buffers
-    BuffersPolicyDB<BufferType::L0A> mm1LeftBuffers_; // 在DN下，装K；在ND下，装Q
+    std::conditional_t<QK_L0_SLOT_COUNT == 1, BuffersPolicySingleBuffer<BufferType::L0A>,
+        BuffersPolicyDB<BufferType::L0A>> mm1LeftBuffers_; // 在DN下，装K；在ND下，装Q
     BuffersPolicyDB<BufferType::L0A> mm2LeftBuffers_; // 在DN下，装V；在ND下，装P
     // 每次矩乘的左右槽成对轮转，共用左槽的 MTE1<->M 事件。
     // TPipe 在 C310 已保留 M_MTE1 的 0..2；四个成对槽只再申请 4 个事件。
-    BuffersPolicyDB<BufferType::L0B, SyncType::NO_SYNC> mm1RightBuffers_; // DN:Q，ND:K
+    std::conditional_t<QK_L0_SLOT_COUNT == 1, BuffersPolicySingleBuffer<BufferType::L0B, SyncType::NO_SYNC>,
+        BuffersPolicyDB<BufferType::L0B, SyncType::NO_SYNC>> mm1RightBuffers_; // DN:Q，ND:K
     BuffersPolicyDB<BufferType::L0B, SyncType::NO_SYNC> mm2RightBuffers_; // DN:P，ND:V
-    BuffersPolicyDB<BufferType::L0C> mm1ResBuffers_; // 两槽分别用 FIX_M/M_FIX 保护，允许 M 与 FIX 重叠。
+    std::conditional_t<QK_L0_SLOT_COUNT == 1, BuffersPolicySingleBuffer<BufferType::L0C>,
+        BuffersPolicyDB<BufferType::L0C>> mm1ResBuffers_; // 两槽分别用 FIX_M/M_FIX 保护，允许 M 与 FIX 重叠。
     BuffersPolicySingleBuffer<BufferType::L0C> mm2ResBuffers_; // pv的结果使用单槽累积
 
 

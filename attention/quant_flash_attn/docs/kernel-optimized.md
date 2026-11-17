@@ -19,9 +19,11 @@
 
 ## D256 优化记录过程
 
+截至 2026-11-18，`fea334e` 的 D256 DN 和 ND 路径均采用 QK Chunk128。[D256 Chunk128 最终结果](#d256-chunk128-最终结果)
+
 性能测试使用 tests/pytest/qfa_mxfp4_test/test_quant_flash_attn_perf_rdv.py 的 `--perf-case-set bench16k --run-perf --perf-backends c4,c8 --perf-mode graph --perf-warmup 3 --perf-rounds 5 --perf-repeats 20` 12 个case进行测试。
 
-使用 tests\pytest\qfa_mxfp4_test\prof_quant_flash_attn.py  的 msprof 和 msprof op （BasicInfo 和 InstrTimeline 两个指标） 采集 bench16k_dual_prefill_1 和 bench16k_decode_4  的性能数据
+使用 `prof_quant_flash_attn.py` 对重点用例做 eager 采集。最终版 `dual_prefill_1` 使用 msprof 的 PipeUtilization 和 msprof op 的 Default，两种工具均采集了 C4 和 C8。[采集脚本](../tests/pytest/qfa_mxfp4_test/prof_quant_flash_attn.py)
 
 ### 总表记录
 
@@ -30,40 +32,41 @@
 | Base | 输出高精度 Div，`precisionMode=true` | 2026-11-16 的 A/B/C 三个批次汇总；`decode_3` 使用短尾最新参数 |
 | 普通 Div + 倒数复用 | 关闭输出 Div 高精度修正，`precisionMode=false`；DN/ND 输出复用倒数，一次除法后各通道乘法 | 2026-11-17 的 `performance-candidate`，包 `cann_ops_transformer_qfa_recip_bench16k_20261117` |
 | 再加 ExpSub + 乘加 | 在普通 Div + 倒数复用基础上，追加 37 处 Sub→Exp 和 11 处乘加融合 | 2026-11-17 融合实验的 `performance-compound`，包 `cann_ops_transformer_qfa_fuse_cmp_20261117` |
+| DN128/ND128（最终版） | D256 的 DN 和 ND 均采用 QK Chunk128，QK L0 使用单槽，输出暂存复用已消费的 PV 缓冲区 | 2026-11-18 ND 配对实验的 B 版，提交 `fea334e` |
 
-三个阶段均为 200 / `tp_a4c4_gqa_kernel` / NPU7，schema2，Graph 回放 + Event，3 次预热、5 轮 × 20 次调用取中位数；输入准备、metadata 和格式转换在计时外。固定 Nq16/Nkv2/D256/page128、mask3、LSE 关闭，K/V 各使用 31374 页固定池。
+各阶段均在 200 / `tp_a4c4_gqa_kernel` / NPU7 上使用 schema 2 和 Graph 回放 + Event 计时。每版预热 3 次，测量 5 轮，每轮 20 次调用，取中位数。输入准备、metadata 和格式转换在计时外。固定 Nq16/Nkv2/D256/page128、mask3、LSE 关闭，K/V 各使用 31374 页固定池。
 
-Base 是历史三个批次的汇总，后两列分别使用倒数复用阶段和 ExpSub + 乘加联合融合阶段的实测结果。已核对三个阶段的 12 项完整 case 指纹一致。下表耗时单位为 μs，case 省略 `bench16k_` 前缀；百分比使用原始未舍入值计算，正值表示耗时减少，负值表示耗时增加。“较 Base 减少”指联合融合阶段相对原始 Base 的累计变化。
+Base 汇总了三个历史批次。12 个 case 的指纹在各阶段一致，Base 和最终版的输入 SHA 也逐项匹配。表中耗时单位为 μs，case 省略 `bench16k_` 前缀。降幅使用未舍入值计算，正值表示耗时减少，负值表示耗时增加。相对 Base 的累计降幅来自跨批次比较，Chunk128 的增量收益见各自配对结果。[分阶段配对结果](#graph-性能)
 
-本次融合实验仅测 C4。总表的 C8 对照固定使用 Base 的历史 C8 数据，“Base C8/融合 C4”为该历史 C8 耗时除以联合融合阶段 C4 耗时，大于 1 表示融合后的 C4 更快；这是跨批次参考。融合本身的增量收益使用下节同轮重测基线比较。
+「Base C8/融合 C4」和「Base C8/最终 C4」均用表中的历史 Base C8 耗时除以对应阶段的 C4 耗时。比值大于 1 表示对应 C4 的耗时低于历史 Base C8。
 
-| case | Base C4 | Base C8 | 普通 Div + 倒数复用 C4 | 再加 ExpSub + 乘加 C4 | 较 Base 减少 | Base C8/融合 C4 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| single_prefill_1 | 318.742 | 212.413 | 246.134 | 240.429 | 24.57% | 0.883 |
-| single_prefill_2 | 1045.231 | 937.282 | 994.794 | 991.298 | 5.16% | 0.946 |
-| single_prefill_3 | 1435.241 | 1300.633 | 1385.437 | 1381.087 | 3.77% | 0.942 |
-| dual_prefill_1 | 1544.096 | 1132.345 | 1230.413 | 1212.775 | 21.46% | 0.934 |
-| dual_prefill_2 | 1431.694 | 1251.043 | 1324.859 | 1319.603 | 7.83% | 0.948 |
-| dual_prefill_3 | 2273.021 | 2089.713 | 2194.643 | 2188.596 | 3.71% | 0.955 |
-| decode_1 | 330.693 | 355.821 | 330.377 | 330.917 | -0.07% | 1.075 |
-| decode_2 | 715.852 | 914.377 | 712.098 | 712.165 | 0.52% | 1.284 |
-| decode_3 | 48.793 | 41.291 | 48.682 | 48.386 | 0.83% | 0.853 |
-| decode_4 | 52.640 | 50.420 | 53.858 | 54.066 | -2.71% | 0.933 |
-| mixed_1 | 1361.233 | 1371.783 | 1322.265 | 1316.726 | 3.27% | 1.042 |
-| mixed_2 | 3587.749 | 2972.840 | 3536.840 | 3529.779 | 1.62% | 0.842 |
+| case | Base C4 | Base C8 | 普通 Div + 倒数复用 C4 | ExpSub + 乘加 C4 | 融合较 Base 降幅 | Base C8/融合 C4 | DN128/ND128 C4 | 最终较 Base 降幅 | Base C8/最终 C4 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| single_prefill_1 | 318.742 | 212.413 | 246.134 | 240.429 | 24.57% | 0.883 | 219.154 | 31.24% | 0.9692 |
+| single_prefill_2 | 1045.231 | 937.282 | 994.794 | 991.298 | 5.16% | 0.946 | 831.003 | 20.50% | 1.1279 |
+| single_prefill_3 | 1435.241 | 1300.633 | 1385.437 | 1381.087 | 3.77% | 0.942 | 1149.859 | 19.88% | 1.1311 |
+| dual_prefill_1 | 1544.096 | 1132.345 | 1230.413 | 1212.775 | 21.46% | 0.934 | 1085.216 | 29.72% | 1.0434 |
+| dual_prefill_2 | 1431.694 | 1251.043 | 1324.859 | 1319.603 | 7.83% | 0.948 | 1122.707 | 21.58% | 1.1143 |
+| dual_prefill_3 | 2273.021 | 2089.713 | 2194.643 | 2188.596 | 3.71% | 0.955 | 1814.609 | 20.17% | 1.1516 |
+| decode_1 | 330.693 | 355.821 | 330.377 | 330.917 | -0.07% | 1.075 | 329.370 | 0.40% | 1.0803 |
+| decode_2 | 715.852 | 914.377 | 712.098 | 712.165 | 0.52% | 1.284 | 708.238 | 1.06% | 1.2911 |
+| decode_3 | 48.793 | 41.291 | 48.682 | 48.386 | 0.83% | 0.853 | 41.374 | 15.20% | 0.9980 |
+| decode_4 | 52.640 | 50.420 | 53.858 | 54.066 | -2.71% | 0.933 | 47.600 | 9.58% | 1.0592 |
+| mixed_1 | 1361.233 | 1371.783 | 1322.265 | 1316.726 | 3.27% | 1.042 | 1250.454 | 8.14% | 1.0970 |
+| mixed_2 | 3587.749 | 2972.840 | 3536.840 | 3529.779 | 1.62% | 0.842 | 3292.170 | 8.24% | 0.9030 |
 
-分组按 case 等权计算耗时比的几何平均。`Base/倒数复用` 和 `Base/融合后` 大于 1 表示相应阶段比原始 Base 更快；两列 C8 比值均使用固定的 Base C8 数据。
+分组按 case 等权计算耗时比的几何平均。「Base C4」作分子时，比值大于 1 表示对应阶段比原始 Base 更快。「Base C8/最终 C4」使用历史 Base C8 与最终版 C4 的跨批次数据。
 
-| 范围 | case 数 | Base/倒数复用 | Base/融合后 | Base C8/C4 | Base C8/融合 C4 |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| all | 12 | 1.0611 | 1.0663 | 0.9037 | 0.9636 |
-| prefill | 6 | 1.1206 | 1.1302 | 0.8266 | 0.9342 |
-| decode | 4 | 0.9964 | 0.9965 | 1.0274 | 1.0238 |
-| mixed | 2 | 1.0219 | 1.0251 | 0.9138 | 0.9367 |
+| 范围 | case 数 | Base/倒数复用 | Base/融合后 | Base C8/C4 | Base C8/融合 C4 | Base C4/最终 C4 | Base C8/最终 C4 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| all | 12 | 1.0611 | 1.0663 | 0.9037 | 0.9636 | 1.1910 | 1.0764 |
+| prefill | 6 | 1.1206 | 1.1302 | 0.8266 | 0.9342 | 1.3158 | 1.0877 |
+| decode | 4 | 0.9964 | 0.9965 | 1.0274 | 1.0238 | 1.0726 | 1.1019 |
+| mixed | 2 | 1.0219 | 1.0251 | 0.9138 | 0.9367 | 1.0892 | 0.9953 |
 
-联合融合阶段相对 Base 的 C4 耗时比几何平均为 1.0663，折合整体耗时减少约 6.21%；主要累计收益出现在 prefill（1.1302），decode 为 0.9965。联合融合阶段与 Base C8 比较，C4 耗时更短用例为 3/12。
+最终版 C4 相对历史 Base 的耗时比几何平均为 1.1910×，折合耗时减少 16.04%。`dual_prefill_1` 从 1544.096 μs 降至 1085.216 μs，减少 29.72%。对照历史 Base C8，最终 C4 在 12 例中有 9 例耗时更短，耗时比的几何平均为 1.0764×。
 
-数据来源：[Base 原始汇总](../../../operators/quant_flash_attn/bench16k_performance_summary_20261116/README.md)、[倒数复用阶段](../../../operators/quant_flash_attn/reciprocal_bench16k_20261117_card7_01/README.md)、[联合融合结果快照](../../../operators/quant_flash_attn/vf_compound_fusion_20261117_card7_01/remote-status-20261117.json)。
+[Base 原始汇总](../../../operators/quant_flash_attn/bench16k_performance_summary_20261116/README.md) · [倒数复用阶段](../../../operators/quant_flash_attn/reciprocal_bench16k_20261117_card7_01/README.md) · [联合融合结果快照](../../../operators/quant_flash_attn/vf_compound_fusion_20261117_card7_01/remote-status-20261117.json) · [DN128/ND128 数据](../../../operators/quant_flash_attn/d256_results_20261118_card7_01/final-graph-results.csv)
 
 ### 去掉高精度除法设置
 
@@ -196,3 +199,66 @@ ExpSub 和 ExpSub + 乘加的整体耗时分别减少约 0.48% 和 0.51%。单�
 两组成功采集输出有限、allocated 前后均为 0；以上为 eager 诊断口径。InstrTimeline 留下 407808 个诊断区间，不能作为完整有效指令时间线。工具退出后 15:11 检查 NPU7 健康 OK、利用率 0、无残留进程。未重置设备，本轮未采 C8 或其他 case。
 
 215 项原始文件加清单已下载并逐 SHA/尺寸/精确集合核验，提供 7 份 CSV/trace 短路径副本；自动 dump 保留远端并入清单。详见[本轮联合融合版本采集报告与原始数据](../../../operators/quant_flash_attn/dual_prefill1_compound_profiler_20261117_card7_01/README.md)。
+
+### D256 Chunk128 最终结果
+
+#### 实现与精度验证
+
+`fea334e` 将 D256 DN/ND 的 QK 子块由 64 增至 128，沿用 TaskN128、每组 16 个 task 和 20 个 L1 P 槽。QK 的 L0A/L0B/L0C 使用单槽，AIV 仍使用两个 score 接收槽。V2 消费 PV 结果后，输出转换和统计量复用该 PV 区域。普通输出和 Flash Decode（FD）的 MTE3 搬运完成后，AIV 才向 AIC 归还该缓冲区的写入权限。DN/ND 的每 AIV UB 占用分别为 242944/244736 字节，均在 248 KiB 内。D128 Chunk256 实验已撤回，D128 使用 Chunk128、双 QK L0 槽和独立输出暂存区。[Cube 实现](../op_kernel/arch35/quant_flash_attn_block_cube_mxfp4.h) · [Vector 实现](../op_kernel/arch35/quant_flash_attn_block_vec_mxfp4.h)
+
+DN 候选与最终 DN/ND 版本均通过 schema 2 的 `document small` 204/204 和 `bench16k` 12/12。最终版额外通过 2 项 ND 冒烟测试，覆盖 FD 和非 FD 路径。测试复用经核验的 CPU 参考数据和原比较门限。111 项 D256 性能矩阵和 15228 项三 schema 全量精度待验收。[DN 验证记录](../../../operators/quant_flash_attn/scalar_chunk128_20261117_card7_01/RESULTS.md) · [ND 验证记录](../../../operators/quant_flash_attn/scalar_nd_chunk128_20261117_card7_01/RESULTS.md)
+
+#### Graph 性能
+
+两轮均在 200 机器的 `tp_a4c4_gqa_kernel` 容器内用物理卡 7 测试。每版预热 3 次，测量 5 轮，每轮 20 次回放。基线取前后两轮样本的合并中位数。逐例输入 SHA 和参数指纹一致，各轮 C8 对照波动在 ±3% 内。两列分别以各阶段的基线计算等权几何平均速度比。
+
+| 范围 | 用例数 | DN64/ND64 → DN128/ND64 | DN128/ND64 → DN128/ND128 |
+| --- | ---: | ---: | ---: |
+| 全部 | 12 | 1.090799× | 1.021828× |
+| Prefill | 6 | 1.162209× | 1.001360× |
+| Decode | 4 | 1.004804× | 1.064361× |
+| Mixed | 2 | 1.062808× | 1.000737× |
+
+DN 阶段的 `dual_prefill_1` 从 1212.971 μs 降至 1086.339 μs，耗时减少 10.44%。随后 ND 阶段的收益主要来自两个短 decode。三组 AB/BA/AB 配对中，`decode_3` 的速度比为 1.144223×、1.148837×、1.146647×，`decode_4` 为 1.078997×、1.076679×、1.084043×。
+
+| case | DN128/ND64 C4（μs） | 最终 C4（μs） | 同轮 C8（μs） | C8/最终 C4 |
+| --- | ---: | ---: | ---: | ---: |
+| single_prefill_1 | 220.471 | 219.154 | 212.908 | 0.9715 |
+| single_prefill_2 | 831.180 | 831.003 | 938.075 | 1.1288 |
+| single_prefill_3 | 1150.504 | 1149.859 | 1300.983 | 1.1314 |
+| dual_prefill_1 | 1085.286 | 1085.216 | 1131.920 | 1.0430 |
+| dual_prefill_2 | 1122.837 | 1122.707 | 1251.480 | 1.1147 |
+| dual_prefill_3 | 1816.800 | 1814.609 | 2080.807 | 1.1467 |
+| decode_1 | 331.537 | 329.370 | 356.051 | 1.0810 |
+| decode_2 | 710.778 | 708.238 | 915.105 | 1.2921 |
+| decode_3 | 47.579 | 41.374 | 40.965 | 0.9901 |
+| decode_4 | 52.587 | 47.600 | 49.559 | 1.0412 |
+| mixed_1 | 1250.993 | 1250.454 | 1374.312 | 1.0990 |
+| mixed_2 | 3295.604 | 3292.170 | 2973.068 | 0.9031 |
+
+最终 C4 快于同轮 C8 的用例为 9/12，达到 C8/C4 ≥ 1.3 的用例为 0/12。最终版输出有限，Graph 回放抽样与 eager 一致，释放后 allocated 为 0。[逐例结果 CSV](../../../operators/quant_flash_attn/d256_results_20261118_card7_01/final-graph-results.csv)
+
+#### dual_prefill_1 的 msprof 与 msprof op（2026-11-18）
+
+使用最终版安装包在同一张卡上采集 C4 和 C8。输入为 D256、B2、TND，Q 长度 `[4096, 3988]`，KV 长度 `[4096, 12056]`，16 个 Q 头、2 个 KV 头，page128，固定 31374 页，mask3，LSE 关闭，seed421。C4 使用 schema 2，C8 的 `p_scale` 为 448。四路输入 SHA 和 case 指纹均与 Graph 主例一致，msprof op 的 kernel 名匹配最终包的安装对象。
+
+msprof / PipeUtilization 每侧采集 20 次应用预热及 5 次目标调用。25 个目标任务均已匹配调用顺序，下表取后 5 次的中位数。msprof op / Default 在 20 次应用预热后使用 10 次工具预热和 5 次抓取，工作频率为 1650 MHz。任务耗时取 5 个 `OpBasicInfo` 样本的中位数，流水指标取逐核均值，每侧含 160 个 AIC 样本和 320 个 AIV 样本。
+
+| 采集口径 | 指标 | C4（μs） | C8（μs） |
+| --- | --- | ---: | ---: |
+| msprof / PipeUtilization | 任务耗时 | 1084.645 | 1133.513 |
+| msprof / PipeUtilization | AIC Scalar | 1010.313 | 1052.702 |
+| msprof / PipeUtilization | AIV Scalar | 816.704 | 711.113 |
+| msprof / PipeUtilization | AIV Vector | 871.293 | 951.340 |
+| msprof / PipeUtilization | AIC MAC | 710.423 | 1028.313 |
+| msprof op / Default | 任务耗时 | 1089.663 | 1137.755 |
+| msprof op / Default | AIC Scalar | 930.283 | 1031.460 |
+| msprof op / Default | AIV Scalar | 817.189 | 711.302 |
+| msprof op / Default | AIC Cube | 490.798 | 961.135 |
+| msprof op / Default | AIV Vector | 872.245 | 951.801 |
+| msprof op / Default | AIC MTE2 | 865.030 | 959.925 |
+| msprof op / Default | AIV MTE2 | 5.741 | 5.988 |
+
+同轮 C8 对比中，最终 C4 的 msprof 任务耗时低 4.31%。两个 profiler 均观测到 C4 的 AIC Scalar 和 AIV Vector 耗时更低、AIV Scalar 耗时更高。历史 DN64→DN128 配对测得 C4 的 msprof 任务耗时从 1214.181 μs 降至 1085.908 μs，AIC Scalar 降低 15.11%。同轮 msprof op 的逐核 AIC/AIV Scalar 均值分别降低 18.66% 和 8.10%。各流水存在重叠，任务耗时以各工具的总耗时字段为准。[同轮对照明细](c4a4-d256-results-20261118.md)
+
+四路采集均为 `validated`，无数据丢失，输出有限且释放后 allocated 为 0。两路 Default 各完整抓取 5 次，每次含 7 类指标。原始采集包的 412 个成员已逐项核对 SHA256、大小和成员集合。[复算与原始指标](../../../operators/quant_flash_attn/d256_results_20261118_card7_01/results-audit.json) · [原始采集包](../../../operators/quant_flash_attn/d256_results_20261118_card7_01/collection-evidence.tar.gz)

@@ -55,7 +55,7 @@ public:
     static constexpr uint32_t s2BaseSize = CubeBlockType::s2BaseSize;
     static constexpr uint32_t dBaseSize = CubeBlockType::dBaseSize;
     static constexpr uint32_t dVBaseSize = CubeBlockType::dVBaseSize;
-    static constexpr uint32_t s2SplitSize = (dBaseSize == 256) ? 64U : 128U;
+    static constexpr uint32_t s2SplitSize = 128U;
 
     static constexpr bool USE_DN = CubeBlockType::USE_DN; //DN 模式
     static constexpr bool HAS_MASK = VecFaBlockType::HAS_MASK;

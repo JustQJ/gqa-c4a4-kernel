@@ -78,7 +78,7 @@ public:
     static constexpr uint32_t s2BaseSize = (uint32_t)s2TemplateType;
     static constexpr uint32_t dBaseSize = (uint32_t)dTemplateType;
     static constexpr uint32_t dVBaseSize = (uint32_t)dVTemplateType;
-    static constexpr uint32_t s2SplitSize = dBaseSize == 256 ? 64U : 128U;
+    static constexpr uint32_t s2SplitSize = 128U;
 
     static constexpr uint32_t SCORE_SLOT_COUNT = 2;
 

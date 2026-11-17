@@ -42,11 +42,12 @@ public:
     // Retire C2/V2 before issuing V1: at most one live group per in-flight task.
     static constexpr uint32_t GROUP_MAX_SLOTS = PRELOAD_N;
     static constexpr uint32_t VEC_ROWS = 64;
-    static constexpr uint32_t s2SplitSize = dBaseSize == 256 ? 64U : 128U;
+    static constexpr uint32_t s2SplitSize = 128U;
     static constexpr uint32_t P_SLOT_COUNT = 2;
     static constexpr uint32_t P_PACK_BYTES = VEC_ROWS * s2BaseSize / 2;
     static constexpr uint32_t TASK_GROUP_MAX_ELEMENTS = VEC_ROWS * s2BaseSize / 32;
     static constexpr uint32_t LOCAL_PSCALE_BYTES = VEC_ROWS / 16 * (s2BaseSize / 64 + 1) * 32;
+    static constexpr bool REUSE_PV_OUTPUT = dBaseSize == 256;
     static constexpr uint32_t OUTPUT_SCRATCH_BYTES = 64 * 256 * sizeof(bfloat16_t);
     static constexpr uint32_t STATISTICS_BYTES = VEC_ROWS * 8 * sizeof(float);
     static constexpr bool HAS_MASK = hasAtten;
@@ -175,15 +176,17 @@ public:
 
     static __aicore__ inline constexpr uint32_t GetTransientUbSize()
     {
-        // P 使用独立双槽；Pscale 与输出仍复用 32 KiB 输出区 + 6 KiB 统计区。
+        // P 使用独立双槽；D256 输出复用已消费的 PV，独立临时区只保留 Pscale。
         // FD 另行复用已退休的 PV/history O，不占用此临时区。
-        return OUTPUT_SCRATCH_BYTES + 3 * STATISTICS_BYTES;
+        return (REUSE_PV_OUTPUT ? 0U : OUTPUT_SCRATCH_BYTES) + 3 * STATISTICS_BYTES;
     }
     static_assert(GetFdReuseUbOffset() % 32 == 0 && GetFdReuseUbSize() % 32 == 0,
         "MXFP4 FD reusable UB region must be 32-byte aligned");
     static_assert(TASKS_PER_GROUP * LOCAL_PSCALE_BYTES <= GetTransientUbSize(),
         "MXFP4 整组 Pscale 超出临时 UB 容量");
     static_assert(P_SLOT_COUNT == 2, "MXFP4 P uses two separately allocated UB buffers");
+    static_assert(!REUSE_PV_OUTPUT || CrossBufferType::ubBmm2BufferBytes_ >=
+        OUTPUT_SCRATCH_BYTES + 3 * STATISTICS_BYTES, "PV region cannot hold output scratch");
     static_assert(GetCrossBufferBytes() + GetPersistUbSize() + GetTransientUbSize() <= 248 * 1024,
         "MXFP4 Vector UB 超出 248KiB 业务预算");
 
@@ -349,10 +352,17 @@ public:
             }
         }
         PipeBarrier<PIPE_V>();
-        // 输出使用独立 temp 区，V2 读完 PV 后即可释放接收槽。
+        // Reused PV remains owned by V2 until every output MTE3 read completes.
+        if constexpr (REUSE_PV_OUTPUT) {
+            if (runInfo.isLastS2Loop) {
+                WriteAttentionResult(runInfo, historyOutput, historySum, reference);
+            }
+        }
         crossBuffers_.setBmm2Buffer();
-        if (runInfo.isLastS2Loop) {
-            WriteAttentionResult(runInfo, historyOutput, historySum, reference);
+        if constexpr (!REUSE_PV_OUTPUT) {
+            if (runInfo.isLastS2Loop) {
+                WriteAttentionResult(runInfo, historyOutput, historySum, reference);
+            }
         }
         // 输出搬运及本组参考、alpha 的所有读取均已结束，才允许未来 V1 复用本组槽。
         PipeBarrier<PIPE_V>();
@@ -479,7 +489,12 @@ private:
         if (validRows == 0) {
             return;
         }
-        LocalTensor<uint8_t> scratch = tempCommBuf_.Get<uint8_t>();
+        LocalTensor<uint8_t> scratch;
+        if constexpr (REUSE_PV_OUTPUT) {
+            scratch = crossBuffers_.GetBmm2Slot(0).template ReinterpretCast<uint8_t>();
+        } else {
+            scratch = tempCommBuf_.Get<uint8_t>();
+        }
         constexpr uint32_t statisticsOffset = OUTPUT_SCRATCH_BYTES;
         LocalTensor<float> lse = scratch[statisticsOffset].ReinterpretCast<float>();
         LocalTensor<float> broadcastSum = scratch[statisticsOffset + STATISTICS_BYTES].ReinterpretCast<float>();
