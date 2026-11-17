@@ -26,7 +26,8 @@ __simd_vf__ inline void UpdatePScaleDnVf(__ubuf__ uint8_t* encodedScale,
     constexpr uint32_t ROW_COUNT = 64;
     constexpr uint32_t GROUPS_PER_TASK = TaskN / 32;
     constexpr uint32_t TASK_EXPONENT_ELEMENTS = ROW_COUNT * GROUPS_PER_TASK;
-    constexpr uint32_t TASK_SCALE_BYTES = ROW_COUNT / 16 * (TaskN / 64 + 1) * 32;
+    constexpr uint32_t SCALE_BLOCK_STRIDE = TaskN / 64 + 1;
+    constexpr uint32_t TASK_SCALE_BYTES = ROW_COUNT / 16 * SCALE_BLOCK_STRIDE * 32;
     MaskReg allRows = CreateMask<float, MaskPattern::ALL>();
     RegTensor<float> groupMaximum, oldReference, mergedReference, referenceDifference, zeroValues;
     RegTensor<float> multiplier;
@@ -53,15 +54,10 @@ __simd_vf__ inline void UpdatePScaleDnVf(__ubuf__ uint8_t* encodedScale,
     StoreAlign(previousReference, mergedReference, allRows);
 
     MaskReg allHalfwords = CreateMask<uint16_t, MaskPattern::ALL>();
-    RegTensor<uint16_t> compactIndices, scaleOffsets, rowBlocks, rowsInBlock;
+    RegTensor<uint16_t> compactIndices;
 
-    // 每对 S32 的两个 scale 合成 uint16，按 [Q16块,S64块,Q16,2] 散写。
+    // 每对 S32 的两个 scale 合成 uint16，压紧后每个 Q16 块占 32B。
     Arange(reinterpret_cast<RegTensor<int16_t>&>(compactIndices), static_cast<int16_t>(0));
-    ShiftRights(rowBlocks, compactIndices, static_cast<int16_t>(4), allHalfwords);
-    Muls(rowBlocks, rowBlocks, static_cast<uint16_t>((TaskN / 64 + 1) * 16), allHalfwords);
-    ShiftLefts(rowsInBlock, compactIndices, static_cast<int16_t>(12), allHalfwords);
-    ShiftRights(rowsInBlock, rowsInBlock, static_cast<int16_t>(12), allHalfwords);
-    Add(scaleOffsets, rowBlocks, rowsInBlock, allHalfwords);
     ShiftLefts(compactIndices, compactIndices, static_cast<int16_t>(1), allHalfwords);
 
     uint32_t validHalfwordCount = 64;
@@ -239,21 +235,27 @@ __simd_vf__ inline void UpdatePScaleDnVf(__ubuf__ uint8_t* encodedScale,
                 Gather(vreg_pair3, reinterpret_cast<RegTensor<uint16_t>&>(vreg_bytes6), compactIndices);
             }
 
-            // 按现有物理布局写出各个S64的scale，输出地址单位为字节。
-            Scatter(reinterpret_cast<__ubuf__ uint16_t*>(taskScale + 0 * 32),
-                vreg_pair0, scaleOffsets, validHalfwords);
-            Scatter(reinterpret_cast<__ubuf__ uint16_t*>(taskScale + 1 * 32),
-                vreg_pair1, scaleOffsets, validHalfwords);
+            // 保持 [Q16块,S64块,Q16,2] 布局；mask 只启用前四个 32B 数据块。
+            // 块间步长为 3/5，与 8 个 bank group 互质，同条 Store 的四块落入不同组。
+            StoreAlign<uint16_t, Reg::DataCopyMode::DATA_BLOCK_COPY>(
+                reinterpret_cast<__ubuf__ uint16_t*>(taskScale + 0 * 32),
+                vreg_pair0, SCALE_BLOCK_STRIDE, validHalfwords);
+            StoreAlign<uint16_t, Reg::DataCopyMode::DATA_BLOCK_COPY>(
+                reinterpret_cast<__ubuf__ uint16_t*>(taskScale + 1 * 32),
+                vreg_pair1, SCALE_BLOCK_STRIDE, validHalfwords);
             if constexpr (TaskN == 256) {
-                Scatter(reinterpret_cast<__ubuf__ uint16_t*>(taskScale + 2 * 32),
-                    vreg_pair2, scaleOffsets, validHalfwords);
-                Scatter(reinterpret_cast<__ubuf__ uint16_t*>(taskScale + 3 * 32),
-                    vreg_pair3, scaleOffsets, validHalfwords);
+                StoreAlign<uint16_t, Reg::DataCopyMode::DATA_BLOCK_COPY>(
+                    reinterpret_cast<__ubuf__ uint16_t*>(taskScale + 2 * 32),
+                    vreg_pair2, SCALE_BLOCK_STRIDE, validHalfwords);
+                StoreAlign<uint16_t, Reg::DataCopyMode::DATA_BLOCK_COPY>(
+                    reinterpret_cast<__ubuf__ uint16_t*>(taskScale + 3 * 32),
+                    vreg_pair3, SCALE_BLOCK_STRIDE, validHalfwords);
             }
 
             // 每个Q16块末尾预留的32B padding只需写一次。
-            Scatter(reinterpret_cast<__ubuf__ uint16_t*>(taskScale + TaskN / 64 * 32),
-                paddingPairs, scaleOffsets, validHalfwords);
+            StoreAlign<uint16_t, Reg::DataCopyMode::DATA_BLOCK_COPY>(
+                reinterpret_cast<__ubuf__ uint16_t*>(taskScale + TaskN / 64 * 32),
+                paddingPairs, SCALE_BLOCK_STRIDE, validHalfwords);
         }
     }
 }
@@ -276,7 +278,6 @@ __simd_vf__ inline void UpdatePScaleNdVf(__ubuf__ uint8_t* encodedScale,
     constexpr uint32_t ROWS_PER_REGISTER = REGISTER_ELEMENTS / GROUPS_PER_TASK;
     constexpr uint32_t ROW_BLOCK_BYTES = (TaskN / 64 + 1) * 32;
     constexpr int16_t GROUP_SHIFT = TaskN == 256 ? 3 : 2;
-    constexpr int16_t PAIR_SHIFT = TaskN == 256 ? 2 : 1;
     MaskReg allRows = CreateMask<float, MaskPattern::ALL>();
     RegTensor<float> groupMaximum, oldReference, mergedReference, referenceDifference, zeroValues;
     RegTensor<float> multiplier;
@@ -304,12 +305,9 @@ __simd_vf__ inline void UpdatePScaleNdVf(__ubuf__ uint8_t* encodedScale,
     StoreAlign(groupReference, mergedReference, allRows);
     StoreAlign(previousReference, mergedReference, allRows);
 
-    MaskReg allHalfwords = CreateMask<uint16_t, MaskPattern::ALL>();
     MaskReg allBytes = CreateMask<uint8_t, MaskPattern::ALL>();
-    uint32_t validPairCount = 32;
-    MaskReg validPairs = UpdateMask<uint16_t>(validPairCount);
-    uint32_t validPaddingCount = RowCapacity;
-    MaskReg validPadding = UpdateMask<uint16_t>(validPaddingCount);
+    uint32_t storeByteCount = ROW_BLOCK_BYTES;
+    MaskReg storeBytes = UpdateMask<uint8_t>(storeByteCount);
 
     // 每行参考重复 GROUPS_PER_TASK 次，对应连续输入的同一行各个 S32 指数。
     RegTensor<uint32_t> referenceIndices;
@@ -349,30 +347,36 @@ __simd_vf__ inline void UpdatePScaleNdVf(__ubuf__ uint8_t* encodedScale,
         }
     }
 
-    // Cast 后有效字节位于 0、4、8、...、252；压紧结果仅使用前64字节。
-    RegTensor<uint8_t> compactByteIndices;
-    Arange(reinterpret_cast<RegTensor<int8_t>&>(compactByteIndices), static_cast<int8_t>(0));
-    ShiftLefts(compactByteIndices, compactByteIndices, static_cast<int16_t>(2), allBytes);
-
-    // 压紧后相邻两个字节属于同一 Q 行的相邻 S32 组，按 uint16 散写。
-    // 每路偏移为 S64编号*16 + 路内Q行号，单位为 uint16 元素。
-    RegTensor<uint16_t> pairIndices, pairRows, pairColumns, pairOffsets;
-    Arange(reinterpret_cast<RegTensor<int16_t>&>(pairIndices), static_cast<int16_t>(0));
-    ShiftRights(pairRows, pairIndices, PAIR_SHIFT, allHalfwords);
-    ShiftLefts(pairColumns, pairIndices, static_cast<int16_t>(16 - PAIR_SHIFT), allHalfwords);
-    ShiftRights(pairColumns, pairColumns, static_cast<int16_t>(16 - PAIR_SHIFT), allHalfwords);
-    ShiftLefts(pairColumns, pairColumns, static_cast<int16_t>(4), allHalfwords);
-    Add(pairOffsets, pairColumns, pairRows, allHalfwords);
-
-    // 每个 Q16 块最后一个32B区域是 padding。
-    RegTensor<uint16_t> paddingIndices, paddingBlocks, paddingRows, paddingOffsets, paddingPairs;
-    Arange(reinterpret_cast<RegTensor<int16_t>&>(paddingIndices), static_cast<int16_t>(0));
-    ShiftRights(paddingBlocks, paddingIndices, static_cast<int16_t>(4), allHalfwords);
-    Muls(paddingBlocks, paddingBlocks, static_cast<uint16_t>(ROW_BLOCK_BYTES / 2), allHalfwords);
-    ShiftLefts(paddingRows, paddingIndices, static_cast<int16_t>(12), allHalfwords);
-    ShiftRights(paddingRows, paddingRows, static_cast<int16_t>(12), allHalfwords);
-    Add(paddingOffsets, paddingBlocks, paddingRows, allHalfwords);
-    Duplicate(paddingPairs, static_cast<uint16_t>(0));
+    // Reorder sparse Cast bytes directly into one physical Q16 block.
+    // Cast ZERO clears the other three bytes of each int32 lane, so index 1
+    // supplies zeros for padding and for the other Q8 half of TaskN256.
+    RegTensor<uint8_t> bytePositions, rowBytes, columnBytes, parityBytes, sourceIndices;
+    RegTensor<uint8_t> firstIndices, secondIndices, zeroIndices, halfPositions;
+    Arange(reinterpret_cast<RegTensor<int8_t>&>(bytePositions), static_cast<int8_t>(0));
+    ShiftLefts(rowBytes, bytePositions, static_cast<int16_t>(TaskN == 256 ? 4 : 3), allBytes);
+    ShiftRights(rowBytes, rowBytes, static_cast<int16_t>(TaskN == 256 ? 5 : 4), allBytes);
+    ShiftLefts(rowBytes, rowBytes, static_cast<int16_t>(TaskN == 256 ? 5 : 4), allBytes);
+    ShiftRights(columnBytes, bytePositions, static_cast<int16_t>(5), allBytes);
+    ShiftLefts(columnBytes, columnBytes, static_cast<int16_t>(3), allBytes);
+    ShiftLefts(parityBytes, bytePositions, static_cast<int16_t>(7), allBytes);
+    ShiftRights(parityBytes, parityBytes, static_cast<int16_t>(5), allBytes);
+    Or(sourceIndices, rowBytes, columnBytes, allBytes);
+    Or(sourceIndices, sourceIndices, parityBytes, allBytes);
+    Duplicate(zeroIndices, static_cast<uint8_t>(1));
+    uint32_t payloadByteCount = TaskN / 2;
+    MaskReg payloadBytes = UpdateMask<uint8_t>(payloadByteCount);
+    if constexpr (TaskN == 256) {
+        MaskReg firstRows, secondRows;
+        ShiftLefts(halfPositions, bytePositions, static_cast<int16_t>(3), allBytes);
+        Compares<uint8_t, CMPMODE::GT>(secondRows, halfPositions, static_cast<uint8_t>(127), allBytes);
+        MaskNot(firstRows, secondRows, allBytes);
+        MaskAnd(firstRows, firstRows, payloadBytes, allBytes);
+        MaskAnd(secondRows, secondRows, payloadBytes, allBytes);
+        Select(firstIndices, sourceIndices, zeroIndices, firstRows);
+        Select(secondIndices, sourceIndices, zeroIndices, secondRows);
+    } else {
+        Select(firstIndices, sourceIndices, zeroIndices, payloadBytes);
+    }
 
     // 输入统计环分首尾两段，输出在 UB 中按 task 顺序连续排列。
     for (uint16_t segmentIndex = 0; segmentIndex < 2; ++segmentIndex) {
@@ -660,76 +664,50 @@ __simd_vf__ inline void UpdatePScaleNdVf(__ubuf__ uint8_t* encodedScale,
                 }
             }
 
-            // 压紧后保持 Q 行优先，每路前64字节组成32个有效scale对。
-            Gather(vreg_packed0, vreg_bytes0, compactByteIndices);
-            if constexpr (RowCapacity > 1 * ROWS_PER_REGISTER) {
-                Gather(vreg_packed1, vreg_bytes1, compactByteIndices);
-            }
-            if constexpr (RowCapacity > 2 * ROWS_PER_REGISTER) {
-                Gather(vreg_packed2, vreg_bytes2, compactByteIndices);
-            }
-            if constexpr (RowCapacity > 3 * ROWS_PER_REGISTER) {
-                Gather(vreg_packed3, vreg_bytes3, compactByteIndices);
-            }
+            // Each aligned store writes 3/5 consecutive 32B blocks, including
+            // zero padding. Their bank groups differ within the instruction.
             if constexpr (TaskN == 256) {
-                if constexpr (RowCapacity > 4 * ROWS_PER_REGISTER) {
-                    Gather(vreg_packed4, vreg_bytes4, compactByteIndices);
-                }
-                if constexpr (RowCapacity > 5 * ROWS_PER_REGISTER) {
-                    Gather(vreg_packed5, vreg_bytes5, compactByteIndices);
-                }
-                if constexpr (RowCapacity > 6 * ROWS_PER_REGISTER) {
-                    Gather(vreg_packed6, vreg_bytes6, compactByteIndices);
-                }
-                if constexpr (RowCapacity > 7 * ROWS_PER_REGISTER) {
-                    Gather(vreg_packed7, vreg_bytes7, compactByteIndices);
+                Gather(vreg_packed0, vreg_bytes0, firstIndices);
+                Gather(vreg_packed1, vreg_bytes1, secondIndices);
+                Or(vreg_packed0, vreg_packed0, vreg_packed1, allBytes);
+                StoreAlign(taskScale + 0 * ROW_BLOCK_BYTES, vreg_packed0, storeBytes);
+            } else {
+                Gather(vreg_packed0, vreg_bytes0, firstIndices);
+                StoreAlign(taskScale + 0 * ROW_BLOCK_BYTES, vreg_packed0, storeBytes);
+            }
+            if constexpr (RowCapacity > 16) {
+                if constexpr (TaskN == 256) {
+                    Gather(vreg_packed2, vreg_bytes2, firstIndices);
+                    Gather(vreg_packed3, vreg_bytes3, secondIndices);
+                    Or(vreg_packed2, vreg_packed2, vreg_packed3, allBytes);
+                    StoreAlign(taskScale + 1 * ROW_BLOCK_BYTES, vreg_packed2, storeBytes);
+                } else {
+                    Gather(vreg_packed1, vreg_bytes1, firstIndices);
+                    StoreAlign(taskScale + 1 * ROW_BLOCK_BYTES, vreg_packed1, storeBytes);
                 }
             }
-
-            // 每路首行决定基地址，pairOffsets 完成 Q 行优先到物理布局的重排。
-            Scatter(reinterpret_cast<__ubuf__ uint16_t*>(taskScale +
-                (0 * ROWS_PER_REGISTER / 16) * ROW_BLOCK_BYTES + (0 * ROWS_PER_REGISTER % 16) * 2),
-                reinterpret_cast<RegTensor<uint16_t>&>(vreg_packed0), pairOffsets, validPairs);
-            if constexpr (RowCapacity > 1 * ROWS_PER_REGISTER) {
-                Scatter(reinterpret_cast<__ubuf__ uint16_t*>(taskScale +
-                    (1 * ROWS_PER_REGISTER / 16) * ROW_BLOCK_BYTES + (1 * ROWS_PER_REGISTER % 16) * 2),
-                    reinterpret_cast<RegTensor<uint16_t>&>(vreg_packed1), pairOffsets, validPairs);
-            }
-            if constexpr (RowCapacity > 2 * ROWS_PER_REGISTER) {
-                Scatter(reinterpret_cast<__ubuf__ uint16_t*>(taskScale +
-                    (2 * ROWS_PER_REGISTER / 16) * ROW_BLOCK_BYTES + (2 * ROWS_PER_REGISTER % 16) * 2),
-                    reinterpret_cast<RegTensor<uint16_t>&>(vreg_packed2), pairOffsets, validPairs);
-            }
-            if constexpr (RowCapacity > 3 * ROWS_PER_REGISTER) {
-                Scatter(reinterpret_cast<__ubuf__ uint16_t*>(taskScale +
-                    (3 * ROWS_PER_REGISTER / 16) * ROW_BLOCK_BYTES + (3 * ROWS_PER_REGISTER % 16) * 2),
-                    reinterpret_cast<RegTensor<uint16_t>&>(vreg_packed3), pairOffsets, validPairs);
-            }
-            if constexpr (TaskN == 256) {
-                if constexpr (RowCapacity > 4 * ROWS_PER_REGISTER) {
-                    Scatter(reinterpret_cast<__ubuf__ uint16_t*>(taskScale +
-                        (4 * ROWS_PER_REGISTER / 16) * ROW_BLOCK_BYTES + (4 * ROWS_PER_REGISTER % 16) * 2),
-                        reinterpret_cast<RegTensor<uint16_t>&>(vreg_packed4), pairOffsets, validPairs);
-                }
-                if constexpr (RowCapacity > 5 * ROWS_PER_REGISTER) {
-                    Scatter(reinterpret_cast<__ubuf__ uint16_t*>(taskScale +
-                        (5 * ROWS_PER_REGISTER / 16) * ROW_BLOCK_BYTES + (5 * ROWS_PER_REGISTER % 16) * 2),
-                        reinterpret_cast<RegTensor<uint16_t>&>(vreg_packed5), pairOffsets, validPairs);
-                }
-                if constexpr (RowCapacity > 6 * ROWS_PER_REGISTER) {
-                    Scatter(reinterpret_cast<__ubuf__ uint16_t*>(taskScale +
-                        (6 * ROWS_PER_REGISTER / 16) * ROW_BLOCK_BYTES + (6 * ROWS_PER_REGISTER % 16) * 2),
-                        reinterpret_cast<RegTensor<uint16_t>&>(vreg_packed6), pairOffsets, validPairs);
-                }
-                if constexpr (RowCapacity > 7 * ROWS_PER_REGISTER) {
-                    Scatter(reinterpret_cast<__ubuf__ uint16_t*>(taskScale +
-                        (7 * ROWS_PER_REGISTER / 16) * ROW_BLOCK_BYTES + (7 * ROWS_PER_REGISTER % 16) * 2),
-                        reinterpret_cast<RegTensor<uint16_t>&>(vreg_packed7), pairOffsets, validPairs);
+            if constexpr (RowCapacity > 32) {
+                if constexpr (TaskN == 256) {
+                    Gather(vreg_packed4, vreg_bytes4, firstIndices);
+                    Gather(vreg_packed5, vreg_bytes5, secondIndices);
+                    Or(vreg_packed4, vreg_packed4, vreg_packed5, allBytes);
+                    StoreAlign(taskScale + 2 * ROW_BLOCK_BYTES, vreg_packed4, storeBytes);
+                } else {
+                    Gather(vreg_packed2, vreg_bytes2, firstIndices);
+                    StoreAlign(taskScale + 2 * ROW_BLOCK_BYTES, vreg_packed2, storeBytes);
                 }
             }
-            // 当前 task 的四个 Q16 块 padding 一次性清零。
-            Scatter(reinterpret_cast<__ubuf__ uint16_t*>(taskScale + TaskN / 64 * 32),
-                paddingPairs, paddingOffsets, validPadding);
+            if constexpr (RowCapacity > 48) {
+                if constexpr (TaskN == 256) {
+                    Gather(vreg_packed6, vreg_bytes6, firstIndices);
+                    Gather(vreg_packed7, vreg_bytes7, secondIndices);
+                    Or(vreg_packed6, vreg_packed6, vreg_packed7, allBytes);
+                    StoreAlign(taskScale + 3 * ROW_BLOCK_BYTES, vreg_packed6, storeBytes);
+                } else {
+                    Gather(vreg_packed3, vreg_bytes3, firstIndices);
+                    StoreAlign(taskScale + 3 * ROW_BLOCK_BYTES, vreg_packed3, storeBytes);
+                }
+            }
         }
     }
 }

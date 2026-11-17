@@ -21,7 +21,7 @@
 
 性能测试使用 tests/pytest/qfa_mxfp4_test/test_quant_flash_attn_perf_rdv.py 的 `--perf-case-set bench16k --run-perf --perf-backends c4,c8 --perf-mode graph --perf-warmup 3 --perf-rounds 5 --perf-repeats 20` 12 个case进行测试。
 
-使用 tests\pytest\qfa_mxfp4_test\prof_quant_flash_attn.py  的 msprof 和 msprof op （BasicInfo 和 InstrTimeline 两个指标） 采集 bench16k_dual_prefill_1 和 bench16k_decode_4  的性能数据
+使用 tests\pytest\qfa_mxfp4_test\prof_quant_flash_attn.py  的 msprof 和 msprof op （ Default 和 InstrTimeline 两个指标） 采集 bench16k_dual_prefill_1 和 bench16k_decode_4  的性能数据
 
 ### 总表记录
 
@@ -196,3 +196,47 @@ ExpSub 和 ExpSub + 乘加的整体耗时分别减少约 0.48% 和 0.51%。单�
 两组成功采集输出有限、allocated 前后均为 0；以上为 eager 诊断口径。InstrTimeline 留下 407808 个诊断区间，不能作为完整有效指令时间线。工具退出后 15:11 检查 NPU7 健康 OK、利用率 0、无残留进程。未重置设备，本轮未采 C8 或其他 case。
 
 215 项原始文件加清单已下载并逐 SHA/尺寸/精确集合核验，提供 7 份 CSV/trace 短路径副本；自动 dump 保留远端并入清单。详见[本轮联合融合版本采集报告与原始数据](../../../operators/quant_flash_attn/dual_prefill1_compound_profiler_20261117_card7_01/README.md)。
+
+
+### DN Pscale：Scatter 替换为分块 Store（2026-11-17）
+
+基于 `cafc1498c` 的联合融合版本，仅将 `UpdatePScaleDnVf` 的 5 处静态 Scatter 调用改成 `DATA_BLOCK_COPY StoreAlign`，删除专用索引构造，保留寄存器 Gather 压紧、量化公式、参考指数和 alpha。每条 Store 启用 4 个完整 32B 块，步长为 3/5，保持原 `[Q16块,S64块,Q16,2]` 布局和每个 Q16 块末尾 32B 零 padding。
+
+3510 的 bank group 为 `(byte_address >> 5) & 7`。4 块相对 group 分别为 `0,3,6,1` 或 `0,5,2,7`，因此本次每条 Store 的有效块分散到 4 个不同组；此结论不覆盖整个 kernel 或跨流水访问。CANN 9.2 的独立 DN Task128/256 实例 LLVM IR 已确认：8 个 `vscatter` 调用换成 8 个 `vsstb`，步长控制字分别为 `3 << 16`、`5 << 16`，未将不完整的 objdump Reg 解码作为机器指令证据。
+
+本地新旧实际 VF 字节模型各 7,680 组、独立 bank/对齐/边界检查 64 组通过。200 / `tp_a4c4_gqa_kernel` / 仅 NPU7：独立 Pscale 256/256，通过 document small 204/204 + bench16k 12/12。按用户要求，后两组直接复用已核对版本、完整参数 fingerprint 和 input_id 的历史 CPU reference，运行 `--golden-mode npu,compare`，不再运行 Triton reference。
+
+配对性能使用同一轮测试代码和输入、schema2、C4/C8 Graph，3 次预热、5 轮 × 20 次取中位数。基线包 `cann_ops_transformer_qfa_fuse_cmp_20261117`，候选包 `cann_ops_transformer_qfa_dn_store_20261117`；12 项 case fingerprint 和输入 SHA 全部匹配。C4 耗时几何平均减少 0.167%，C8 对照减少 -0.155%；C4 prefill 变化 -0.18%..+0.18%，没有测到明确整算子加速。不能将未修改路径的小幅变化归因于 DN Store。
+
+| case | 采集指标 | 状态 | 主算子中位数/μs |
+| --- | --- | --- | ---: |
+| dual_prefill_1 | PipeUtilization | validated | 1215.470 |
+| dual_prefill_1 | Default | validated | 1218.495 |
+| dual_prefill_1 | InstrTimeline | 无效，data loss 18 条 | — |
+| decode_4 | PipeUtilization | validated | 51.790 |
+| decode_4 | Default | validated | 63.262 |
+| decode_4 | InstrTimeline | 无效，data loss 18 条 | — |
+
+以上 profiler 只采候选，用于诊断，不与 Graph 计时混用。失效 InstrTimeline 不用于证明 bank 无冲突或逐指令性能收益。源码身份、24 份性能 JSON、JUnit、采集摘要及失败边界见[本次替换验证记录](../../../operators/quant_flash_attn/dn_pscale_store_20261117_card7_01/README.md)，逐例数字见[配对性能表](../../../operators/quant_flash_attn/dn_pscale_store_20261117_card7_01/performance-table.md)。
+
+
+### ND Pscale 与 Softmax 指数：Scatter 替换为 Store（2026-11-17）
+
+基线为上一轮已验收的 DN Store 包 `qfa_dn_store_20261117`，候选为 `qfa_nd_store_20261117`。`UpdatePScaleNdVf` 直接将 Cast 编码重排到物理 Q16 块；Task128 连续写 96B，Task256 合并相邻两路 Q8 后连续写 160B，均包含原有 32B 零 padding。每条 Store 的 3/5 个连续 32B 块落入不同 bank group；不将其外推为整个 kernel 无 bank 冲突。`SoftmaxQuantizeNdChunkFp32Vf` 的 5 处两 float Scatter 改为 `Reg::Store<float>(...,2)`，内部走非对齐 Store 和收尾；物理布局、量化公式及已有 DN 修改保留。
+
+新旧实际 VF 字节模型各 19,200 组、地址审计 160 组通过。200 / `tp_a4c4_gqa_kernel` / 仅 NPU7：两版各 640 项独立 Pscale 通过，1,344 项 ND Softmax 全部输出字节一致；候选 document small 204/204 + bench16k 12/12 通过。复用已核验 CPU 缓存，使用 `--golden-mode npu,compare`，不重算 CPU reference、不跑 Triton。
+
+独立 ND 实例 CANN 9.2 LLVM IR：70 个 Scatter 调用变为 0，Softmax 使用 20 组非对齐写/收尾，Pscale 使用对齐 Store。这里只说明编译器 lowering，不是最终机器逐指令时长。
+
+同轮两版各 12 项 C4/C8 Graph，3 预热、5 轮×20 回放，完整 case 指纹与输入 SHA 一致，48 路输出有限/回放抽样一致/allocated 释放为 0。C4 耗时几何平均减少 -0.386%（decode -1.161%），C8 对照减少 +0.066%；负值代表变慢。未修改路径的小幅波动不能归因于 ND 替换。
+
+| case | 指标 | 状态 | 主算子中位数/μs |
+| --- | --- | --- | ---: |
+| dual_prefill_1 | PipeUtilization | validated | 1213.502 |
+| dual_prefill_1 | Default | validated | 1217.152 |
+| dual_prefill_1 | InstrTimeline | 无效，data loss 18 条 | — |
+| decode_4 | PipeUtilization | validated | 52.403 |
+| decode_4 | Default | validated | 63.885 |
+| decode_4 | InstrTimeline | 无效，data loss 18 条 | — |
+
+profiler 仅候选 C4/eager，不与 Graph 混算收益；失效 InstrTimeline 不用于 bank 或完整指令时长归因。详见[本次 ND 验证记录](../../../operators/quant_flash_attn/nd_store_20261117_card7_01/README.md)及[12项配对性能](../../../operators/quant_flash_attn/nd_store_20261117_card7_01/performance-table.md)。

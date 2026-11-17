@@ -633,18 +633,18 @@ __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
     const uint16_t alignedRows = static_cast<uint16_t>(validQueryRows / 4 * 4);
     MaskReg all = CreateMask<float, MaskPattern::ALL>();
     MaskReg allHalf = CreateMask<uint16_t, MaskPattern::ALL>();
-    uint32_t n32 = 32, n2 = 2, n1 = 1, bytes32 = 32;
+    uint32_t n32 = 32, n1 = 1, bytes32 = 32;
     MaskReg firstHalf = UpdateMask<float>(n32), secondHalf;
-    MaskReg pairMask = UpdateMask<float>(n2), scalarMask = UpdateMask<float>(n1);
+    MaskReg scalarMask = UpdateMask<float>(n1);
     MaskReg packedMask = UpdateMask<uint8_t>(bytes32);
     MaskNot(secondHalf, firstHalf, all);
     RegTensor<float> invalid, causalRows;
     RegTensor<int32_t> keyIndices, chunkIndices;
-    RegTensor<uint32_t> pairIndices, storeOffsets;
+    RegTensor<uint32_t> pairIndices;
     Duplicate(invalid, INVALID_GROUP_EXPONENT);
     Arange(keyIndices, static_cast<int32_t>(0));
-    Arange(reinterpret_cast<RegTensor<int32_t>&>(storeOffsets), static_cast<int32_t>(0));
-    Mins(pairIndices, storeOffsets, static_cast<uint32_t>(1), all);
+    Arange(reinterpret_cast<RegTensor<int32_t>&>(pairIndices), static_cast<int32_t>(0));
+    Mins(pairIndices, pairIndices, static_cast<uint32_t>(1), all);
     ShiftLefts(pairIndices, pairIndices, static_cast<int16_t>(5), all);
     MaskReg validKv;
     RegTensor<float> score0, first0, second0, exponent0, packedExponent0, maximum0;
@@ -773,10 +773,10 @@ __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
             Gather(packedExponent1, exponent1, pairIndices);
             Gather(packedExponent2, exponent2, pairIndices);
             Gather(packedExponent3, exponent3, pairIndices);
-            Scatter(groupMaxUb + (row + 0) * GROUPS_PER_TASK + firstGroup, packedExponent0, storeOffsets, pairMask);
-            Scatter(groupMaxUb + (row + 1) * GROUPS_PER_TASK + firstGroup, packedExponent1, storeOffsets, pairMask);
-            Scatter(groupMaxUb + (row + 2) * GROUPS_PER_TASK + firstGroup, packedExponent2, storeOffsets, pairMask);
-            Scatter(groupMaxUb + (row + 3) * GROUPS_PER_TASK + firstGroup, packedExponent3, storeOffsets, pairMask);
+            AscendC::Reg::Store<float>(groupMaxUb + (row + 0) * GROUPS_PER_TASK + firstGroup, packedExponent0, 2);
+            AscendC::Reg::Store<float>(groupMaxUb + (row + 1) * GROUPS_PER_TASK + firstGroup, packedExponent1, 2);
+            AscendC::Reg::Store<float>(groupMaxUb + (row + 2) * GROUPS_PER_TASK + firstGroup, packedExponent2, 2);
+            AscendC::Reg::Store<float>(groupMaxUb + (row + 3) * GROUPS_PER_TASK + firstGroup, packedExponent3, 2);
 
 
 
@@ -868,7 +868,7 @@ __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
             }
             Select(exponent0, exponent0, invalid, groupValid0);
             Gather(packedExponent0, exponent0, pairIndices);
-            Scatter(groupMaxUb + (row + 0) * GROUPS_PER_TASK + firstGroup, packedExponent0, storeOffsets, pairMask);
+            AscendC::Reg::Store<float>(groupMaxUb + (row + 0) * GROUPS_PER_TASK + firstGroup, packedExponent0, 2);
 
             if constexpr (QUANT_SCHEMA != QuantSchema::OCP_QUANT) {
                 Muls(exponent0, exponent0, MXFP4_LN2, groupValid0);
