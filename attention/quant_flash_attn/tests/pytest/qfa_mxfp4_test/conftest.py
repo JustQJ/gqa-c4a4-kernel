@@ -32,8 +32,8 @@ def pytest_addoption(parser):
     group.addoption('--golden-mode', default='all', help='all or comma-separated gen,cpu,npu,compare')
     group.addoption('--cache-dir', default=None, help='Input and reference .pt cache directory')
     group.addoption('--scope', choices=('full', 'small'), default='full')
-    group.addoption('--accuracy-case-set', choices=('document', 'bench16k'), default='document',
-                    help='Functional accuracy cases: existing matrix or the explicit bench16k cases')
+    group.addoption('--accuracy-case-set', choices=('document', 'bench16k', 'qwen3_8b'), default='document',
+                    help='Functional accuracy cases: document matrix, bench16k or Qwen3-8B TP1')
     group.addoption('--quant-schema', type=int, choices=(0, 1, 2), default=None,
                     help='Public API and references: 0=OCP, 1=CX, 2=CX Delta (default)')
     group.addoption('--p-quant-scheme', choices=P_QUANT_SCHEMES, default=None,
@@ -48,8 +48,8 @@ def pytest_addoption(parser):
     group.addoption('--reference-threads', type=int, default=1)
     perf = parser.getgroup('qfa_mxfp4 performance')
     perf.addoption('--run-perf', action='store_true', help='Explicitly enable performance tests')
-    perf.addoption('--perf-case-set', choices=('document', 'mxfp8', 'bench16k'), default='document',
-                   help='Document small/full scope; MXFP8 and fixed bench16k cases ignore scope')
+    perf.addoption('--perf-case-set', choices=('document', 'mxfp8', 'bench16k', 'qwen3_8b'), default='document',
+                   help='Document small/full scope; MXFP8, bench16k and Qwen3-8B cases ignore scope')
     perf.addoption('--perf-kind', choices=('all', 'prefill', 'decode', 'mixed'), default='all')
     perf.addoption('--perf-backends', default='c4,c8,bf16')
     perf.addoption('--perf-mode', choices=('graph', 'eager', 'msprof'), default='graph')

@@ -13,7 +13,7 @@
 """Accuracy-only full/small matrix; matches the established C4 input ranges."""
 from .quant_flash_attn_paramset_common import build_paramset, expand_paramset_to_cases
 
-CASE_SETS = ('document', 'bench16k')
+CASE_SETS = ('document', 'bench16k', 'qwen3_8b')
 
 
 def scenarios(scope):
@@ -40,9 +40,12 @@ SKIP_CASES = set()
 
 
 def get_cases(scope='full', case_set='document'):
+    if case_set == 'qwen3_8b':
+        from .quant_flash_attn_paramset_qwen3_8b import get_accuracy_cases
+        return get_accuracy_cases(scope)
     if case_set == 'bench16k':
         from .quant_flash_attn_paramset_bench16k import get_accuracy_cases
         return get_accuracy_cases(scope)
     if case_set != 'document':
-        raise ValueError('Accuracy case-set must be document or bench16k')
+        raise ValueError('Accuracy case-set must be document, bench16k or qwen3_8b')
     return CASES if scope == 'full' else expand_paramset_to_cases(build_paramset(scope, scenarios(scope)))

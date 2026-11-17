@@ -8,6 +8,7 @@
 | C4/C8/BF16 文档集合性能对比 | test_quant_flash_attn_perf_rdv.py --run-perf | graph_replay_us：NPUGraph + Event |
 | MXFP8 迁入集合的 C4/C8 对比 | 同一 pytest 入口，--perf-case-set mxfp8 | page512、PA_BBND，205个非skip场景 |
 | 16k bench场景对比 | 同一 pytest 入口，--perf-case-set bench16k | 固定12项，包含mixed；见第4节 |
+| Qwen3-8B场景对比 | 同一 pytest 入口，--perf-case-set qwen3_8b | 固定16项，Q32/KV8/D128、TP1；见[完整说明](qwen3_8b_bench.md) |
 | 批量成对 kernel 耗时 | 同一 pytest 入口加 --msprof | msprof_task_us：普通 msprof 的 Task Duration |
 
 普通 msprof 的 PipeUtilization 是流水占用指标；核内时间线使用 msprof op 的 PipeTimeline。不同口径分别报告，不混算加速比。
@@ -15,6 +16,8 @@
 ## 1. 统一单例采集入口
 
 [prof_quant_flash_attn.py](prof_quant_flash_attn.py) 支持普通msprof和msprof op。默认仍为op，原手工Q/KV参数保留。命名case直接读取当前bench16k集合，复用perf_inputs/prepare_call，保持随机输入、固定scale、页表、mask和31374页池与性能测试一致；采集不运行CPU/Triton参考。
+
+另可用 `--case-set qwen3_8b` 选择Qwen3-8B的16项集合（Q32/KV8/D128、65536页池），同样支持短名、`--case all` 和 `--list-cases`；完整说明见 [qwen3_8b_bench.md](qwen3_8b_bench.md)。不传 `--case-set` 时默认bench16k。
 
 先配置CANN和配套算子包，从tests/pytest目录运行：
 
@@ -166,7 +169,7 @@ Q1024/KV4096的首次PipeTimeline产生5954条事件，但日志报告 channel20
 
 ### 2.1 选择测试集合
 
-`--perf-case-set` 决定用例集合；`--scope` 对 `document` 集合生效，`mxfp8` 和 `bench16k` 忽略此选项。参数定义见 [quant_flash_attn_paramset_perf_rdv.py](quant_flash_attn_paramset_perf_rdv.py)。
+`--perf-case-set` 决定用例集合；`--scope` 对 `document` 集合生效，`mxfp8`、`bench16k` 和 `qwen3_8b` 忽略此选项。参数定义见 [quant_flash_attn_paramset_perf_rdv.py](quant_flash_attn_paramset_perf_rdv.py)。
 
 | 集合与范围 | 用例数 | 主要配置 |
 | --- | ---: | --- |
@@ -174,12 +177,13 @@ Q1024/KV4096的首次PipeTimeline产生5954条事件，但日志报告 channel20
 | `--perf-case-set document --scope full` | 1395：Prefill135、Decode/MTP1260 | 三个模型各TP1/2/4；D128/256；page256、causal、LSE关闭 |
 | `--perf-case-set mxfp8` | 211：6项skip，实际205 | page512、PA_BBND；逐序列变长、零Q、mask0/3、两种Q-scale布局及LSE组合 |
 | `--perf-case-set bench16k` | 12 | 固定长度和31374页KV池、Nq16/Nkv2/D256、page128，包含mixed；见第4节 |
+| `--perf-case-set qwen3_8b` | 16 | Q32/KV8/D128、TP1，KV500–16526、batch1–128，decode_3为Q4；见[完整case表](qwen3_8b_bench.md) |
 
 document集合的Prefill覆盖Q8192、B1/2/4、KV8192至262144；Decode/MTP覆盖Q1/2/4/6/8、KV32768/65536/131072/262144。small的Decode batch为1/2/16，full为1/2/4/8/16/32/64。默认 `--scope full`；小量测试需要显式写 `--scope small`。
 
 MXFP8集合保存在本目录 [perf_cases_mxfp8.json](perf_cases_mxfp8.json)，包含来源SHA和source_case_id，运行时不依赖兄弟目录。211项中Prefill102、Decode109；跳过6项耗时过长用例后为Prefill98、Decode107。`--scope small` 不会缩小此集合。参数保留逐序列Q/KV长度、max长度提示、头数、D128/256、mask、Q-scale布局、LSE及C8的p_scale；194项常规case的p_scale=1且LSE关闭，17项D256红线case中7项开启LSE。
 
-可用 `--perf-kind prefill` / `decode` / `mixed` / `all` 筛选场景类型，默认all；mixed目前由bench16k集合提供。pytest `-k` 可进一步按case ID筛选。两张卡的分片按选定集合与类型拆分，skip用例仍保留其分片位置。
+可用 `--perf-kind prefill` / `decode` / `mixed` / `all` 筛选场景类型，默认all；mixed由bench16k和qwen3_8b集合提供。pytest `-k` 可进一步按case ID筛选。两张卡的分片按选定集合与类型拆分，skip用例仍保留其分片位置。
 
 ### 2.2 选择被测实现与输入方式
 
@@ -193,7 +197,7 @@ MXFP8集合保存在本目录 [perf_cases_mxfp8.json](perf_cases_mxfp8.json)，�
 
 同一case的各路始终使用同一张卡，双卡只拆分case。CPU保留一份随机FP4编码及页表；C8精确转成E4M3，BF16解码后乘相同scale（Q/K为1/16，V为1/4）。每条序列按实际KV长度分配独占物理页，页号随机打乱，页表未使用位置填-1；Q按cu_seqlens打包。数据转换、H2D/D2H、metadata、mask、首次JIT、检查及落盘均在计时外。
 
-C4与C8使用 `--package` 指定的同一配套QFA包，分别为mode5和mode1。C4默认 `--quant-schema 2`；C8的p_scale在document和bench16k集合为448，在mxfp8集合使用各case配置，C4不传此参数。缩放默认1/sqrt(D)，Q/输出为TND，C4/C8的KV为PA_BBND。
+C4与C8使用 `--package` 指定的同一配套QFA包，分别为mode5和mode1。C4默认 `--quant-schema 2`；C8的p_scale在document、bench16k和qwen3_8b集合为448，在mxfp8集合使用各case配置，C4不传此参数。缩放默认1/sqrt(D)，Q/输出为TND，C4/C8的KV为PA_BBND。
 
 BF16使用torch_npu的FIA V2非量化分页接口，Q为TND、KV为BnBsH，使用同一页表和对应mask语义。三路的P算法不同，性能完成检查不要求三路输出逐位一致。
 
@@ -224,8 +228,8 @@ BF16使用torch_npu的FIA V2非量化分页接口，Q为TND、KV为BnBsH，使�
 | 参数 | 默认值 | 控制内容 |
 | --- | --- | --- |
 | `--run-perf` | 关闭 | 启用性能case；未指定时跳过性能测试 |
-| `--perf-case-set` | document | 选择document、mxfp8或bench16k用例集合 |
-| `--scope` | full | document的small/full范围；mxfp8与bench16k忽略此选项 |
+| `--perf-case-set` | document | 选择document、mxfp8、bench16k或qwen3_8b用例集合 |
+| `--scope` | full | document的small/full范围；mxfp8、bench16k与qwen3_8b忽略此选项 |
 | `--perf-kind` | all | prefill、decode、mixed或all |
 | `--perf-backends` | c4,c8,bf16 | 被测实现及逐路执行顺序；只比较C4/C8时显式写c4,c8 |
 | `--perf-mode` | graph | graph/eager的Event计时；工具采集使用--msprof |

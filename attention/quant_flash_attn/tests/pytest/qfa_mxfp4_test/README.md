@@ -12,6 +12,7 @@ qfa_mxfp4_test/
 ├── quant_flash_attn_paramset_debug.py    # 冒烟与接口边界
 ├── quant_flash_attn_paramset_func_rdv.py # 全量/小量功能矩阵
 ├── quant_flash_attn_paramset_bench16k.py # 12个固定16k bench精度/性能case及KV页池
+├── quant_flash_attn_paramset_qwen3_8b.py # Q32/KV8/D128、TP1的16项Qwen3-8B bench
 ├── test_quant_flash_attn_debug.py        # debug 入口
 ├── test_quant_flash_attn_func_rdv.py     # 功能入口
 ├── prof_quant_flash_attn.py             # 按case统一msprof/op采集，支持C4/C8
@@ -520,3 +521,7 @@ python3 -m unittest qfa_mxfp4_test.common.bench16k_contract_test qfa_mxfp4_test.
 修订后的decode_3已在200容器卡7独立重测：三方精度1/1、C4/C8 Graph性能1/1通过；C4/C8耗时48.793/41.291μs，固定池形状与两路显存释放已核对。见[256起始短尾KV新版报告](../../../../../operators/quant_flash_attn/bench16k_decode3_shorttail_20261116_card7_01/README.md)。
 
 统一采集入口支持按case选择普通msprof、msprof op或两者，使用 `--case decode_3 --profiler both --backend both`；命名case沿用本节固定池和性能输入生成器，使用说明见[Pref_Readme.md](Pref_Readme.md)第1节。
+
+## Qwen3-8B 16项bench
+
+通过 `--accuracy-case-set qwen3_8b` / `--perf-case-set qwen3_8b` 选择独立16项集合：Q32/KV8/D128、TP1，Prefill6/Decode6/Mixed4；当前KV500–16526，decode以Q1为主、decode_3为Q4，prefill Q500–2048、batch1–128。原有集合未精确覆盖此Q/KV头数和head_dim组合。完整case表、覆盖核对、固定页池与执行/导出命令见 [qwen3_8b_bench.md](qwen3_8b_bench.md)。

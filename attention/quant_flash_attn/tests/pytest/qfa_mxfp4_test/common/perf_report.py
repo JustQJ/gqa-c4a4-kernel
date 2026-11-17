@@ -86,7 +86,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--expected', type=int, required=True)
     parser.add_argument('--scope', choices=('small', 'full'), default='small')
-    parser.add_argument('--case-set', choices=('document', 'mxfp8', 'bench16k'), default='document')
+    parser.add_argument('--case-set', choices=('document', 'mxfp8', 'bench16k', 'qwen3_8b'), default='document')
     parser.add_argument('--kind', choices=('all', 'prefill', 'decode', 'mixed'), default='all')
     args = parser.parse_args()
     records = [json.loads(p.read_text()) for directory in args.directories for p in sorted(directory.glob('*.json'))]
@@ -96,14 +96,14 @@ def main():
     expected_ids = set(expected_cases)
     if {record['case']['name'] for record in records} != expected_ids:
         raise SystemExit('Case IDs do not exactly cover the selected performance scope')
-    if args.case_set == 'bench16k':
+    if args.case_set in ('bench16k', 'qwen3_8b'):
         for record in records:
             expected = dict(expected_cases[record['case']['name']],
                             quant_schema=record['case']['quant_schema'])
             fingerprint = case_fingerprint(expected)
             if (record.get('case_fingerprint') != fingerprint or
                     case_fingerprint(record['case']) != fingerprint):
-                raise SystemExit('bench16k case parameters do not match the selected fixed scope')
+                raise SystemExit(f'{args.case_set} case parameters do not match the selected fixed scope')
     report = summarize(records)
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output/'summary.json').write_text(json.dumps(report, indent=2, allow_nan=False)+'\n')

@@ -198,7 +198,7 @@ class Bench16kContractTests(unittest.TestCase):
                 choices[name] = kwargs.get('choices')
         conftest.pytest_addoption(Parser())
         self.assertNotIn('--fia-shapes', options)
-        self.assertEqual(choices['--accuracy-case-set'], ('document', 'bench16k'))
+        self.assertEqual(choices['--accuracy-case-set'], ('document', 'bench16k', 'qwen3_8b'))
         options.update({'--scope': 'small', '--accuracy-case-set': 'bench16k', '--perf-case-set': 'bench16k',
                         '--perf-kind': 'mixed', '--run-perf': True, '--quant-schema': 0})
         config = SimpleNamespace(getoption=lambda key: options[key])
@@ -213,6 +213,13 @@ class Bench16kContractTests(unittest.TestCase):
         self.assertEqual(len(collect(['perf_params'], None)), 2)
         self.assertEqual(len(collect(['params'], debug)), 24)
         self.assertEqual(conftest.perf_options(SimpleNamespace(config=config))['case_set'], 'bench16k')
+        options.update({'--accuracy-case-set': 'qwen3_8b', '--perf-case-set': 'qwen3_8b'})
+        functional = collect(['params'], accuracy)
+        self.assertEqual(len(functional), 16)
+        self.assertTrue(all((case.value['N_q'], case.value['N_kv'], case.value['D']) == (32, 8, 128)
+                            and case.value['quant_schema'] == 0 for case in functional))
+        self.assertEqual(len(collect(['perf_params'], None)), 4)
+        self.assertEqual(conftest.perf_options(SimpleNamespace(config=config))['case_set'], 'qwen3_8b')
 
 
 if __name__ == '__main__':

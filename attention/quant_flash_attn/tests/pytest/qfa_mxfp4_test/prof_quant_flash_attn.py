@@ -44,9 +44,9 @@ def arguments(argv=None):
     parser.add_argument('--device', '--device-id', type=int)
     parser.add_argument('--profiler', choices=('msprof', 'op', 'both'), default='op',
                         help='Application profiling, operator profiling, or both sequentially')
-    parser.add_argument('--case-set', choices=('bench16k',), default='bench16k')
+    parser.add_argument('--case-set', choices=('bench16k', 'qwen3_8b'), default='bench16k')
     parser.add_argument('--case', '--case-name', dest='case_names', nargs='+',
-                        help='bench16k names, e.g. decode_3; use all for the full collection')
+                        help='Names in the selected set, e.g. decode_3; use all for the full collection')
     parser.add_argument('--list-cases', action='store_true', help='List names and parameters without NPU access')
     parser.add_argument('--package', default=os.getenv('QFA_PACKAGE', 'cann_ops_transformer'))
     parser.add_argument('--backend', choices=('c4', 'c8', 'both'), default='c4')
@@ -96,14 +96,15 @@ def arguments(argv=None):
     if args.mode == 'graph' and args.profiler != 'op':
         parser.error('ordinary msprof requires eager mode for exact invocation association')
     if args.case_names:
-        from qfa_mxfp4_test.quant_flash_attn_paramset_bench16k import get_performance_cases
-        names = [case['name'] for case in get_performance_cases()]
+        from qfa_mxfp4_test.quant_flash_attn_paramset_perf_rdv import get_cases
+        names = [case['name'] for case in get_cases(case_set=args.case_set)]
         if args.case_names == ['all']:
             args.case_names = names
         else:
-            args.case_names = [name if name.startswith('bench16k_') else 'bench16k_' + name for name in args.case_names]
+            prefix = args.case_set + '_'
+            args.case_names = [name if name.startswith(prefix) else prefix + name for name in args.case_names]
         if len(set(args.case_names)) != len(args.case_names) or set(args.case_names) - set(names):
-            parser.error('case names must be unique existing bench16k names; use --list-cases')
+            parser.error(f'case names must be unique existing {args.case_set} names; use --list-cases')
         shape_options = ('q_lens', 'kv_lens', 'd', 'heads', 'kv_heads', 'page', 'layout', 'mask', 'lse', 'kv_cache_num_blocks')
         if any(getattr(args, name) is not None for name in shape_options):
             parser.error('named cases own their shapes, layout, mask, LSE and pool; do not combine manual shape options')
@@ -154,7 +155,7 @@ def range_name(backend):
 
 def build_command(args):
     worker = [sys.executable, str(Path(__file__).resolve()), '--worker']
-    names = ['device', 'package', 'profiler', 'backend', 'quant_schema', 'seed', 'warmup', 'repeat', 'mode', 'mstx_backend',
+    names = ['device', 'package', 'profiler', 'backend', 'case_set', 'quant_schema', 'seed', 'warmup', 'repeat', 'mode', 'mstx_backend',
              'metrics', 'app_metrics', 'prof_warmup', 'launch_count', 'output']
     if args.case_names:
         worker.extend(['--case', *args.case_names])
@@ -333,8 +334,8 @@ def _prepare_manual(args):
 
 
 def named_cases(args):
-    from qfa_mxfp4_test.quant_flash_attn_paramset_bench16k import get_performance_cases
-    indexed = {case['name']: case for case in get_performance_cases()}
+    from qfa_mxfp4_test.quant_flash_attn_paramset_perf_rdv import get_cases
+    indexed = {case['name']: case for case in get_cases(case_set=args.case_set)}
     result = []
     for name in args.case_names or []:
         case = copy.deepcopy(indexed[name])
@@ -493,8 +494,8 @@ def profile_one(args):
 def main(argv=None):
     args = arguments(argv)
     if args.list_cases:
-        from qfa_mxfp4_test.quant_flash_attn_paramset_bench16k import get_performance_cases
-        print(json.dumps(get_performance_cases(), indent=2))
+        from qfa_mxfp4_test.quant_flash_attn_paramset_perf_rdv import get_cases
+        print(json.dumps(get_cases(case_set=args.case_set), indent=2))
         return
     print('PROFILE_CONFIG', json.dumps(vars(args)), flush=True)
     if args.worker:
