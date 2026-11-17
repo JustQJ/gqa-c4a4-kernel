@@ -28,9 +28,8 @@ constexpr float MXFP4_CX_SCALE_SHIFT = 3.0F; // ceil(log2(7.25))，ceil(log2(7.2
 constexpr float MXFP4_CX_PSCALE_BIAS = 127.0F - MXFP4_CX_SCALE_SHIFT;
 constexpr float MXFP4_NEG_LN_DELTA = -0.4054651081081644F; // -ln(1.5)
 constexpr float MXFP4_NEG_TWO_VALUE = -2.0F;
-// The final FP32 quotient can lie one ULP below a BF16 midpoint. A one-ULP
-// approximate division changes the BF16 answer there, so request exact rounding.
-constexpr DivSpecificMode MXFP4_OUTPUT_DIV = {MaskMergeMode::ZEROING, true};
+// 输出归一化使用默认硬件除法，精度按既有门限验收。
+constexpr DivSpecificMode MXFP4_OUTPUT_DIV = {MaskMergeMode::ZEROING, false};
 
 constexpr CastTrait MXFP4_CAST_ZERO = {RegLayout::ZERO, SatMode::SAT, MaskMergeMode::ZEROING,
                                       RoundMode::CAST_ROUND};

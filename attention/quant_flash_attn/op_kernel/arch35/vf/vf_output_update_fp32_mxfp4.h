@@ -119,17 +119,21 @@ __simd_vf__ inline void processOutDnVF(__ubuf__ OutputType *outputUb, __ubuf__ f
 {
     MaskReg preg_all32 = CreateMask<float, MaskPattern::ALL>();
     MaskReg preg_all16 = CreateMask<bfloat16_t, MaskPattern::ALL>();
-    RegTensor<float> vreg_row_denominator, vreg_ones;
+    RegTensor<float> vreg_inverse_row_sum, vreg_ones;
     Duplicate(vreg_ones, (float)1.0);
-    LoadAlign(vreg_row_denominator, (__ubuf__ float *)historySumUb);
+    LoadAlign(vreg_inverse_row_sum, (__ubuf__ float *)historySumUb);
     static_assert(ValueDimension % 16 == 0, "DN output requires complete sixteen-channel blocks");
     MaskReg preg_nonempty_rows;
     RegTensor<float> vreg_zero;
     Duplicate(vreg_zero, 0.0F);
-    Compares<float, CMPMODE::GT>(preg_nonempty_rows, vreg_row_denominator, 0.0F, preg_all32);
-    Select(vreg_row_denominator, vreg_row_denominator, vreg_ones, preg_nonempty_rows);
+    Compares<float, CMPMODE::GT>(preg_nonempty_rows, vreg_inverse_row_sum, 0.0F, preg_all32);
+    Select(vreg_inverse_row_sum, vreg_inverse_row_sum, vreg_ones, preg_nonempty_rows);
     static_assert(Normalize || IsSameType<OutputType, float>::value,
         "Only the raw FP32 FD transpose may skip normalization");
+    if constexpr (Normalize) {
+        // 每个 Q64 输出块只计算一次倒数，所有通道复用；FD 原始 PV 路径不做归一化。
+        Div<float, &MXFP4_OUTPUT_DIV>(vreg_inverse_row_sum, vreg_ones, vreg_inverse_row_sum, preg_all32);
+    }
 
     if constexpr (IsSameType<OutputType, float>::value) {
         // FD 保留 FP32：每次输出 [64,16]，复用现有 scratch，调用方按通道拼回 GM。
@@ -140,7 +144,7 @@ __simd_vf__ inline void processOutDnVF(__ubuf__ OutputType *outputUb, __ubuf__ f
             RegTensor<float> vreg_output;
             LoadAlign(vreg_output, historyOutputUb + (channelOffset + channel) * 64);
             if constexpr (Normalize) {
-                Div<float, &MXFP4_OUTPUT_DIV>(vreg_output, vreg_output, vreg_row_denominator, preg_all32);
+                Mul(vreg_output, vreg_output, vreg_inverse_row_sum, preg_all32);
             }
             Select(vreg_output, vreg_output, vreg_zero, preg_nonempty_rows);
             Scatter(outputUb + channel, vreg_output, vreg_output_offsets, preg_all32);
@@ -170,37 +174,37 @@ __simd_vf__ inline void processOutDnVF(__ubuf__ OutputType *outputUb, __ubuf__ f
             LoadAlign(vreg_src15, (__ubuf__ float *)historyOutputUb + channelBlock * 64 * 16 + 64 * 14);
             LoadAlign(vreg_src16, (__ubuf__ float *)historyOutputUb + channelBlock * 64 * 16 + 64 * 15);
 
-            Div<float, &MXFP4_OUTPUT_DIV>(vreg_src1, vreg_src1, vreg_row_denominator, preg_all32);
+            Mul(vreg_src1, vreg_src1, vreg_inverse_row_sum, preg_all32);
             Select(vreg_src1, vreg_src1, vreg_zero, preg_nonempty_rows);
-            Div<float, &MXFP4_OUTPUT_DIV>(vreg_src2, vreg_src2, vreg_row_denominator, preg_all32);
+            Mul(vreg_src2, vreg_src2, vreg_inverse_row_sum, preg_all32);
             Select(vreg_src2, vreg_src2, vreg_zero, preg_nonempty_rows);
-            Div<float, &MXFP4_OUTPUT_DIV>(vreg_src3, vreg_src3, vreg_row_denominator, preg_all32);
+            Mul(vreg_src3, vreg_src3, vreg_inverse_row_sum, preg_all32);
             Select(vreg_src3, vreg_src3, vreg_zero, preg_nonempty_rows);
-            Div<float, &MXFP4_OUTPUT_DIV>(vreg_src4, vreg_src4, vreg_row_denominator, preg_all32);
+            Mul(vreg_src4, vreg_src4, vreg_inverse_row_sum, preg_all32);
             Select(vreg_src4, vreg_src4, vreg_zero, preg_nonempty_rows);
-            Div<float, &MXFP4_OUTPUT_DIV>(vreg_src5, vreg_src5, vreg_row_denominator, preg_all32);
+            Mul(vreg_src5, vreg_src5, vreg_inverse_row_sum, preg_all32);
             Select(vreg_src5, vreg_src5, vreg_zero, preg_nonempty_rows);
-            Div<float, &MXFP4_OUTPUT_DIV>(vreg_src6, vreg_src6, vreg_row_denominator, preg_all32);
+            Mul(vreg_src6, vreg_src6, vreg_inverse_row_sum, preg_all32);
             Select(vreg_src6, vreg_src6, vreg_zero, preg_nonempty_rows);
-            Div<float, &MXFP4_OUTPUT_DIV>(vreg_src7, vreg_src7, vreg_row_denominator, preg_all32);
+            Mul(vreg_src7, vreg_src7, vreg_inverse_row_sum, preg_all32);
             Select(vreg_src7, vreg_src7, vreg_zero, preg_nonempty_rows);
-            Div<float, &MXFP4_OUTPUT_DIV>(vreg_src8, vreg_src8, vreg_row_denominator, preg_all32);
+            Mul(vreg_src8, vreg_src8, vreg_inverse_row_sum, preg_all32);
             Select(vreg_src8, vreg_src8, vreg_zero, preg_nonempty_rows);
-            Div<float, &MXFP4_OUTPUT_DIV>(vreg_src9, vreg_src9, vreg_row_denominator, preg_all32);
+            Mul(vreg_src9, vreg_src9, vreg_inverse_row_sum, preg_all32);
             Select(vreg_src9, vreg_src9, vreg_zero, preg_nonempty_rows);
-            Div<float, &MXFP4_OUTPUT_DIV>(vreg_src10, vreg_src10, vreg_row_denominator, preg_all32);
+            Mul(vreg_src10, vreg_src10, vreg_inverse_row_sum, preg_all32);
             Select(vreg_src10, vreg_src10, vreg_zero, preg_nonempty_rows);
-            Div<float, &MXFP4_OUTPUT_DIV>(vreg_src11, vreg_src11, vreg_row_denominator, preg_all32);
+            Mul(vreg_src11, vreg_src11, vreg_inverse_row_sum, preg_all32);
             Select(vreg_src11, vreg_src11, vreg_zero, preg_nonempty_rows);
-            Div<float, &MXFP4_OUTPUT_DIV>(vreg_src12, vreg_src12, vreg_row_denominator, preg_all32);
+            Mul(vreg_src12, vreg_src12, vreg_inverse_row_sum, preg_all32);
             Select(vreg_src12, vreg_src12, vreg_zero, preg_nonempty_rows);
-            Div<float, &MXFP4_OUTPUT_DIV>(vreg_src13, vreg_src13, vreg_row_denominator, preg_all32);
+            Mul(vreg_src13, vreg_src13, vreg_inverse_row_sum, preg_all32);
             Select(vreg_src13, vreg_src13, vreg_zero, preg_nonempty_rows);
-            Div<float, &MXFP4_OUTPUT_DIV>(vreg_src14, vreg_src14, vreg_row_denominator, preg_all32);
+            Mul(vreg_src14, vreg_src14, vreg_inverse_row_sum, preg_all32);
             Select(vreg_src14, vreg_src14, vreg_zero, preg_nonempty_rows);
-            Div<float, &MXFP4_OUTPUT_DIV>(vreg_src15, vreg_src15, vreg_row_denominator, preg_all32);
+            Mul(vreg_src15, vreg_src15, vreg_inverse_row_sum, preg_all32);
             Select(vreg_src15, vreg_src15, vreg_zero, preg_nonempty_rows);
-            Div<float, &MXFP4_OUTPUT_DIV>(vreg_src16, vreg_src16, vreg_row_denominator, preg_all32);
+            Mul(vreg_src16, vreg_src16, vreg_inverse_row_sum, preg_all32);
             Select(vreg_src16, vreg_src16, vreg_zero, preg_nonempty_rows);
 
             Cast<bfloat16_t, float, MXFP4_CAST_ZERO>(vreg_bf16_1, vreg_src1, preg_all32);
@@ -421,6 +425,13 @@ __simd_vf__ inline void processOutNdVF(__ubuf__ OutputType* outputUb,
     RegTensor<float> vreg_zero, vreg_one;
     Duplicate(vreg_zero, 0.0F);
     Duplicate(vreg_one, 1.0F);
+    RegTensor<float> vreg_inverse_row_sums;
+    MaskReg preg_nonempty_rows;
+    LoadAlign(vreg_inverse_row_sums, historySumUb);
+    Compares<float, CMPMODE::GT>(preg_nonempty_rows, vreg_inverse_row_sums, 0.0F, preg_all32);
+    Select(vreg_inverse_row_sums, vreg_inverse_row_sums, vreg_one, preg_nonempty_rows);
+    // 一次向量除法计算 Q64 的全部行倒数，循环内通过寄存器 Gather 广播当前行。
+    Div<float, &MXFP4_OUTPUT_DIV>(vreg_inverse_row_sums, vreg_one, vreg_inverse_row_sums, preg_all32);
     RegTensor<uint16_t> vreg_gather_indices, vreg_lane_indices, vreg_half_indices;
     if constexpr (!IsSameType<OutputType, float>::value) {
         Arange(reinterpret_cast<RegTensor<int16_t>&>(vreg_lane_indices), static_cast<int16_t>(0));
@@ -431,11 +442,13 @@ __simd_vf__ inline void processOutNdVF(__ubuf__ OutputType* outputUb,
         Or(vreg_gather_indices, vreg_gather_indices, vreg_half_indices, preg_all16);
     }
     for (uint16_t queryRow = 0; queryRow < validQueryRows; ++queryRow) {
-        RegTensor<float> vreg_row_sum;
+        RegTensor<float> vreg_row_sum, vreg_inverse_row_sum;
+        RegTensor<uint32_t> vreg_row_indices;
         MaskReg preg_nonempty_row;
         LoadAlign<float, LoadDist::DIST_BRC_B32>(vreg_row_sum, historySumUb + queryRow);
         Compares<float, CMPMODE::GT>(preg_nonempty_row, vreg_row_sum, 0.0F, preg_all32);
-        Select(vreg_row_sum, vreg_row_sum, vreg_one, preg_nonempty_row);
+        Duplicate(vreg_row_indices, static_cast<uint32_t>(queryRow));
+        Gather(vreg_inverse_row_sum, vreg_inverse_row_sums, vreg_row_indices);
         if constexpr (IsSameType<OutputType, float>::value) {
             RegTensor<float> vreg_output0, vreg_output1;
             RegTensor<float> vreg_output2, vreg_output3;
@@ -448,11 +461,11 @@ __simd_vf__ inline void processOutNdVF(__ubuf__ OutputType* outputUb,
                 LoadAlign(vreg_output2, historyRowUb + 128);
                 LoadAlign(vreg_output3, historyRowUb + 192);
             }
-            Div<float, &MXFP4_OUTPUT_DIV>(vreg_output0, vreg_output0, vreg_row_sum, preg_all32);
-            Div<float, &MXFP4_OUTPUT_DIV>(vreg_output1, vreg_output1, vreg_row_sum, preg_all32);
+            Mul(vreg_output0, vreg_output0, vreg_inverse_row_sum, preg_all32);
+            Mul(vreg_output1, vreg_output1, vreg_inverse_row_sum, preg_all32);
             if constexpr (ValueDimension == 256) {
-                Div<float, &MXFP4_OUTPUT_DIV>(vreg_output2, vreg_output2, vreg_row_sum, preg_all32);
-                Div<float, &MXFP4_OUTPUT_DIV>(vreg_output3, vreg_output3, vreg_row_sum, preg_all32);
+                Mul(vreg_output2, vreg_output2, vreg_inverse_row_sum, preg_all32);
+                Mul(vreg_output3, vreg_output3, vreg_inverse_row_sum, preg_all32);
             }
             Select(vreg_output0, vreg_output0, vreg_zero, preg_nonempty_row);
             Select(vreg_output1, vreg_output1, vreg_zero, preg_nonempty_row);
@@ -480,11 +493,11 @@ __simd_vf__ inline void processOutNdVF(__ubuf__ OutputType* outputUb,
                 LoadAlign(vreg_output2, historyRowUb + 128);
                 LoadAlign(vreg_output3, historyRowUb + 192);
             }
-            Div<float, &MXFP4_OUTPUT_DIV>(vreg_output0, vreg_output0, vreg_row_sum, preg_all32);
-            Div<float, &MXFP4_OUTPUT_DIV>(vreg_output1, vreg_output1, vreg_row_sum, preg_all32);
+            Mul(vreg_output0, vreg_output0, vreg_inverse_row_sum, preg_all32);
+            Mul(vreg_output1, vreg_output1, vreg_inverse_row_sum, preg_all32);
             if constexpr (ValueDimension == 256) {
-                Div<float, &MXFP4_OUTPUT_DIV>(vreg_output2, vreg_output2, vreg_row_sum, preg_all32);
-                Div<float, &MXFP4_OUTPUT_DIV>(vreg_output3, vreg_output3, vreg_row_sum, preg_all32);
+                Mul(vreg_output2, vreg_output2, vreg_inverse_row_sum, preg_all32);
+                Mul(vreg_output3, vreg_output3, vreg_inverse_row_sum, preg_all32);
             }
             Select(vreg_output0, vreg_output0, vreg_zero, preg_nonempty_row);
             Select(vreg_output1, vreg_output1, vreg_zero, preg_nonempty_row);
