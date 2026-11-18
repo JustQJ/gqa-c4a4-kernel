@@ -48,8 +48,8 @@ public:
     static_assert(mBaseSize == 128 && (dBaseSize == 128 || dBaseSize == 256),
                   "MXFP4 supports M128 and D128/D256 only");
     static_assert(s2BaseSize == (dBaseSize == 128 ? 256 : 128), "Unsupported MXFP4 task size");
-    static_assert(KvLayoutType == 1 && layout == LayOutTypeEnum::LAYOUT_TND,
-                  "MXFP4 first version requires Q TND and KV PA_BBND");
+    static_assert(KvLayoutType >= 1 && KvLayoutType <= 3 && layout == LayOutTypeEnum::LAYOUT_TND,
+                  "MXFP4 requires Q TND and paged KV (PA_BBND, PA_BNBD or PA_NZ)");
     static_assert(isDAligned, "MXFP4 unaligned D is not implemented");
     static_assert(std::is_same<T, float>::value && std::is_same<INPUT_T, fp4x2_e2m1_t>::value,
                   "MXFP4 requires FP4 E2M1 input and FP32 accumulation");
@@ -757,15 +757,18 @@ public:
 
     __aicore__ inline void CopyKvPayloadGm2L1(const LocalTensor<uint8_t>& kvPayloadL1Tensor,
                                              const GlobalTensor<uint8_t>& kvPayloadGmTensor, uint64_t pageLogicalStride,
-                                             uint32_t payloadRowBytes, Mxfp4RunInfo& runInfo)
+                                             uint64_t headLogicalStride, uint32_t payloadRowBytes, Mxfp4RunInfo& runInfo)
     {
-        static_assert(KvLayoutType == 1, "MXFP4 KV copy currently supports PA_BBND only");
+        static_assert(KvLayoutType >= 1 && KvLayoutType <= 3, "MXFP4 KV copy requires a paged KV layout");
 
         const uint32_t blockSize = constInfo_.blockSize;
-        const uint64_t tokenByteStride = static_cast<uint64_t>(constInfo_.n2Size) * payloadRowBytes;
-        // Host 的 FP4 stride 是逻辑元素数，需要折半；仅物理页轴允许不连续。
-        // BBND 的 n2Stride 实际是 stride[1]，不能拿它当 head stride。
-        const uint64_t pageByteStride = pageLogicalStride == 0 ? blockSize * tokenByteStride : pageLogicalStride / 2;
+        const uint64_t tokenByteStride = KvLayoutType == 1 ?
+            static_cast<uint64_t>(constInfo_.n2Size) * payloadRowBytes : payloadRowBytes;
+        const uint64_t defaultHeadByteStride = static_cast<uint64_t>(blockSize) * payloadRowBytes;
+        const uint64_t headByteStride = KvLayoutType == 1 ? payloadRowBytes :
+            (headLogicalStride == 0 ? defaultHeadByteStride : headLogicalStride / 2);
+        const uint64_t pageByteStride = pageLogicalStride == 0 ?
+            static_cast<uint64_t>(constInfo_.n2Size) * defaultHeadByteStride : pageLogicalStride / 2;
         uint32_t copiedTokenCount = 0;
         while (copiedTokenCount < runInfo.actSingleLoopS2Size) {
             const uint64_t logicalTokenIndex = static_cast<uint64_t>(runInfo.s2Idx) + copiedTokenCount;
@@ -776,10 +779,21 @@ public:
             const uint64_t physicalPageIndex = blockTableGm_.GetValue(
                 static_cast<uint64_t>(runInfo.bIdx) * constInfo_.maxBlockNumPerBatch + logicalTokenIndex / blockSize);
             const uint64_t payloadGmByteOffset = physicalPageIndex * pageByteStride +
-                pageTokenOffset * tokenByteStride +
-                                    static_cast<uint64_t>(runInfo.n2Idx) * payloadRowBytes;
-            CopyFp4RowsGm2L1(kvPayloadL1Tensor[copiedTokenCount * 32U], kvPayloadGmTensor[payloadGmByteOffset],
-                pageTokenCount, payloadRowBytes, tokenByteStride, s2BaseSize);
+                static_cast<uint64_t>(runInfo.n2Idx) * headByteStride;
+            if constexpr (KvLayoutType == 3) {
+                // FP4 NZ 的物理分形为 [D/64, Bs, 32B]，与 L1 的 32B 内径一致，直接跨页直拷。
+                DataCopyParams payloadCopyParams {};
+                payloadCopyParams.blockCount = payloadRowBytes / 32U;
+                payloadCopyParams.blockLen = pageTokenCount;
+                payloadCopyParams.srcStride = blockSize - pageTokenCount;
+                payloadCopyParams.dstStride = s2BaseSize - pageTokenCount;
+                DataCopy<uint8_t>(kvPayloadL1Tensor[copiedTokenCount * 32U],
+                    kvPayloadGmTensor[payloadGmByteOffset + pageTokenOffset * 32U], payloadCopyParams);
+            } else {
+                const uint64_t sourceOffset = payloadGmByteOffset + pageTokenOffset * tokenByteStride;
+                CopyFp4RowsGm2L1(kvPayloadL1Tensor[copiedTokenCount * 32U], kvPayloadGmTensor[sourceOffset],
+                    pageTokenCount, payloadRowBytes, tokenByteStride, s2BaseSize);
+            }
             copiedTokenCount += pageTokenCount;
         }
     }
@@ -788,19 +802,25 @@ public:
     __aicore__ inline void CopyKGm2L1(const LocalTensor<KV_T>& keyL1Tensor, Mxfp4RunInfo& runInfo)
     {
         LocalTensor<uint8_t> keyL1Bytes = keyL1Tensor.template ReinterpretCast<uint8_t>();
-        CopyKvPayloadGm2L1(keyL1Bytes, keyGm_, constInfo_.keyStrides.bnStride, dBaseSize / 2, runInfo);
+        CopyKvPayloadGm2L1(keyL1Bytes, keyGm_, constInfo_.keyStrides.bnStride, constInfo_.keyStrides.n2Stride,
+            dBaseSize / 2, runInfo);
     }
 
     __aicore__ inline void CopyKScaleGm2L1(const LocalTensor<SCALE_T>& keyScaleL1Tensor, Mxfp4RunInfo& runInfo)
     {
-        static_assert(KvLayoutType == 1, "MXFP4 K scale copy currently supports PA_BBND only");
-        // GM: [numBlocks,blockSize,N2,D/64,2]；L1: [ceil(logicalTokenIndex/16),D/64,16,2]。
+        static_assert(KvLayoutType >= 1 && KvLayoutType <= 3, "MXFP4 K scale copy requires a paged KV layout");
+        // 三种布局统一转换为 L1 [ceil(S/16),D/64,16,2]；PA_NZ 与该分形天然一致。
         constexpr uint32_t scalePairsPerKeyRow = dBaseSize / MXFP_DIVISOR_SIZE;
         LocalTensor<uint16_t> keyScaleL1Pairs = keyScaleL1Tensor.template ReinterpretCast<uint16_t>();
         const uint32_t blockSize = constInfo_.blockSize;
-        const uint64_t tokenPairStride = static_cast<uint64_t>(constInfo_.n2Size) * scalePairsPerKeyRow;
+        const uint64_t defaultHeadPairStride = static_cast<uint64_t>(blockSize) * scalePairsPerKeyRow;
+        const uint64_t headPairStride = KvLayoutType == 1 ? scalePairsPerKeyRow :
+            (constInfo_.kDescaleStrides.n2Stride == 0 ? defaultHeadPairStride :
+             constInfo_.kDescaleStrides.n2Stride / 2);
+        const uint64_t tokenPairStride = KvLayoutType == 1 ?
+            static_cast<uint64_t>(constInfo_.n2Size) * scalePairsPerKeyRow : scalePairsPerKeyRow;
         const uint64_t pagePairStride = constInfo_.kDescaleStrides.bnStride == 0 ?
-            blockSize * tokenPairStride : constInfo_.kDescaleStrides.bnStride / 2;
+            static_cast<uint64_t>(constInfo_.n2Size) * defaultHeadPairStride : constInfo_.kDescaleStrides.bnStride / 2;
         Dn2NzParams keyScaleCopyParams {};
         keyScaleCopyParams.dnNum = 1;
         keyScaleCopyParams.nValue = scalePairsPerKeyRow;
@@ -817,12 +837,19 @@ public:
             const uint64_t physicalPageIndex = blockTableGm_.GetValue(
                 static_cast<uint64_t>(runInfo.bIdx) * constInfo_.maxBlockNumPerBatch + logicalTokenIndex / blockSize);
             const uint64_t keyScaleGmPairOffset = physicalPageIndex * pagePairStride +
-                pageTokenOffset * tokenPairStride +
-                                    static_cast<uint64_t>(runInfo.n2Idx) * scalePairsPerKeyRow;
-            keyScaleCopyParams.dValue = pageTokenCount;
-            // 页边界为 64 token 的倍数，每个后续目标都是完整 16 行分块的起点。
-            DataCopy<uint16_t>(keyScaleL1Pairs[copiedTokenCount * scalePairsPerKeyRow],
-                keyScaleGm_[keyScaleGmPairOffset], keyScaleCopyParams);
+                static_cast<uint64_t>(runInfo.n2Idx) * headPairStride;
+            if constexpr (KvLayoutType == 3) {
+                DataCopyParams keyScaleDirectCopyParams {};
+                keyScaleDirectCopyParams.blockCount = 1;
+                keyScaleDirectCopyParams.blockLen = ((pageTokenCount + 15U) / 16U) * scalePairsPerKeyRow;
+                DataCopy<uint16_t>(keyScaleL1Pairs[copiedTokenCount * scalePairsPerKeyRow],
+                    keyScaleGm_[keyScaleGmPairOffset + (pageTokenOffset / 16U) * scalePairsPerKeyRow * 16U],
+                    keyScaleDirectCopyParams);
+            } else {
+                keyScaleCopyParams.dValue = pageTokenCount;
+                DataCopy<uint16_t>(keyScaleL1Pairs[copiedTokenCount * scalePairsPerKeyRow],
+                    keyScaleGm_[keyScaleGmPairOffset + pageTokenOffset * tokenPairStride], keyScaleCopyParams);
+            }
             copiedTokenCount += pageTokenCount;
         }
     }
@@ -830,7 +857,8 @@ public:
     __aicore__ inline void CopyVGm2L1(const LocalTensor<KV_T>& valueL1Tensor, Mxfp4RunInfo& runInfo)
     {
         LocalTensor<uint8_t> valueL1Bytes = valueL1Tensor.template ReinterpretCast<uint8_t>();
-        CopyKvPayloadGm2L1(valueL1Bytes, valueGm_, constInfo_.valueStrides.bnStride, dVBaseSize / 2, runInfo);
+        CopyKvPayloadGm2L1(valueL1Bytes, valueGm_, constInfo_.valueStrides.bnStride, constInfo_.valueStrides.n2Stride,
+            dVBaseSize / 2, runInfo);
         // PV 归约轴按 64 token 对齐；槽复用时清零无效 V 行。
         // 额外的 rowsum 常数列由 l1VPaddingBuffers_ 提供，不在这里修改。
         const uint32_t validKvTokenCount = runInfo.actSingleLoopS2Size;
@@ -847,14 +875,19 @@ public:
 
     __aicore__ inline void CopyVScaleGm2L1(const LocalTensor<SCALE_T>& valueScaleL1Tensor, Mxfp4RunInfo& runInfo)
     {
-        static_assert(KvLayoutType == 1, "MXFP4 V scale copy currently supports PA_BBND only");
-        // GM: [numBlocks,blockSize/64,N2,Dv,2]；L1: [Dv/16,s2BaseSize/64,16,2]。
+        static_assert(KvLayoutType >= 1 && KvLayoutType <= 3, "MXFP4 V scale copy requires a paged KV layout");
+        // L1 固定为 [Dv/16,S2/64,16,2]；PA_NZ 直拷 32B 分形，BBND/BNBD 做 ND2NZ。
         LocalTensor<uint16_t> valueScaleL1Pairs = valueScaleL1Tensor.template ReinterpretCast<uint16_t>();
         const uint32_t scaleGroupsPerPage = constInfo_.blockSize / MXFP_DIVISOR_SIZE;
         const uint32_t scaleGroupCount = (runInfo.actSingleLoopS2Size + 63U) / MXFP_DIVISOR_SIZE;
-        const uint64_t scaleGroupPairStride = static_cast<uint64_t>(constInfo_.n2Size) * dVBaseSize;
+        const uint64_t defaultHeadPairStride = static_cast<uint64_t>(scaleGroupsPerPage) * dVBaseSize;
+        const uint64_t headPairStride = KvLayoutType == 1 ? dVBaseSize :
+            (constInfo_.vDescaleStrides.n2Stride == 0 ? defaultHeadPairStride :
+             constInfo_.vDescaleStrides.n2Stride / 2);
+        const uint64_t scaleGroupPairStride = KvLayoutType == 1 ?
+            static_cast<uint64_t>(constInfo_.n2Size) * dVBaseSize : dVBaseSize;
         const uint64_t pagePairStride = constInfo_.vDescaleStrides.bnStride == 0 ?
-            scaleGroupsPerPage * scaleGroupPairStride : constInfo_.vDescaleStrides.bnStride / 2;
+            static_cast<uint64_t>(constInfo_.n2Size) * defaultHeadPairStride : constInfo_.vDescaleStrides.bnStride / 2;
         Nd2NzParams valueScaleCopyParams {};
         valueScaleCopyParams.ndNum = 1;
         valueScaleCopyParams.dValue = dVBaseSize;
@@ -871,20 +904,29 @@ public:
                 static_cast<uint64_t>(runInfo.bIdx) * constInfo_.maxBlockNumPerBatch +
                     logicalScaleGroupIndex / scaleGroupsPerPage);
             const uint64_t valueScaleGmPairOffset = physicalPageIndex * pagePairStride +
-                pageScaleGroupOffset * scaleGroupPairStride +
-                                    static_cast<uint64_t>(runInfo.n2Idx) * dVBaseSize;
-            if (scaleGroupPairStride <= 65535U) {
-                valueScaleCopyParams.nValue = pageScaleGroupCount;
-                valueScaleCopyParams.srcDValue = static_cast<uint16_t>(scaleGroupPairStride);
+                static_cast<uint64_t>(runInfo.n2Idx) * headPairStride;
+            if constexpr (KvLayoutType == 3) {
+                DataCopyParams valueScaleDirectCopyParams {};
+                valueScaleDirectCopyParams.blockCount = dVBaseSize / 16U;
+                valueScaleDirectCopyParams.blockLen = pageScaleGroupCount;
+                valueScaleDirectCopyParams.srcStride = scaleGroupsPerPage - pageScaleGroupCount;
+                valueScaleDirectCopyParams.dstStride = s2BaseSize / MXFP_DIVISOR_SIZE - pageScaleGroupCount;
                 DataCopy<uint16_t>(valueScaleL1Pairs[copiedScaleGroupCount * 16U],
-                    valueScaleGm_[valueScaleGmPairOffset], valueScaleCopyParams);
+                    valueScaleGm_[valueScaleGmPairOffset + pageScaleGroupOffset * 16U], valueScaleDirectCopyParams);
             } else {
-                valueScaleCopyParams.nValue = 1;
-                valueScaleCopyParams.srcDValue = dVBaseSize;
-                for (uint32_t scaleGroupIndex = 0; scaleGroupIndex < pageScaleGroupCount; ++scaleGroupIndex) {
-                    DataCopy<uint16_t>(valueScaleL1Pairs[(copiedScaleGroupCount + scaleGroupIndex) * 16U],
-                        valueScaleGm_[valueScaleGmPairOffset + scaleGroupIndex * scaleGroupPairStride],
-                        valueScaleCopyParams);
+                const uint64_t sourceOffset = valueScaleGmPairOffset + pageScaleGroupOffset * scaleGroupPairStride;
+                if (scaleGroupPairStride <= 65535U) {
+                    valueScaleCopyParams.nValue = pageScaleGroupCount;
+                    valueScaleCopyParams.srcDValue = static_cast<uint16_t>(scaleGroupPairStride);
+                    DataCopy<uint16_t>(valueScaleL1Pairs[copiedScaleGroupCount * 16U],
+                        valueScaleGm_[sourceOffset], valueScaleCopyParams);
+                } else {
+                    valueScaleCopyParams.nValue = 1;
+                    valueScaleCopyParams.srcDValue = dVBaseSize;
+                    for (uint32_t scaleGroupIndex = 0; scaleGroupIndex < pageScaleGroupCount; ++scaleGroupIndex) {
+                        DataCopy<uint16_t>(valueScaleL1Pairs[(copiedScaleGroupCount + scaleGroupIndex) * 16U],
+                            valueScaleGm_[sourceOffset + scaleGroupIndex * scaleGroupPairStride], valueScaleCopyParams);
+                    }
                 }
             }
             copiedScaleGroupCount += pageScaleGroupCount;
