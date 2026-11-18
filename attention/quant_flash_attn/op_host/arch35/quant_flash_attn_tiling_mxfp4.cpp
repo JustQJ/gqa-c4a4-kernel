@@ -153,8 +153,6 @@ void QuantFlashAttnTilingMxfp4Impl::SplitPolicy()
 
 void QuantFlashAttnTilingMxfp4Impl::UpdateTilingKeyConfig()
 {
-    auto sOuter = sOuterFactor_ * platformInfo_.cvRatio;
-    auto sInner = sInnerFactor_;
     auto dSize = qfaInfo_->qkHeadDim;
     auto dVsize = qfaInfo_->vHeadDim;
 
@@ -170,8 +168,8 @@ void QuantFlashAttnTilingMxfp4Impl::UpdateTilingKeyConfig()
         dVsize = DSIZE_256;
     }
 
-    if (sOuter == SOUTER_128 && sInner == SINNER_128 && dSize == DSIZE_256 && dVsize == DSIZE_256) {
-        tilingKeyInfo_.config = Config_S1Aligned128_S2Aligned128_DAligned256_DVAligned256;
+    if (dSize == DSIZE_256 && dVsize == DSIZE_256) {
+        tilingKeyInfo_.config = Config_S1Aligned128_S2Aligned256_DAligned256_DVAligned256;
     } else {
         tilingKeyInfo_.config = Config_S1Aligned128_S2Aligned256_DAligned128_DVAligned128;
     }

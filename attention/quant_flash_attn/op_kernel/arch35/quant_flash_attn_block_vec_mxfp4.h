@@ -37,18 +37,19 @@ public:
     static constexpr uint32_t s2BaseSize = static_cast<uint32_t>(s2TemplateType);
     static constexpr uint32_t dBaseSize = static_cast<uint32_t>(dTemplateType);
     static constexpr uint32_t dVBaseSize = static_cast<uint32_t>(dVTemplateType);
-    static constexpr uint32_t PRELOAD_N = 20;
-    static constexpr uint32_t TASKS_PER_GROUP = 16;
-    // Retire C2/V2 before issuing V1: at most one live group per in-flight task.
-    static constexpr uint32_t GROUP_MAX_SLOTS = PRELOAD_N;
+    static constexpr bool GROUPED_PV = Mxfp4GroupedPvConfig::IsEnabled(dBaseSize, s2BaseSize);
+    static constexpr uint32_t L1_P_SLOTS = GROUPED_PV ? Mxfp4GroupedPvConfig::P_SLOTS : 20U;
+    static constexpr uint32_t TASKS_PER_GROUP = GROUPED_PV ? Mxfp4GroupedPvConfig::TASKS : 16U;
+    static constexpr uint32_t GROUP_MAX_SLOTS = GROUPED_PV ? Mxfp4GroupedPvConfig::GROUP_SLOTS : L1_P_SLOTS;
+    static constexpr uint32_t RAW_EXPONENT_SLOTS = GROUPED_PV ? TASKS_PER_GROUP : L1_P_SLOTS;
     static constexpr uint32_t VEC_ROWS = 64;
-    static constexpr uint32_t s2SplitSize = 128U;
+    static constexpr uint32_t s2SplitSize = GROUPED_PV ? Mxfp4GroupedPvConfig::SCORE_N : 128U;
     static constexpr uint32_t P_SLOT_COUNT = 2;
     static constexpr uint32_t P_PACK_BYTES = VEC_ROWS * s2BaseSize / 2;
     static constexpr uint32_t TASK_GROUP_MAX_ELEMENTS = VEC_ROWS * s2BaseSize / 32;
     static constexpr uint32_t LOCAL_PSCALE_BYTES = VEC_ROWS / 16 * (s2BaseSize / 64 + 1) * 32;
-    static constexpr bool REUSE_PV_OUTPUT = dBaseSize == 256;
-    static constexpr uint32_t OUTPUT_SCRATCH_BYTES = 64 * 256 * sizeof(bfloat16_t);
+    static constexpr bool REUSE_PV_OUTPUT = GROUPED_PV || dBaseSize == 256;
+    static constexpr uint32_t OUTPUT_SCRATCH_BYTES = 64 * (GROUPED_PV ? dVBaseSize : 256U) * sizeof(bfloat16_t);
     static constexpr uint32_t STATISTICS_BYTES = VEC_ROWS * 8 * sizeof(float);
     static constexpr bool HAS_MASK = hasAtten;
     static constexpr bool FLASH_DECODE = isFd;
@@ -59,8 +60,8 @@ public:
     static constexpr bool ENABLE_QF322F32_PRE = enableQf322F32Pre;
     static constexpr ActualSeqLensMode Q_MODE = GetQActSeqMode<layout>();
     static_assert(mBaseSize == 128 && dBaseSize == dVBaseSize &&
-        ((dBaseSize == 128 && s2BaseSize == 256) || (dBaseSize == 256 && s2BaseSize == 128)),
-        "MXFP4 Vector 只支持 M128/D128/N256 和 M128/D256/N128");
+        ((dBaseSize == 128 && s2BaseSize == 256) || (dBaseSize == 256 && (s2BaseSize == 128 || GROUPED_PV))),
+        "Unsupported MXFP4 Vector tile");
     static_assert(layout == LayOutTypeEnum::LAYOUT_TND, "MXFP4 首版只支持 TND Q");
     static_assert(outLayout == LayOutTypeEnum::LAYOUT_TND || outLayout == LayOutTypeEnum::LAYOUT_NTD,
         "MXFP4 输出布局必须为 TND 或 NTD");
@@ -71,7 +72,7 @@ public:
     using MM2_OUT_T = T;
     using ConstInfoX = ConstInfo_t;
     using QSeqParserType = ActualSeqLensParser<Q_MODE, int32_t, true>;
-    using CrossBufferType = CVCrossBuffer<PRELOAD_N, USE_DN, s1TemplateType, s2TemplateType,
+    using CrossBufferType = CVCrossBuffer<L1_P_SLOTS, USE_DN, s1TemplateType, s2TemplateType,
                                         dTemplateType, dVTemplateType>;
     GlobalTensor<OUTPUT_T> attentionOutGm_;
     GlobalTensor<float> softmaxLseGm_;
@@ -135,11 +136,16 @@ public:
         l1BufferManager_.Init(tPipe_, 512 * 1024);
         ubBufferManager_.Init(tPipe_, GetCrossBufferBytes());
         crossBuffers_.InitBuffers(l1BufferManager_, ubBufferManager_);
-        // Layout contract for FD reuse: score[2], PV reception, then contiguous history O.
-        // FD must never touch score: AIC may issue the next section's C1 during FD.
+        // FD reuses retired FA storage. Its view must exclude all score slots.
         tPipe_->InitBuffer(historyOBuf_, VEC_ROWS * dVBaseSize * sizeof(float));
+        if constexpr (GROUPED_PV) {
+            // Keep the exponent storage next to history for the FD view.
+            tPipe_->InitBuffer(taskGroupMax_, TASK_GROUP_MAX_ELEMENTS * RAW_EXPONENT_SLOTS * sizeof(float));
+        }
         tPipe_->InitBuffer(globalRowSum_, VEC_ROWS * sizeof(float));
-        tPipe_->InitBuffer(taskGroupMax_, TASK_GROUP_MAX_ELEMENTS * PRELOAD_N * sizeof(float));
+        if constexpr (!GROUPED_PV) {
+            tPipe_->InitBuffer(taskGroupMax_, TASK_GROUP_MAX_ELEMENTS * RAW_EXPONENT_SLOTS * sizeof(float));
+        }
         tPipe_->InitBuffer(globalCurrentMax_, GROUP_MAX_SLOTS * VEC_ROWS * sizeof(float));
         tPipe_->InitBuffer(globalOldMax_, VEC_ROWS * sizeof(float));
         tPipe_->InitBuffer(alphaUpdate_, GROUP_MAX_SLOTS * VEC_ROWS * sizeof(float));
@@ -154,31 +160,36 @@ public:
 
     static __aicore__ inline constexpr uint32_t GetCrossBufferBytes()
     {
-        return CrossBufferType::SCORE_SLOT_COUNT * CrossBufferType::ubBmm1BufferBytes_ + CrossBufferType::ubBmm2BufferBytes_;
+        return CrossBufferType::UB_BYTES;
     }
 
     static __aicore__ inline constexpr uint32_t GetPersistUbSize()
     {
         return VEC_ROWS * dVBaseSize * sizeof(float) + 2 * VEC_ROWS * sizeof(float) +
-            TASK_GROUP_MAX_ELEMENTS * PRELOAD_N * sizeof(float) +
+            TASK_GROUP_MAX_ELEMENTS * RAW_EXPONENT_SLOTS * sizeof(float) +
             2 * GROUP_MAX_SLOTS * VEC_ROWS * sizeof(float) + 512 + P_SLOT_COUNT * P_PACK_BYTES;
     }
 
     static __aicore__ inline constexpr uint32_t GetFdReuseUbOffset()
     {
-        return CrossBufferType::SCORE_SLOT_COUNT * CrossBufferType::ubBmm1BufferBytes_;
+        return GROUPED_PV ? GetCrossBufferBytes() : CrossBufferType::SCORE_SLOT_COUNT * CrossBufferType::ubBmm1BufferBytes_;
     }
 
     static __aicore__ inline constexpr uint32_t GetFdReuseUbSize()
     {
-        return CrossBufferType::ubBmm2BufferBytes_ + VEC_ROWS * dVBaseSize * sizeof(float);
+        constexpr uint32_t historyBytes = VEC_ROWS * dVBaseSize * sizeof(float);
+        if constexpr (GROUPED_PV) {
+            return historyBytes + (dVBaseSize == 128 ? TASK_GROUP_MAX_ELEMENTS * RAW_EXPONENT_SLOTS * sizeof(float) : 0);
+        }
+        return CrossBufferType::ubBmm2BufferBytes_ + historyBytes;
     }
 
     static __aicore__ inline constexpr uint32_t GetTransientUbSize()
     {
         // P 使用独立双槽；D256 输出复用已消费的 PV，独立临时区只保留 Pscale。
         // FD 另行复用已退休的 PV/history O，不占用此临时区。
-        return (REUSE_PV_OUTPUT ? 0U : OUTPUT_SCRATCH_BYTES) + 3 * STATISTICS_BYTES;
+        return GROUPED_PV ? TASKS_PER_GROUP * LOCAL_PSCALE_BYTES :
+            (REUSE_PV_OUTPUT ? 0U : OUTPUT_SCRATCH_BYTES) + 3 * STATISTICS_BYTES;
     }
     static_assert(GetFdReuseUbOffset() % 32 == 0 && GetFdReuseUbSize() % 32 == 0,
         "MXFP4 FD reusable UB region must be 32-byte aligned");
@@ -220,14 +231,15 @@ public:
         if (runInfo.actMSize == 0 || runInfo.actSingleLoopS2Size == 0) {
             return;
         }
-        const uint32_t taskSlot = runInfo.loop % PRELOAD_N;
+        const uint32_t taskSlot = runInfo.loop % L1_P_SLOTS;
+        const uint32_t exponentSlot = GROUPED_PV ? runInfo.groupTaskIndex : taskSlot;
         const uint32_t probabilitySlot = runInfo.loop % P_SLOT_COUNT;
         const uint32_t firstRow = constInfo_.subBlockIdx * GetAivRowCapacity(runInfo);
         const uint32_t validRows = GetValidQueryRows(runInfo);
         // 只在本槽再次写入前等待 MTE3，另一槽的 P 搬运不阻塞本次 V1。
         WaitFlag<HardEvent::MTE3_V>(pCopyToVectorEvents_[probabilitySlot]);
         LocalTensor<uint8_t> packedQuantP = pBuffers_[probabilitySlot].Get<uint8_t>();
-        LocalTensor<float> taskExponent = taskGroupMax_.Get<float>()[taskSlot * TASK_GROUP_MAX_ELEMENTS]; // 取对应的max存储位置
+        LocalTensor<float> taskExponent = taskGroupMax_.Get<float>()[exponentSlot * TASK_GROUP_MAX_ELEMENTS]; // 取对应的max存储位置
         LocalTensor<float> groupMaximum = BeginProbabilityGroup(runInfo); // 判断当前是否是一个新的group， 取当前group的max
         LocalTensor<uint8_t> byteIndices = pNd2NzIdx_.Get<uint8_t>();
         LocalTensor<uint16_t> halfwordIndices = pNd2NzHalfwordIdx_.Get<uint16_t>();
@@ -235,7 +247,7 @@ public:
         Duplicate<float>(taskExponent, Mxfp4Api::INVALID_GROUP_EXPONENT, TASK_GROUP_MAX_ELEMENTS);
         PipeBarrier<PIPE_V>();
         for (uint32_t chunkOffset = 0; chunkOffset < runInfo.actSingleLoopS2Size; chunkOffset += s2SplitSize) {
-            const uint32_t scoreSlot = scoreSequence_++ % CrossBufferType::SCORE_SLOT_COUNT;
+            const uint32_t scoreSlot = GROUPED_PV ? runInfo.scoreSlot : scoreSequence_++ % CrossBufferType::SCORE_SLOT_COUNT;
             crossBuffers_.waitBmm1Buffer(scoreSlot);
             if (validRows != 0) {
                 Mxfp4Api::SoftmaxFp32Mxfp4Params params {};
@@ -277,6 +289,11 @@ public:
         SealProbabilityGroup(runInfo);
     }
 
+    __aicore__ inline void WaitGroupV1Allowed()
+    {
+        crossBuffers_.WaitGroupV1Allowed();
+    }
+
     __aicore__ inline void UpdatePScale(const Mxfp4RunInfo& runInfo)
     {
         GroupOwner& owner = GetGroupOwner(runInfo, GroupState::SEALED);
@@ -285,22 +302,26 @@ public:
         LocalTensor<float> reference = globalCurrentMax_.Get<float>()[groupSlot * VEC_ROWS];
         LocalTensor<float> previousReference = globalOldMax_.Get<float>();
         LocalTensor<float> multiplier = alphaUpdate_.Get<float>()[groupSlot * VEC_ROWS];
-        const uint32_t firstTaskSlot = owner.firstTaskLoop % PRELOAD_N;
+        const uint32_t firstTaskSlot = owner.firstTaskLoop % L1_P_SLOTS;
         const uint16_t firstTaskCount = static_cast<uint16_t>(
-            owner.taskCount < PRELOAD_N - firstTaskSlot ? owner.taskCount : PRELOAD_N - firstTaskSlot);
+            AttentionCommon::Min(owner.taskCount, L1_P_SLOTS - firstTaskSlot));
         const uint16_t secondTaskCount = static_cast<uint16_t>(owner.taskCount - firstTaskCount);
+        // Grouped PV exponent slots are indexed within the group. Only the L1 destination wraps.
+        const uint32_t firstExponentSlot = GROUPED_PV ? 0U : firstTaskSlot;
+        const uint16_t firstExponentCount = GROUPED_PV ? owner.taskCount : firstTaskCount;
+        const uint16_t secondExponentCount = GROUPED_PV ? 0U : secondTaskCount;
         LocalTensor<float> firstTaskExponent = taskGroupMax_.Get<float>()[
-            firstTaskSlot * TASK_GROUP_MAX_ELEMENTS];
+            firstExponentSlot * TASK_GROUP_MAX_ELEMENTS];
         LocalTensor<float> secondTaskExponent = taskGroupMax_.Get<float>();
         LocalTensor<uint8_t> encodedScale = tempCommBuf_.Get<uint8_t>();
         if constexpr (USE_DN) {
             Mxfp4Api::UpdatePScaleDn<s2BaseSize, QUANT_SCHEMA>(encodedScale,
                 firstTaskExponent, secondTaskExponent, reference, previousReference, multiplier,
-                firstTaskCount, secondTaskCount, owner.firstGroup);
+                firstExponentCount, secondExponentCount, owner.firstGroup);
         } else {
             Mxfp4Api::UpdatePScaleNd<s2BaseSize, QUANT_SCHEMA>(encodedScale,
                 firstTaskExponent, secondTaskExponent, reference, previousReference, multiplier,
-                firstTaskCount, secondTaskCount, owner.firstGroup, GetAivRowCapacity(runInfo));
+                firstExponentCount, secondExponentCount, owner.firstGroup, GetAivRowCapacity(runInfo));
         }
         WaitVectorBeforeCopy();
         const uint32_t copiedScaleBytes = GetAivRowCapacity(runInfo) / 16 * (s2BaseSize / 64 + 1) * 32;
@@ -327,12 +348,13 @@ public:
         GroupOwner& owner = GetGroupOwner(runInfo, GroupState::READY);
         ASSERT(runInfo.isGroupLast || runInfo.isLastS2Loop);
         const uint32_t groupSlot = runInfo.v1GroupId % GROUP_MAX_SLOTS;
-        LocalTensor<float> groupResult = crossBuffers_.GetBmm2Slot(0);
+        const uint32_t pvSlot = GROUPED_PV ? runInfo.v1GroupId % CrossBufferType::SCORE_SLOT_COUNT : 0U;
+        LocalTensor<float> groupResult = crossBuffers_.GetBmm2Slot(pvSlot);
         LocalTensor<float> historyOutput = historyOBuf_.Get<float>();
         LocalTensor<float> historySum = globalRowSum_.Get<float>();
         LocalTensor<float> multiplier = alphaUpdate_.Get<float>()[groupSlot * VEC_ROWS];
         LocalTensor<float> reference = globalCurrentMax_.Get<float>()[groupSlot * VEC_ROWS];
-        crossBuffers_.watBmm2Buffer();
+        crossBuffers_.watBmm2Buffer(pvSlot);
         if constexpr (USE_DN) {
             LocalTensor<float> groupSum = groupResult[dVBaseSize * VEC_ROWS];
             if (owner.firstGroup) {
@@ -358,7 +380,7 @@ public:
                 WriteAttentionResult(runInfo, historyOutput, historySum, reference);
             }
         }
-        crossBuffers_.setBmm2Buffer();
+        crossBuffers_.setBmm2Buffer(pvSlot);
         if constexpr (!REUSE_PV_OUTPUT) {
             if (runInfo.isLastS2Loop) {
                 WriteAttentionResult(runInfo, historyOutput, historySum, reference);
@@ -430,6 +452,9 @@ private:
             ASSERT(runInfo.loop == owner.firstTaskLoop + owner.taskCount);
         }
         ASSERT(owner.taskCount < TASKS_PER_GROUP);
+        if constexpr (GROUPED_PV) {
+            ASSERT(runInfo.groupTaskIndex == owner.taskCount);
+        }
         runInfo.v1GroupId = nextGroupId_;
         return maximum;
     }
@@ -491,7 +516,8 @@ private:
         }
         LocalTensor<uint8_t> scratch;
         if constexpr (REUSE_PV_OUTPUT) {
-            scratch = crossBuffers_.GetBmm2Slot(0).template ReinterpretCast<uint8_t>();
+            const uint32_t pvSlot = GROUPED_PV ? runInfo.v1GroupId % CrossBufferType::SCORE_SLOT_COUNT : 0U;
+            scratch = crossBuffers_.GetBmm2Slot(pvSlot).template ReinterpretCast<uint8_t>();
         } else {
             scratch = tempCommBuf_.Get<uint8_t>();
         }

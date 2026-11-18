@@ -89,7 +89,8 @@ ASCENDC_TPL_SEL(
     ASCENDC_TPL_ARGS_SEL(
         ASCENDC_TPL_UINT_SEL(InOutLayoutType, ASCENDC_TPL_UI_LIST, InOutLayoutType_TND_TND),
         ASCENDC_TPL_UINT_SEL(Config, ASCENDC_TPL_UI_LIST, Config_S1Aligned128_S2Aligned256_DAligned128_DVAligned128,
-                             Config_S1Aligned128_S2Aligned128_DAligned256_DVAligned256),
+                             Config_S1Aligned128_S2Aligned128_DAligned256_DVAligned256,
+                             Config_S1Aligned128_S2Aligned256_DAligned256_DVAligned256),
         ASCENDC_TPL_UINT_SEL(QuantMode, ASCENDC_TPL_UI_LIST, QFA_MXFP4_FP32_PREFILL, QFA_MXFP4_FP32_DECODE),
         ASCENDC_TPL_BOOL_SEL(HasAttenMask, false, true),
         ASCENDC_TPL_UINT_SEL(KvLayoutType, ASCENDC_TPL_UI_LIST, KvLayoutType_PA_BBND),

@@ -373,6 +373,17 @@ __aicore__ inline void quant_flash_attn_mxfp4(
     __gm__ uint8_t* attnOut,
     __gm__ uint8_t* softmaxLse, __gm__ uint8_t* workspace, const QuantFlashAttnTilingData& tilingData)
 {
+    if constexpr (config == Config_S1Aligned128_S2Aligned256_DAligned256_DVAligned256) {
+        // Previously generated metadata still addresses S2 in 128-token units.
+        if (reinterpret_cast<__gm__ uint32_t*>(metadata)[QFA_HEAD_S2_BASE_SIZE_INDEX] == 128U) {
+            quant_flash_attn_mxfp4<inOutLayoutType, Config_S1Aligned128_S2Aligned128_DAligned256_DVAligned256,
+                quantMode, hasAttenMask, KvLayoutType, isFd, enableQf322F32Pre, QUANT_SCHEMA>(
+                query, key, value, dequantScaleQuery, dequantScaleKey, dequantScaleValue, blockTable, pScale,
+                cuSeqLensQ, cuSeqLensKv, sequsedQ, sequsedKv, sinks, attnMask, metadata, attnOut, softmaxLse,
+                workspace, tilingData);
+            return;
+        }
+    }
     using INPUT_T = fp4x2_e2m1_t;
     using OUT_T = bfloat16_t;
 

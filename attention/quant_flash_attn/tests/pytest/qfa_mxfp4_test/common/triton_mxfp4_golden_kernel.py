@@ -1,4 +1,4 @@
-"""C4 metadata split -> 16-task group -> raw-PV merge reference on NPU.
+"""C4 metadata split -> grouped PV -> raw-PV merge reference on NPU.
 
 The split/workspace/combine structure follows vllm-qwen36-all's
 oscar_pnq_decode_ops.py. CX exponent selection, actual metadata boundaries,
@@ -17,7 +17,7 @@ from ..quant_flash_attn_paramset_common import normalize_params
 @triton.jit
 def _split_kernel(Q, K, V, DESC, PV, SUM, REF,
                   HQ: tl.constexpr, HK: tl.constexpr, D: tl.constexpr, G: tl.constexpr,
-                  TASK_N: tl.constexpr, SCALE: tl.constexpr, CAUSAL: tl.constexpr,
+                  TASK_N: tl.constexpr, TASKS_PER_GROUP: tl.constexpr, SCALE: tl.constexpr, CAUSAL: tl.constexpr,
                   SCHEMA: tl.constexpr, BM: tl.constexpr = 16, BN: tl.constexpr = 32):
     pid = tl.program_id(0)
     qbase = tl.load(DESC+pid*9+0)
@@ -43,10 +43,10 @@ def _split_kernel(Q, K, V, DESC, PV, SUM, REF,
     running = tl.full((BM,), -1e30, tl.float32)
     total = tl.zeros((BM,), tl.float32)
     history = tl.zeros((BM, D), tl.float32)
-    for first in range(first_task, last_task, 16):
-        stop = tl.minimum(first+16, last_task)
+    for first in range(first_task, last_task, TASKS_PER_GROUP):
+        stop = tl.minimum(first+TASKS_PER_GROUP, last_task)
         current = running
-        # First pass selects one reference for the entire group of 16 tasks.
+        # First pass selects one reference for the entire group.
         # Recompute scores in pass two to keep the independent reference's UB bounded.
         for lo in range(first*TASK_N, stop*TASK_N, BN):
             token = lo+cols
@@ -186,8 +186,8 @@ def triton_mxfp4_golden_kernel(data, params, metadata, device_id=0):
     sums = torch.empty(len(descriptors)*16, dtype=torch.float32, device=device)
     refs = torch.empty_like(sums)
     _split_kernel[(len(descriptors),)](q, k, v, desc, pv, sums, refs,
-        p['N_q'], p['N_kv'], p['D'], group, schedule['task_n'], p['softmax_scale'],
-        p['mask_mode'] == 3, p['quant_schema'],
+        p['N_q'], p['N_kv'], p['D'], group, schedule['task_n'], schedule['tasks_per_group'],
+        p['softmax_scale'], p['mask_mode'] == 3, p['quant_schema'],
         BN=32 if p['D'] == 256 else 64, enable_fp_fusion=False)
     max_splits = max(map(len, slots))
     indices = torch.tensor([entry+[-1]*(max_splits-len(entry)) for entry in slots], dtype=torch.int64, device=device)

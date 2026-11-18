@@ -1,4 +1,4 @@
-"""C4 metadata/core chunks, 16-task C2 groups, V2 updates and raw-PV FD merge."""
+"""C4 metadata/core chunks, grouped PV, V2 updates and raw-PV FD merge."""
 import math
 import torch
 from .quant_flash_attn_golden import decode_inputs, quantize_probability, round_bf16_away
@@ -13,6 +13,8 @@ def cpu_mxfp4_golden_kernel(data, params, metadata):
     output = torch.zeros_like(q)
     lse = torch.full(q.shape[:2], float('inf'), dtype=torch.float32)
     task_n, group = schedule['task_n'], schedule['group']
+    tasks_per_group = schedule['tasks_per_group']
+    pv_chunk_n = 128 if p['D'] == 256 and task_n == 256 else task_n
     log_x = math.log2(7.25/1.5) if p['p_quant_scheme'] == 'cx_delta' else math.log2(7.25)
     qs, ln2 = effective_lengths(p), math.log(2.)
     ln_delta = math.log(1.5) if p['p_quant_scheme'] == 'cx_delta' else 0.0
@@ -30,10 +32,9 @@ def cpu_mxfp4_golden_kernel(data, params, metadata):
             pv = torch.zeros((len(rows), p['D']), dtype=torch.float32)
             total = torch.zeros(len(rows), dtype=torch.float32)
             running = torch.full_like(total, -1e30)
-            # All P payloads in a 16-task group are generated before selecting
-            # the common reference. C2 accumulates the tasks before one V2.
-            for first_task in range(task_start, task_stop, 16):
-                stop_task = min(first_task+16, task_stop)
+            # All P payloads in the group share the reference. C2 accumulates them before one V2.
+            for first_task in range(task_start, task_stop, tasks_per_group):
+                stop_task = min(first_task+tasks_per_group, task_stop)
                 lo, hi = first_task*task_n, min(stop_task*task_n, klen)
                 padded = (hi-lo+31)//32*32
                 score = torch.full((len(rows), padded), -float('inf'))
@@ -57,8 +58,8 @@ def cpu_mxfp4_golden_kernel(data, params, metadata):
                 weights = (quant*torch.exp2(code-127.)[..., None]).reshape(len(rows), padded)[:, :hi-lo]
                 group_pv = torch.zeros_like(pv)
                 group_sum = torch.zeros_like(total)
-                for task in range(first_task, stop_task):
-                    a, b = task*task_n-lo, min((task+1)*task_n, hi)-lo
+                for a in range(0, hi-lo, pv_chunk_n):
+                    b = min(a+pv_chunk_n, hi-lo)
                     w = weights[:, a:b]
                     group_pv += w @ value[lo+a:lo+b]
                     group_sum += w.sum(-1)

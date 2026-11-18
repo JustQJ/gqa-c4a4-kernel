@@ -34,8 +34,22 @@ using fa_base_matmul::Buffer;
 using fa_base_matmul::BufferManager;
 using fa_base_matmul::BufferType;
 using fa_base_matmul::SyncType;
+struct Mxfp4GroupedPvConfig {
+    static constexpr uint32_t TASKS = 2;
+    static constexpr uint32_t GROUP_SLOTS = 2;
+    static constexpr uint32_t P_SLOTS = TASKS * GROUP_SLOTS;
+    static constexpr uint32_t SCORE_N = 256;
+
+    static constexpr bool IsEnabled(uint32_t headDim, uint32_t taskN)
+    {
+        return headDim == 256 && taskN == SCORE_N;
+    }
+};
+
 struct Mxfp4RunInfo : RunInfoX {
-    bool isGroupLast = false; // 是否为一个16个task构成的组的末尾task，在这个task后，会进行p的scale更新，以及进行一次集合的V2
+    bool isGroupLast = false;
+    uint8_t groupTaskIndex = 0;
+    uint8_t scoreSlot = 0;
     // Assigned by AIV ComputeVec1 and retained in the controller's task ring.
     // Independent of loop/16: a Q block/split may end with a short group.
     // Cube does not consume this AIV-local field.
@@ -72,13 +86,15 @@ public:
     static constexpr uint16_t CROSS_CORE_SYNC_PSCALE_C2[2] = {4, 7};
     static constexpr uint16_t CROSS_CORE_SYNC_V2_C2 = 5;
     static constexpr uint16_t CROSS_CORE_SYNC_C2_V2 = 6;
+    static constexpr uint16_t CROSS_CORE_SYNC_GROUP_V1_ALLOWED = 9;
 
     static constexpr bool USE_DN = useDn;
     static constexpr uint32_t mBaseSize = (uint32_t)s1TemplateType;
     static constexpr uint32_t s2BaseSize = (uint32_t)s2TemplateType;
     static constexpr uint32_t dBaseSize = (uint32_t)dTemplateType;
     static constexpr uint32_t dVBaseSize = (uint32_t)dVTemplateType;
-    static constexpr uint32_t s2SplitSize = 128U;
+    static constexpr bool GROUPED_PV = Mxfp4GroupedPvConfig::IsEnabled(dBaseSize, s2BaseSize);
+    static constexpr uint32_t s2SplitSize = GROUPED_PV ? Mxfp4GroupedPvConfig::SCORE_N : 128U;
 
     static constexpr uint32_t SCORE_SLOT_COUNT = 2;
 
@@ -110,21 +126,30 @@ public:
     static constexpr uint32_t ubBmm2BufferBytes_ = USE_DN? mBaseSize / CV_RATIO * (dVBaseSize + 1) * sizeof(float) : mBaseSize / CV_RATIO * (dVBaseSize + 8) * sizeof(float);
 
 
-    /*============================function============================================*/
-    __aicore__ inline CVCrossBuffer(){}
+    static constexpr uint32_t GROUP_PV_SLOT_BYTES = mBaseSize / CV_RATIO * (dVBaseSize + 8) * sizeof(float);
+    static constexpr uint32_t UB_SLOT_BYTES = GROUPED_PV && GROUP_PV_SLOT_BYTES > ubBmm1BufferBytes_ ?
+        GROUP_PV_SLOT_BYTES : ubBmm1BufferBytes_;
+    static constexpr uint32_t UB_BYTES = SCORE_SLOT_COUNT * UB_SLOT_BYTES + (GROUPED_PV ? 0 : ubBmm2BufferBytes_);
+
+    __aicore__ inline CVCrossBuffer() {}
 
     __aicore__ inline void InitBuffers(BufferManager<BufferType::L1> &l1BufferManagerPtr_,
         BufferManager<BufferType::UB> &ubBufferManagerPtr_)
     {
         l1PBuffers_ = l1BufferManagerPtr_.AllocBuffer<SyncType::NO_SYNC>(l1PBufferBytes_ * PRELOAD_N);
         l1PScaleBuffers_ = l1BufferManagerPtr_.AllocBuffer<SyncType::NO_SYNC>(l1PScaleBufferBytes_ * PRELOAD_N);
-        ubBmm1Buffers_ = ubBufferManagerPtr_.AllocBuffer<SyncType::NO_SYNC>(ubBmm1BufferBytes_ * SCORE_SLOT_COUNT);
-        ubBmm2Buffers_ = ubBufferManagerPtr_.AllocBuffer<SyncType::NO_SYNC>(ubBmm2BufferBytes_);
+        ubBmm1Buffers_ = ubBufferManagerPtr_.AllocBuffer<SyncType::NO_SYNC>(UB_SLOT_BYTES * SCORE_SLOT_COUNT);
+        if constexpr (!GROUPED_PV) {
+            ubBmm2Buffers_ = ubBufferManagerPtr_.AllocBuffer<SyncType::NO_SYNC>(ubBmm2BufferBytes_);
+        }
     }
 
     __aicore__ inline void InitSync()
     {
         if ASCEND_IS_AIV {
+            if constexpr (GROUPED_PV) {
+                return;
+            }
             // 两个 QK 接收槽初始为空，允许 Cube 写入。
             CrossCoreSetFlag<SYNC_MODE_4, PIPE_V>(
                 CROSS_CORE_SYNC_V1_C1[0]);
@@ -152,11 +177,14 @@ public:
 
     __aicore__ inline LocalTensor<float> GetBmm1Slot(uint32_t slot) {
         LocalTensor<float> scoreUbTensor = ubBmm1Buffers_.GetTensor<float>();
-        LocalTensor<float> scoreSlotTensor = scoreUbTensor[slot * (ubBmm1BufferBytes_ / sizeof(float))];
+        LocalTensor<float> scoreSlotTensor = scoreUbTensor[slot * (UB_SLOT_BYTES / sizeof(float))];
         return scoreSlotTensor;
     }
 
     __aicore__ inline LocalTensor<float> GetBmm2Slot(uint32_t slot) {
+        if constexpr (GROUPED_PV) {
+            return GetBmm1Slot(slot);
+        }
         LocalTensor<float> pvResultUbTensor = ubBmm2Buffers_.GetTensor<float>();
         LocalTensor<float> pvResultSlotTensor = pvResultUbTensor[slot * (ubBmm2BufferBytes_ / sizeof(float))];
         return pvResultSlotTensor;
@@ -166,6 +194,9 @@ public:
         if ASCEND_IS_AIC {
             CrossCoreSetFlag<SYNC_MODE_4, PIPE_FIX>(CROSS_CORE_SYNC_C1_V1[slot]);
             CrossCoreSetFlag<SYNC_MODE_4, PIPE_FIX>(CROSS_CORE_SYNC_C1_V1[slot] + 16);
+            if constexpr (GROUPED_PV) {
+                ubInUse_[slot] = true;
+            }
         } else {
             CrossCoreSetFlag<SYNC_MODE_4, PIPE_V>(CROSS_CORE_SYNC_V1_C1[slot]);
         }
@@ -173,6 +204,12 @@ public:
 
     __aicore__ inline void waitBmm1Buffer(uint32_t slot) {
         if ASCEND_IS_AIC {
+            if constexpr (GROUPED_PV) {
+                if (!ubInUse_[slot]) {
+                    return;
+                }
+                ubInUse_[slot] = false;
+            }
             CrossCoreWaitFlag<SYNC_MODE_4, PIPE_FIX>(CROSS_CORE_SYNC_V1_C1[slot]);
             CrossCoreWaitFlag<SYNC_MODE_4, PIPE_FIX>(CROSS_CORE_SYNC_V1_C1[slot] + 16);
         } else {
@@ -180,7 +217,11 @@ public:
         }
     }
 
-    __aicore__ inline void setBmm2Buffer() {
+    __aicore__ inline void setBmm2Buffer(uint32_t slot = 0) {
+        if constexpr (GROUPED_PV) {
+            setBmm1Buffer(slot);
+            return;
+        }
         if ASCEND_IS_AIC {
             CrossCoreSetFlag<SYNC_MODE_4, PIPE_FIX>(CROSS_CORE_SYNC_C2_V2);
             CrossCoreSetFlag<SYNC_MODE_4, PIPE_FIX>(CROSS_CORE_SYNC_C2_V2 + 16);
@@ -189,7 +230,11 @@ public:
         }
     }
 
-    __aicore__ inline void watBmm2Buffer() {
+    __aicore__ inline void watBmm2Buffer(uint32_t slot = 0) {
+        if constexpr (GROUPED_PV) {
+            waitBmm1Buffer(slot);
+            return;
+        }
         if ASCEND_IS_AIC {
             CrossCoreWaitFlag<SYNC_MODE_4, PIPE_FIX>(CROSS_CORE_SYNC_V2_C2);
             CrossCoreWaitFlag<SYNC_MODE_4, PIPE_FIX>(CROSS_CORE_SYNC_V2_C2 + 16);
@@ -210,6 +255,26 @@ public:
             CrossCoreWaitFlag<SYNC_MODE_4, PIPE_MTE1>(CROSS_CORE_SYNC_PSCALE_C2[groupId % 2] + 16);
         }
     }
+
+    __aicore__ inline void AllowGroupV1()
+    {
+        if ASCEND_IS_AIC {
+            // Ordered on FIX after both returns of the retired group's shared UB slot.
+            CrossCoreSetFlag<SYNC_MODE_4, PIPE_FIX>(CROSS_CORE_SYNC_GROUP_V1_ALLOWED);
+            CrossCoreSetFlag<SYNC_MODE_4, PIPE_FIX>(CROSS_CORE_SYNC_GROUP_V1_ALLOWED + 16);
+        }
+    }
+
+    __aicore__ inline void WaitGroupV1Allowed()
+    {
+        if ASCEND_IS_AIV {
+            CrossCoreWaitFlag<SYNC_MODE_4, PIPE_V>(CROSS_CORE_SYNC_GROUP_V1_ALLOWED);
+        }
+    }
+
+private:
+    // Cube records which physical slots have a return pending on each AIV.
+    bool ubInUse_[SCORE_SLOT_COUNT] {};
 };
 
 

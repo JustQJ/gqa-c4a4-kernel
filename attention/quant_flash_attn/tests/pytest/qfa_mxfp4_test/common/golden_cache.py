@@ -19,7 +19,7 @@ import re
 import uuid
 import torch
 
-CACHE_VERSION = 'mxfp4-public-quant-schema-v5'
+CACHE_VERSION = 'mxfp4-public-quant-schema-v7'
 DEFAULT_CACHE_DIR = Path(__file__).resolve().parent / 'golden_cache'
 
 

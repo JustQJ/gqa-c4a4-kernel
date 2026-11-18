@@ -31,6 +31,7 @@ static constexpr float FLOAT_ZERO = 0;
 static constexpr float FLOAT_MAX = 3.402823466e+38F;
 static constexpr float FLOAT_INF = 3e+99;
 
+static constexpr uint32_t QFA_HEAD_S2_BASE_SIZE_INDEX = 3U;
 static constexpr uint32_t QFA_HEAD_NEED_INIT_OUTPUT_INDEX = 15U;
 
 // V尾块(高精窗口)边界: 与 v_descale 的 64 粒度保持一致, kernel与量化cache写入侧共享的单一事实来源

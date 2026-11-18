@@ -63,7 +63,8 @@ public:
                   "MXFP4 Cube and Vector must agree on MM1 Fixpipe scaling");
 
     static constexpr uint32_t PRELOAD_N = 20; // C2落后C1 20 轮
-    static constexpr uint32_t GROUP_N = 16;  // 16个task的C2在L0C累积，然后执行一次V2
+    static constexpr bool GROUPED_PV = Mxfp4GroupedPvConfig::IsEnabled(dBaseSize, s2BaseSize);
+    static constexpr uint32_t GROUP_N = GROUPED_PV ? Mxfp4GroupedPvConfig::TASKS : 16U;
     static constexpr uint32_t DELAY_P_SCALE_N = 3; // P scale 在每个group的16个task的C1完成后，再过3轮，对这16个task进行一次pscale的update
     static constexpr uint32_t PRELOAD_TASK_CACHE_SIZE = PRELOAD_N + 1; // 存储任务信息的数组大小
 
@@ -99,7 +100,8 @@ public:
     VecFaBlockType vecFaBlock_;
     VecFdBlockType vecFdBlock_;
 
-    uint32_t createdTaskCount_ = 0U; //当前核在当前 section 中已经创建的有效任务数。每次成功 CreateTask 后加一，用于任务编号和描述符环形槽定位；被跳过的任务不计数
+    uint32_t createdTaskCount_ = 0U; // 当前 section 内已创建的有效任务数
+    uint64_t groupSequence_ = 0; // PV 槽和 Pscale 信号在 section 间连续编号
 
     // tile调度的相关参数
     uint64_t actSeqLensKv_ = 0; // 当前 batch 实际参与计算的 KV token 数
@@ -345,19 +347,149 @@ public:
             GetFAMetaDataIndex(constInfo_.aicIdx, QFA_FIRST_FD_DATA_WORKSPACE_IDX_INDEX, sectionIdx));
     }
 
-    __aicore__ inline void FlashAttention(uint32_t sectionIdx)
+    struct TaskCursor {
+        uint32_t batchHead;
+        uint32_t queryBlock;
+        uint32_t kvBlock;
+    };
+
+    __aicore__ inline TaskCursor BeginFaSection(uint32_t sectionIdx)
     {
         GetFASectionInfo(sectionIdx);
-        Mxfp4RunInfo taskRunInfo[PRELOAD_TASK_CACHE_SIZE] {};
-        uint32_t bN2Cur = bN2Start_;
-        uint32_t gS1Cur = gS1OStart_;
-        uint32_t s2Cur = s2OStart_;
-        prevBN2Idx_ = bN2Cur;
-        prevGS1Idx_ = gS1Cur;
+        prevBN2Idx_ = bN2Start_;
+        prevGS1Idx_ = gS1OStart_;
         headS2Split_ = false;
         tailS2Split_ = false;
         mloop_ = 0;
         createdTaskCount_ = 0;
+        return {bN2Start_, gS1OStart_, s2OStart_};
+    }
+
+    __aicore__ inline bool ReadNextTask(TaskCursor& cursor, Mxfp4RunInfo& task)
+    {
+        while (ShouldDispatchTask(cursor.batchHead, cursor.queryBlock, cursor.kvBlock)) {
+            const auto mode = GetTaskDealMode(cursor.batchHead, cursor.queryBlock, cursor.kvBlock);
+            if (mode == TASK_DEAL_MODE::CREATE_TASK) {
+                task = Mxfp4RunInfo {};
+                CalcParams(createdTaskCount_++, cursor.batchHead, cursor.queryBlock, cursor.kvBlock, task);
+                UpdateAxisInfo(mode, cursor.batchHead, cursor.queryBlock, cursor.kvBlock);
+                return true;
+            }
+            UpdateAxisInfo(mode, cursor.batchHead, cursor.queryBlock, cursor.kvBlock);
+        }
+        return false;
+    }
+
+    static __aicore__ inline void SetGroupTaskSlots(Mxfp4RunInfo& task, uint32_t index, uint32_t sectionGroup,
+        uint64_t groupId)
+    {
+        task.groupTaskIndex = index;
+        // During startup both groups alternate scores in task order. In steady state
+        // the first score uses the slot opposite to the PV of the group two back.
+        task.scoreSlot = sectionGroup < Mxfp4GroupedPvConfig::GROUP_SLOTS ? task.loop % 2 :
+            (1U - groupId % 2 + index) % 2;
+    }
+
+    __aicore__ inline uint32_t IssueGroupC1V1(TaskCursor& cursor, Mxfp4RunInfo& task, Mxfp4RunInfo* cubeTasks,
+        uint32_t sectionGroup, uint64_t groupId, bool firstC1Issued)
+    {
+        uint32_t count = 0;
+        do {
+            SetGroupTaskSlots(task, count, sectionGroup, groupId);
+            if ASCEND_IS_AIC {
+                if (count != 0 || !firstC1Issued) {
+                    cubeBlock_.ComputeBmm1(task);
+                }
+                cubeTasks[count] = task;
+            } else {
+                vecFaBlock_.ComputeVec1(task);
+            }
+            ++count;
+            if (task.isGroupLast) {
+                return count;
+            }
+        } while (count < GROUP_N && ReadNextTask(cursor, task));
+        ASSERT(false); // Every valid Q block/KV split ends a group.
+        return count;
+    }
+
+    __aicore__ inline void RunGroupedPvCube(TaskCursor& cursor)
+    {
+        constexpr uint32_t groupSlots = Mxfp4GroupedPvConfig::GROUP_SLOTS;
+        Mxfp4RunInfo tasks[groupSlots][GROUP_N] {};
+        uint32_t counts[groupSlots] {};
+        Mxfp4RunInfo nextTask;
+        for (uint32_t g = 0; g < groupSlots && ReadNextTask(cursor, nextTask); ++g) {
+            counts[g] = IssueGroupC1V1(cursor, nextTask, tasks[g], g, groupSequence_ + g, false);
+        }
+
+        for (uint32_t old = 0; counts[old % groupSlots] != 0; ++old, ++groupSequence_) {
+            const uint32_t slot = old % groupSlots;
+            // PV can accumulate while AIV consumes scores already in UB. The
+            // final PV Fixpipe waits for both AIVs to release its target slot.
+            for (uint32_t t = 0; t < counts[slot]; ++t) {
+                cubeBlock_.ComputeBmm2(tasks[slot][t]);
+            }
+
+            // The early task has its own descriptor. Cube manages L0C hazards:
+            // D256 waits for the PV Fixpipe on both QK slots, then reuses one.
+            const bool hasNext = ReadNextTask(cursor, nextTask);
+            const uint32_t nextGroup = old + groupSlots;
+            const uint64_t nextGroupId = groupSequence_ + groupSlots;
+            if (hasNext) {
+                SetGroupTaskSlots(nextTask, 0, nextGroup, nextGroupId);
+                cubeBlock_.ComputeBmm1(nextTask);
+            }
+            cubeBlock_.WaitGroupRetired(groupSequence_);
+            counts[slot] = 0;
+            if (hasNext) {
+                cubeBlock_.AllowGroupV1();
+                counts[slot] = IssueGroupC1V1(cursor, nextTask, tasks[slot], nextGroup, nextGroupId, true);
+            }
+        }
+    }
+
+    __aicore__ inline void RunGroupedPvVector(TaskCursor& cursor)
+    {
+        constexpr uint32_t groupSlots = Mxfp4GroupedPvConfig::GROUP_SLOTS;
+        Mxfp4RunInfo tails[groupSlots] {};
+        Mxfp4RunInfo task;
+        uint32_t group = 0;
+        while (ReadNextTask(cursor, task)) {
+            const uint32_t slot = group % groupSlots;
+            if (group >= groupSlots) {
+                vecFaBlock_.ComputeVec2(tails[slot]);
+                vecFaBlock_.WaitGroupV1Allowed();
+            }
+            IssueGroupC1V1(cursor, task, nullptr, group, groupSequence_ + group, false);
+            vecFaBlock_.UpdatePScale(task);
+            tails[slot] = task;
+            ++group;
+        }
+
+        for (uint32_t retired = group > groupSlots ? group - groupSlots : 0; retired < group; ++retired) {
+            vecFaBlock_.ComputeVec2(tails[retired % groupSlots]);
+        }
+        groupSequence_ += group;
+    }
+
+    __aicore__ inline void FlashAttentionGroupedPv(uint32_t sectionIdx)
+    {
+        auto cursor = BeginFaSection(sectionIdx);
+        if ASCEND_IS_AIC {
+            RunGroupedPvCube(cursor);
+        } else {
+            RunGroupedPvVector(cursor);
+        }
+    }
+
+    __aicore__ inline void FlashAttention(uint32_t sectionIdx)
+    {
+        auto cursor = BeginFaSection(sectionIdx);
+        Mxfp4RunInfo taskRunInfo[PRELOAD_TASK_CACHE_SIZE] {};
+        uint32_t& bN2Cur = cursor.batchHead;
+        uint32_t& gS1Cur = cursor.queryBlock;
+        uint32_t& s2Cur = cursor.kvBlock;
         uint64_t pipelineTick = 0;
         uint32_t pendingTasks = 0;
         while (pendingTasks != 0 || ShouldDispatchTask(bN2Cur, gS1Cur, s2Cur)) {
@@ -765,7 +897,11 @@ public:
         }
         for (uint32_t sectionIdx = 0; sectionIdx < sectionNum_; sectionIdx++) {
             if (constInfo_.aicIdx < constInfo_.coreNum) {
-                FlashAttention(sectionIdx);
+                if constexpr (GROUPED_PV) {
+                    FlashAttentionGroupedPv(sectionIdx);
+                } else {
+                    FlashAttention(sectionIdx);
+                }
             }
             if constexpr (FLASH_DECODE) {
                 if ASCEND_IS_AIV {

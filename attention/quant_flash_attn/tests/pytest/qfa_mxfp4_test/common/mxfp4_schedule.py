@@ -33,7 +33,8 @@ def decode_sections(metadata, params):
     if len(meta) < 16:
         raise ValueError('C4 metadata header is missing')
     sections, is_fd, m_base, task_n, cores = meta[:5]
-    if sections < 1 or cores < 1 or m_base != 128 or task_n != (128 if p['D'] == 256 else 256):
+    valid_task_sizes = (128, 256) if p['D'] == 256 else (256,)
+    if sections < 1 or cores < 1 or m_base != 128 or task_n not in valid_task_sizes:
         raise ValueError(f'Unsupported C4 metadata header: {meta[:5]}')
     if len(meta) < 16 + sections*cores*16:
         raise ValueError('C4 metadata FA records are truncated')
@@ -89,8 +90,9 @@ def decode_sections(metadata, params):
                 current = stop
             if current != expected:
                 raise ValueError(f'Incomplete C4 segments: bn={bn}, mi={mi}, {current}!={expected}')
-    return dict(m_base=m_base, task_n=task_n, head_num=head_num, group=group,
-                segments=segments, is_fd=bool(is_fd))
+    tasks_per_group = 2 if p['D'] == 256 and task_n == 256 else 16
+    return dict(m_base=m_base, task_n=task_n, tasks_per_group=tasks_per_group,
+                head_num=head_num, group=group, segments=segments, is_fd=bool(is_fd))
 
 
 def iter_tiles(params, schedule):

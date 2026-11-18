@@ -47,13 +47,16 @@ public:
     static_assert(dBaseSize == dVBaseSize, "MXFP4 requires Dv == D");
     static_assert(mBaseSize == 128 && (dBaseSize == 128 || dBaseSize == 256),
                   "MXFP4 supports M128 and D128/D256 only");
-    static_assert(s2BaseSize == (dBaseSize == 128 ? 256 : 128), "Unsupported MXFP4 task size");
+    static constexpr bool GROUPED_PV = Mxfp4GroupedPvConfig::IsEnabled(dBaseSize, s2BaseSize);
+    static_assert(GROUPED_PV || s2BaseSize == (dBaseSize == 128 ? 256 : 128), "Unsupported MXFP4 task size");
     static_assert(KvLayoutType == 1 && layout == LayOutTypeEnum::LAYOUT_TND,
                   "MXFP4 first version requires Q TND and KV PA_BBND");
     static_assert(isDAligned, "MXFP4 unaligned D is not implemented");
     static_assert(std::is_same<T, float>::value && std::is_same<INPUT_T, fp4x2_e2m1_t>::value,
                   "MXFP4 requires FP4 E2M1 input and FP32 accumulation");
-    static constexpr uint32_t s2SplitSize = 128U;
+    static constexpr uint32_t s2SplitSize = GROUPED_PV ? Mxfp4GroupedPvConfig::SCORE_N : 128U;
+    static constexpr bool PV_SPANS_QK_SLOTS = GROUPED_PV && dVBaseSize == 256;
+    static constexpr uint32_t PV_CHUNK_N = PV_SPANS_QK_SLOTS ? 128U : s2BaseSize;
     static constexpr uint32_t MXFP_GROUP_SIZE = 32U;
     static constexpr uint32_t MXFP_DIVISOR_SIZE = 64U;
     static constexpr LayOutTypeEnum LAYOUT = layout;
@@ -67,8 +70,10 @@ public:
     using SCALE_T = fp8_e8m0_t;
     using MM_T = T;
 
-    using CrossBufferType = CVCrossBuffer<20, useDn, s1TemplateType, s2TemplateType, dTemplateType, dVTemplateType>;
-    static constexpr uint32_t QK_L0_SLOT_COUNT = dBaseSize == 256 ? 1U : 2U;
+    static constexpr uint32_t L1_P_SLOTS = GROUPED_PV ? Mxfp4GroupedPvConfig::P_SLOTS : 20U;
+    using CrossBufferType = CVCrossBuffer<L1_P_SLOTS, useDn, s1TemplateType, s2TemplateType, dTemplateType,
+                                        dVTemplateType>;
+    static constexpr uint32_t QK_L0_SLOT_COUNT = !GROUPED_PV && dBaseSize == 256 ? 1U : 2U;
 
     static constexpr bool IS_TND_LAYOUT =
         (LAYOUT == LayOutTypeEnum::LAYOUT_TND || LAYOUT == LayOutTypeEnum::LAYOUT_NTD);
@@ -107,7 +112,8 @@ public:
 
     // L1 buffers
     CrossBufferType crossBuffers_;
-    BuffersPolicySingleBuffer<BufferType::L1> l1QBuffers_;
+    std::conditional_t<GROUPED_PV, BuffersPolicyDB<BufferType::L1>,
+        BuffersPolicySingleBuffer<BufferType::L1>> l1QBuffers_;
     BuffersPolicy4buff<BufferType::L1> l1KVBuffers_; // FP4 K/V payload + E8M0 scale
     BuffersPolicySingleBuffer<BufferType::L1> l1VPaddingBuffers_; // rowsum需要的常数1
 
@@ -125,7 +131,7 @@ public:
     BuffersPolicySingleBuffer<BufferType::L0C> mm2ResBuffers_; // pv的结果使用单槽累积
 
 
-    static constexpr uint32_t P_SLOT_COUNT = 20;
+    Buffer<BufferType::L0C> groupResultSlots_[QK_L0_SLOT_COUNT];
     uint64_t scoreSequence_ = 0;
     uint32_t pvGroupTasks_ = 0;
     uint64_t pvGroupSequence_ = 0; // Matches Vector nextGroupId_ across sections.
@@ -163,7 +169,7 @@ public:
     {
         // L1 上和 UB 上跨核同步的buffer
         l1BufferManager_.Init(tPipe_, 512*1024); // L1 大小为 512KB;
-        ubBufferManager_.Init(tPipe_, CrossBufferType::ubBmm1BufferBytes_ * CrossBufferType::SCORE_SLOT_COUNT + CrossBufferType::ubBmm2BufferBytes_);
+        ubBufferManager_.Init(tPipe_, CrossBufferType::UB_BYTES);
         crossBuffers_.InitBuffers(l1BufferManager_, ubBufferManager_);
 
         // L1 上的其他buffer
@@ -173,8 +179,8 @@ public:
         constexpr uint32_t mmKVScaleSize = s2BaseSize * dBaseSize / MXFP_GROUP_SIZE;
         constexpr uint32_t mmVPaddngSize = s2BaseSize * (dBaseSize + 16) / 2;
         constexpr uint32_t mmVPaddngScaleSize = s2BaseSize * (dBaseSize + 16) / MXFP_GROUP_SIZE;
-        static_assert(P_SLOT_COUNT * (CrossBufferType::l1PBufferBytes_ + CrossBufferType::l1PScaleBufferBytes_) +
-                      mm1QSize + mm1QScaleSize + 4 * (mmKVSize + mmKVScaleSize) +
+        static_assert(L1_P_SLOTS * (CrossBufferType::l1PBufferBytes_ + CrossBufferType::l1PScaleBufferBytes_) +
+                      (GROUPED_PV ? 2 : 1) * (mm1QSize + mm1QScaleSize) + 4 * (mmKVSize + mmKVScaleSize) +
                       mmVPaddngSize + mmVPaddngScaleSize <= 512 * 1024, "MXFP4 L1 capacity exceeded");
         l1QBuffers_.Init(l1BufferManager_, mm1QSize + mm1QScaleSize);
         l1KVBuffers_.Init(l1BufferManager_, mmKVSize + mmKVScaleSize);
@@ -188,19 +194,41 @@ public:
         // L0上的buffer
         constexpr uint32_t mm1leftSize = USE_DN? s2SplitSize * dBaseSize / 2 : mBaseSize * dBaseSize / 2;
         constexpr uint32_t mm1RightSize = USE_DN? mBaseSize * dBaseSize / 2 : s2SplitSize * dBaseSize / 2;
-        constexpr uint32_t mm2LeftSize = USE_DN? s2BaseSize * (dBaseSize + 16) / 2 : mBaseSize * s2BaseSize / 2;
-        constexpr uint32_t mm2RightSize = USE_DN? mBaseSize * s2BaseSize / 2 : s2BaseSize * (dBaseSize + 16) / 2;
+        constexpr uint32_t pvVSize = PV_CHUNK_N * (dVBaseSize + 16) / 2;
+        constexpr uint32_t pvPSize = mBaseSize * PV_CHUNK_N / 2;
+        constexpr uint32_t mm2LeftSize = USE_DN ? pvVSize : pvPSize;
+        constexpr uint32_t mm2RightSize = USE_DN ? pvPSize : pvVSize;
         constexpr uint32_t mm1ResSize = mBaseSize * s2SplitSize * sizeof(float);
-        constexpr uint32_t mm2ResSize = mBaseSize * (dBaseSize + 16) * sizeof(float);
-        static_assert(QK_L0_SLOT_COUNT * mm1leftSize + 2 * mm2LeftSize <= 64 * 1024, "MXFP4 L0A capacity exceeded");
-        static_assert(QK_L0_SLOT_COUNT * mm1RightSize + 2 * mm2RightSize <= 64 * 1024, "MXFP4 L0B capacity exceeded");
-        static_assert(QK_L0_SLOT_COUNT * mm1ResSize + mm2ResSize <= 256 * 1024, "MXFP4 L0C capacity exceeded");
-        mm1LeftBuffers_.Init(l0aBufferManager_, mm1leftSize);
-        mm1RightBuffers_.Init(l0bBufferManager_, mm1RightSize);
-        mm2LeftBuffers_.Init(l0aBufferManager_, mm2LeftSize);
-        mm2RightBuffers_.Init(l0bBufferManager_, mm2RightSize);
-        mm1ResBuffers_.Init(l0cBufferManager_, mm1ResSize);
-        mm2ResBuffers_.Init(l0cBufferManager_, mm2ResSize);
+        constexpr uint32_t mm2ResSize = mBaseSize * (dVBaseSize + 16) * sizeof(float);
+        if constexpr (GROUPED_PV) {
+            constexpr uint32_t leftSlotBytes = mm1leftSize > mm2LeftSize ? mm1leftSize : mm2LeftSize;
+            constexpr uint32_t rightSlotBytes = mm1RightSize > mm2RightSize ? mm1RightSize : mm2RightSize;
+            static_assert(2 * leftSlotBytes <= 64 * 1024 && 2 * rightSlotBytes <= 64 * 1024,
+                          "MXFP4 grouped PV L0A/B capacity exceeded");
+            static_assert(2 * mm1ResSize <= 256 * 1024 &&
+                          mm2ResSize <= (PV_SPANS_QK_SLOTS ? 2 : 1) * mm1ResSize,
+                          "MXFP4 grouped PV L0C capacity exceeded");
+            mm1LeftBuffers_.Init(l0aBufferManager_, leftSlotBytes);
+            mm1RightBuffers_.Init(l0bBufferManager_, rightSlotBytes);
+            // D256 PV starts at slot 0 and takes both FIX_M credits.
+            auto resultStorage = l0cBufferManager_.template AllocBuffer<SyncType::NO_SYNC>(2 * mm1ResSize);
+            for (uint32_t slot = 0; slot < QK_L0_SLOT_COUNT; ++slot) {
+                groupResultSlots_[slot] = Buffer<BufferType::L0C>(
+                    resultStorage.template GetTensor<uint8_t>(slot * mm1ResSize),
+                    slot == 0 && PV_SPANS_QK_SLOTS ? 2 * mm1ResSize : mm1ResSize);
+                groupResultSlots_[slot].Init();
+            }
+        } else {
+            static_assert(QK_L0_SLOT_COUNT * mm1leftSize + 2 * mm2LeftSize <= 64 * 1024, "MXFP4 L0A capacity exceeded");
+            static_assert(QK_L0_SLOT_COUNT * mm1RightSize + 2 * mm2RightSize <= 64 * 1024, "MXFP4 L0B capacity exceeded");
+            static_assert(QK_L0_SLOT_COUNT * mm1ResSize + mm2ResSize <= 256 * 1024, "MXFP4 L0C capacity exceeded");
+            mm1LeftBuffers_.Init(l0aBufferManager_, mm1leftSize);
+            mm1RightBuffers_.Init(l0bBufferManager_, mm1RightSize);
+            mm2LeftBuffers_.Init(l0aBufferManager_, mm2LeftSize);
+            mm2RightBuffers_.Init(l0bBufferManager_, mm2RightSize);
+            mm1ResBuffers_.Init(l0cBufferManager_, mm1ResSize);
+            mm2ResBuffers_.Init(l0cBufferManager_, mm2ResSize);
+        }
 
         InitPaddingL1();
         l1VPaddingBuffers_.Get().template Wait<HardEvent::MTE2_MTE1>();
@@ -256,7 +284,7 @@ public:
         if (runInfo.actMSize == 0 || runInfo.actSingleLoopS2Size == 0) {
             return;
         }
-        Buffer<BufferType::L1>& queryL1Buffer = l1QBuffers_.Get();
+        Buffer<BufferType::L1>& queryL1Buffer = qCached_ ? l1QBuffers_.GetPre() : l1QBuffers_.Get();
         if (!qCached_) {
             queryL0ReadyCount_ = 0;
             queryL1Buffer.template Wait<HardEvent::MTE1_MTE2>();
@@ -288,7 +316,8 @@ public:
             // 因而下一槽的 Mmad 可与本槽的 L0C -> UB Fixpipe 重叠。
             Buffer<BufferType::L0A>& qkLeftL0ABuffer = mm1LeftBuffers_.Get();
             Buffer<BufferType::L0B, SyncType::NO_SYNC>& qkRightL0BBuffer = mm1RightBuffers_.Get();
-            Buffer<BufferType::L0C>& qkResultL0CBuffer = mm1ResBuffers_.Get();
+            Buffer<BufferType::L0C>& qkResultL0CBuffer = GROUPED_PV ?
+                groupResultSlots_[runInfo.scoreSlot] : mm1ResBuffers_.Get();
             qkLeftL0ABuffer.template Wait<HardEvent::M_MTE1>();
             LocalTensor<Q_T> queryL1Tensor = queryL1Buffer.template GetTensor<Q_T>();
             LocalTensor<SCALE_T> queryScaleL1Tensor =
@@ -318,7 +347,7 @@ public:
             qkLeftL0ABuffer.template Set<HardEvent::M_MTE1>();
             qkResultL0CBuffer.template Set<HardEvent::M_FIX>();
             qkResultL0CBuffer.template Wait<HardEvent::M_FIX>();
-            const uint32_t scoreSlot = scoreSequence_++ % CrossBufferType::SCORE_SLOT_COUNT;
+            const uint32_t scoreSlot = GROUPED_PV ? runInfo.scoreSlot : scoreSequence_++ % CrossBufferType::SCORE_SLOT_COUNT;
             crossBuffers_.waitBmm1Buffer(scoreSlot);
             FixpipeMm1(crossBuffers_.GetBmm1Slot(scoreSlot), qkResultL0CBuffer.template GetTensor<T>(), runInfo,
                 validKvTokenCount);
@@ -338,13 +367,22 @@ public:
         if (runInfo.actMSize == 0 || runInfo.actSingleLoopS2Size == 0) {
             return;
         }
-        ASSERT(pvGroupTasks_ < 16);
+        ASSERT(pvGroupTasks_ < (GROUPED_PV ? Mxfp4GroupedPvConfig::TASKS : 16U));
         const bool isGroupFirst = pvGroupTasks_ == 0;
         const bool isGroupLast = runInfo.isGroupLast || runInfo.isLastS2Loop;
-        Buffer<BufferType::L0C>& pvResultL0CBuffer = mm2ResBuffers_.Get();
+        const uint32_t pvUbSlot = GROUPED_PV ? pvGroupSequence_ % CrossBufferType::SCORE_SLOT_COUNT : 0U;
+        Buffer<BufferType::L0C>& pvResultL0CBuffer = GROUPED_PV ?
+            groupResultSlots_[PV_SPANS_QK_SLOTS ? 0U : pvUbSlot] : mm2ResBuffers_.Get();
         if (isGroupFirst) {
             crossBuffers_.waitPscaleUpdate(pvGroupSequence_);
             pvResultL0CBuffer.template Wait<HardEvent::FIX_M>();
+            if constexpr (PV_SPANS_QK_SLOTS) {
+                groupResultSlots_[1].template Wait<HardEvent::FIX_M>();
+            }
+            if constexpr (GROUPED_PV) {
+                // PV overwrites the shared QK operand slots, including cached Q.
+                queryL0ReadyCount_ = 0;
+            }
         }
         Buffer<BufferType::L1>& valueL1Buffer = l1KVBuffers_.Get();
         valueL1Buffer.template Wait<HardEvent::MTE1_MTE2>();
@@ -355,41 +393,63 @@ public:
         CopyVScaleGm2L1(valueScaleL1Tensor, runInfo);
         valueL1Buffer.template Set<HardEvent::MTE2_MTE1>();
         valueL1Buffer.template Wait<HardEvent::MTE2_MTE1>();
-        const uint32_t alignedKvTokenCount = (runInfo.actSingleLoopS2Size + 63U) / 64U * 64U;
-        Buffer<BufferType::L0A>& pvLeftL0ABuffer = mm2LeftBuffers_.Get();
-        Buffer<BufferType::L0B, SyncType::NO_SYNC>& pvRightL0BBuffer = mm2RightBuffers_.Get();
-        pvLeftL0ABuffer.template Wait<HardEvent::M_MTE1>();
-        if constexpr (USE_DN) {
-            InitPaddingL0(pvLeftL0ABuffer.template GetTensor<KV_T>(), alignedKvTokenCount);
-            LoadV2L0(pvLeftL0ABuffer.template GetTensor<KV_T>(), valueL1Tensor, valueScaleL1Tensor,
-                alignedKvTokenCount);
-            LoadP2L0(pvRightL0BBuffer.template GetTensor<INPUT_T>(), runInfo.loop % P_SLOT_COUNT, alignedKvTokenCount, runInfo.actMSizeAlign32);
-        } else {
-            LoadP2L0(pvLeftL0ABuffer.template GetTensor<INPUT_T>(), runInfo.loop % P_SLOT_COUNT, alignedKvTokenCount, runInfo.actMSizeAlign32);
-            InitPaddingL0(pvRightL0BBuffer.template GetTensor<KV_T>(), alignedKvTokenCount);
-            LoadV2L0(pvRightL0BBuffer.template GetTensor<KV_T>(), valueL1Tensor, valueScaleL1Tensor,
-                alignedKvTokenCount);
+        const uint32_t probabilitySlot = runInfo.loop % L1_P_SLOTS;
+        for (uint32_t kvOffset = 0; kvOffset < runInfo.actSingleLoopS2Size; kvOffset += PV_CHUNK_N) {
+            const uint32_t validN = AttentionCommon::Min(PV_CHUNK_N,
+                static_cast<uint32_t>(runInfo.actSingleLoopS2Size) - kvOffset);
+            const uint32_t alignedN = (validN + 63U) / 64U * 64U;
+            Buffer<BufferType::L0A>& pvLeftL0ABuffer = GROUPED_PV ? mm1LeftBuffers_.Get() : mm2LeftBuffers_.Get();
+            Buffer<BufferType::L0B, SyncType::NO_SYNC>& pvRightL0BBuffer =
+                GROUPED_PV ? mm1RightBuffers_.Get() : mm2RightBuffers_.Get();
+            pvLeftL0ABuffer.template Wait<HardEvent::M_MTE1>();
+            const auto pvLeft = pvLeftL0ABuffer.template GetTensor<INPUT_T>();
+            const auto pvRight = pvRightL0BBuffer.template GetTensor<INPUT_T>();
+            if constexpr (USE_DN) {
+                InitPaddingL0(pvLeft, alignedN);
+                LoadV2L0(pvLeft, valueL1Tensor, valueScaleL1Tensor, alignedN, kvOffset);
+                LoadP2L0(pvRight, probabilitySlot, alignedN, runInfo.actMSizeAlign32, kvOffset);
+            } else {
+                LoadP2L0(pvLeft, probabilitySlot, alignedN, runInfo.actMSizeAlign32, kvOffset);
+                InitPaddingL0(pvRight, alignedN);
+                LoadV2L0(pvRight, valueL1Tensor, valueScaleL1Tensor, alignedN, kvOffset);
+            }
+            if (kvOffset + validN == runInfo.actSingleLoopS2Size) {
+                valueL1Buffer.template Set<HardEvent::MTE1_MTE2>();
+            }
+            pvLeftL0ABuffer.template Set<HardEvent::MTE1_M>();
+            pvLeftL0ABuffer.template Wait<HardEvent::MTE1_M>();
+            const bool initialize = isGroupFirst && kvOffset == 0;
+            if (!initialize) {
+                PipeBarrier<PIPE_M>(); // Accumulation reuses the same L0C matrix.
+            }
+            MatmulPV(pvResultL0CBuffer.template GetTensor<T>(), pvLeft, pvRight, alignedN, initialize,
+                runInfo.actMSizeAlign32);
+            pvLeftL0ABuffer.template Set<HardEvent::M_MTE1>();
         }
-        valueL1Buffer.template Set<HardEvent::MTE1_MTE2>();
-        pvLeftL0ABuffer.template Set<HardEvent::MTE1_M>();
-        pvLeftL0ABuffer.template Wait<HardEvent::MTE1_M>();
-        if (!isGroupFirst) {
-            PipeBarrier<PIPE_M>(); // Accumulation reuses the same L0C matrix.
-        }
-        MatmulPV(pvResultL0CBuffer.template GetTensor<T>(), pvLeftL0ABuffer.template GetTensor<INPUT_T>(),
-                 pvRightL0BBuffer.template GetTensor<INPUT_T>(), alignedKvTokenCount, isGroupFirst, runInfo.actMSizeAlign32);
-        pvLeftL0ABuffer.template Set<HardEvent::M_MTE1>();
         ++pvGroupTasks_;
         if (isGroupLast) {
             pvResultL0CBuffer.template Set<HardEvent::M_FIX>();
             pvResultL0CBuffer.template Wait<HardEvent::M_FIX>();
-            crossBuffers_.watBmm2Buffer();
-            FixpipeMm2(crossBuffers_.GetBmm2Slot(0), pvResultL0CBuffer.template GetTensor<T>(), runInfo);
-            crossBuffers_.setBmm2Buffer();
+            crossBuffers_.watBmm2Buffer(pvUbSlot);
+            FixpipeMm2(crossBuffers_.GetBmm2Slot(pvUbSlot), pvResultL0CBuffer.template GetTensor<T>(), runInfo);
+            crossBuffers_.setBmm2Buffer(pvUbSlot);
             pvResultL0CBuffer.template Set<HardEvent::FIX_M>();
+            if constexpr (PV_SPANS_QK_SLOTS) {
+                groupResultSlots_[1].template Set<HardEvent::FIX_M>();
+            }
             pvGroupTasks_ = 0;
             ++pvGroupSequence_;
         }
+    }
+
+    __aicore__ inline void WaitGroupRetired(uint64_t groupId)
+    {
+        crossBuffers_.watBmm2Buffer(groupId % CrossBufferType::SCORE_SLOT_COUNT);
+    }
+
+    __aicore__ inline void AllowGroupV1()
+    {
+        crossBuffers_.AllowGroupV1();
     }
 
     __aicore__ inline void AllocEventID()
@@ -404,9 +464,11 @@ public:
         if constexpr (CrossBufferType::SCORE_SLOT_COUNT == 2) {
             crossBuffers_.waitBmm1Buffer(1);
         }
-        crossBuffers_.watBmm2Buffer();
+        if constexpr (!GROUPED_PV) {
+            crossBuffers_.watBmm2Buffer();
+        }
         if (qCached_) {
-            l1QBuffers_.Get().template Set<HardEvent::MTE1_MTE2>();
+            l1QBuffers_.GetPre().template Set<HardEvent::MTE1_MTE2>();
             qCached_ = false;
         }
         l1VPaddingBuffers_.Get().template Set<HardEvent::MTE1_MTE2>();
@@ -414,11 +476,17 @@ public:
         l1KVBuffers_.Uninit(l1BufferManager_);
         l1VPaddingBuffers_.Uninit(l1BufferManager_);
         mm1LeftBuffers_.Uninit(l0aBufferManager_);
-        mm2LeftBuffers_.Uninit(l0aBufferManager_);
         mm1RightBuffers_.Uninit(l0bBufferManager_);
-        mm2RightBuffers_.Uninit(l0bBufferManager_);
-        mm1ResBuffers_.Uninit(l0cBufferManager_);
-        mm2ResBuffers_.Uninit(l0cBufferManager_);
+        if constexpr (GROUPED_PV) {
+            for (uint32_t slot = 0; slot < QK_L0_SLOT_COUNT; ++slot) {
+                groupResultSlots_[slot].UnInit();
+            }
+        } else {
+            mm2LeftBuffers_.Uninit(l0aBufferManager_);
+            mm2RightBuffers_.Uninit(l0bBufferManager_);
+            mm1ResBuffers_.Uninit(l0cBufferManager_);
+            mm2ResBuffers_.Uninit(l0cBufferManager_);
+        }
     }
 
     __aicore__ inline void MatmulQK(const LocalTensor<T>& scoreL0CTensor, const LocalTensor<INPUT_T>& qkLeftL0ATensor,
@@ -577,15 +645,18 @@ public:
     }
 
     __aicore__ inline void LoadP2L0(const LocalTensor<INPUT_T>& probabilityL0Tensor, uint32_t probabilitySlot,
-        uint32_t alignedKvTokenCount, uint32_t alignedQueryRows)
+        uint32_t alignedKvTokenCount, uint32_t alignedQueryRows, uint32_t kvOffset)
     {
         LoadData2DParamsV2 probabilityLoadParams {};
+        probabilityLoadParams.mStartPosition = USE_DN ? kvOffset / 16 : 0;
+        probabilityLoadParams.kStartPosition = USE_DN ? 0 : kvOffset / 64;
         probabilityLoadParams.mStep = USE_DN ? alignedKvTokenCount / 16 : alignedQueryRows / 16;
         probabilityLoadParams.kStep = USE_DN ? mBaseSize / 64 : alignedKvTokenCount / 64;
         probabilityLoadParams.srcStride = USE_DN ? s2BaseSize / 16 : mBaseSize / 16;
         probabilityLoadParams.dstStride = USE_DN ? mBaseSize / 16 : alignedQueryRows / 16;
         probabilityLoadParams.ifTranspose = USE_DN;
         LoadData2DMxParams probabilityScaleLoadParams {};
+        probabilityScaleLoadParams.yStartPosition = kvOffset / 64;
         probabilityScaleLoadParams.xStep = USE_DN ? mBaseSize / 16 : alignedQueryRows / 16;
         probabilityScaleLoadParams.yStep = alignedKvTokenCount / 64;
         probabilityScaleLoadParams.srcStride = s2BaseSize / 64 + 1;
@@ -596,15 +667,18 @@ public:
     }
 
     __aicore__ inline void LoadV2L0(const LocalTensor<KV_T>& valueL0Tensor, const LocalTensor<KV_T>& valueL1Tensor,
-                                   const LocalTensor<SCALE_T>& valueScaleL1Tensor, uint32_t alignedKvTokenCount)
+                                   const LocalTensor<SCALE_T>& valueScaleL1Tensor, uint32_t alignedKvTokenCount,
+                                   uint32_t kvOffset)
     {
         LoadData2DParamsV2 valueLoadParams {};
+        valueLoadParams.mStartPosition = kvOffset / 16;
         valueLoadParams.mStep = alignedKvTokenCount / 16;
         valueLoadParams.kStep = dVBaseSize / 64;
         valueLoadParams.srcStride = s2BaseSize / 16;
         valueLoadParams.dstStride = (dVBaseSize + 16) / 16;
         valueLoadParams.ifTranspose = true;
         LoadData2DMxParams valueScaleLoadParams {};
+        valueScaleLoadParams.yStartPosition = kvOffset / 64;
         valueScaleLoadParams.xStep = dVBaseSize / 16;
         valueScaleLoadParams.yStep = alignedKvTokenCount / 64;
         valueScaleLoadParams.srcStride = s2BaseSize / 64;
