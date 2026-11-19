@@ -1,6 +1,6 @@
 # C4A4 FP32 Softmax API 接口说明
 
-本文按 2026-11-12 正式 `attention/` 实现整理，以代码提交 `f8034b9db` 为基线，更新原 `c4a4-api-softmax-fp32.md` 中的设计说明与历史占位状态。本文只描述 `quant_mode=5`，即 `A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32`。内部 Fixpipe 搬运开关不改变公开 API。
+本文以 2026-11-12 的 `f8034b9db` 为历史基线，KV 布局按 PR2 合并提交 `0e86482fd` 更新。本文只描述 `quant_mode=5`，即 `A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32`。内部 Fixpipe 搬运开关不改变公开 API。
 
 ## 1. 当前实现范围
 
@@ -10,7 +10,7 @@
 |---|---|
 | `quant_mode` | `5` |
 | Q / 输出 layout | `TND` / `TND` |
-| KV layout | **仅 `PA_BBND`** |
+| KV layout | `PA_BBND`、`PA_BNBD`、`PA_NZ` |
 | Q descale layout | `TND`（DN 路径）或 `N2TGD`（ND 路径） |
 | head dimension | `D = Dv = 128` 或 `256` |
 | page size | `64 / 128 / 256 / 512 / 1024` |
@@ -20,7 +20,7 @@
 | FD | 由 Metadata 分片和 Host 决定，不提供公开 `numSplits` |
 | 反向、sinks、V tail、滑窗 | 当前 mode 5 不支持 |
 
-公共 parser/checker/Metadata 中保留的 `PA_NZ` 分支不代表设备支持：C4 `DoOpTiling()` 会拒绝非 `PA_BBND`，设备模板也只选择 `PA_BBND`。DN/ND 由 **Qscale 排布**决定，不能单凭 Q 长度或 prefill/decode 名称选择。
+三种 KV 布局均支持 DN 和 ND 路径。DN/ND 由 **Qscale 排布**决定，不能单凭 Q 长度或 prefill/decode 名称选择。
 
 ## 2. 维度、存储与量化布局
 
@@ -36,24 +36,38 @@
 
 Python 的 `torch.float4_e2m1fn_x2` 一个存储元素包含两个 FP4 数值。桥接层 `TensorWrapper → ConvertType → CollectB4ShapeInfo → aclCreateTensor` 将描述符变为 `ACL_FLOAT4_E2M1` 的逻辑元素口径；连续末轴乘 2，外轴 stride 和 storage offset 也换算为半字节元素单位。此过程不量化、不解包、不复制 payload。
 
-| Tensor | Python 打包 shape | ACLNN 逻辑 shape |
-|---|---|---|
-| Q | `[T,N1,D/2]` | `[T,N1,D]` |
-| K | `[Bn,Bs,N2,D/2]` | `[Bn,Bs,N2,D]` |
-| V | `[Bn,Bs,N2,Dv/2]` | `[Bn,Bs,N2,Dv]` |
+Q 的 Python 打包 shape 为 `[T,N1,D/2]`，ACLNN 逻辑 shape 为 `[T,N1,D]`。K/V 的 shape 由 `layout_kv` 决定。
 
-例如 D128 的 Python 末维为 64，而非 128。Host 的 `dSize` 仍为 128；kernel 按字节搬运 payload 时再除 2，不能重复翻倍。E8M0 scale 每元素一字节，不作 FP4 shape 翻倍。
+| `layout_kv` | K 的 Python 打包 shape | V 的 Python 打包 shape | K 的 ACLNN 逻辑 shape | V 的 ACLNN 逻辑 shape |
+|---|---|---|---|---|
+| `PA_BBND` | `[Bn,Bs,N2,D/2]` | `[Bn,Bs,N2,Dv/2]` | `[Bn,Bs,N2,D]` | `[Bn,Bs,N2,Dv]` |
+| `PA_BNBD` | `[Bn,N2,Bs,D/2]` | `[Bn,N2,Bs,Dv/2]` | `[Bn,N2,Bs,D]` | `[Bn,N2,Bs,Dv]` |
+| `PA_NZ` | `[Bn,N2,D/64,Bs,32]` | `[Bn,N2,Dv/64,Bs,32]` | `[Bn,N2,D/64,Bs,64]` | `[Bn,N2,Dv/64,Bs,64]` |
 
-Q、K 沿 D 每 32 个值使用一个 scale；V 沿页内 token 每 32 个值使用一个 scale：
+`PA_NZ` 将 K/V 的 head dimension 切成每块 64 个逻辑 FP4 值，对应 Python 末轴的 32 个打包字节。以 D128 的 K 为例，`PA_BBND` 和 `PA_BNBD` 的 Python 末轴为 64，`PA_NZ` 在页内 token 轴前放置 2 个分块，末轴为 32。Host 的逻辑 `dSize` 均为 128。E8M0 scale 每元素一字节，Python 与 ACLNN 使用相同的 shape。
+
+Q、K 沿 D 每 32 个值使用一个 scale。V 沿页内 token 每 32 个值使用一个 scale。
 
 ```text
 Qscale DN: [T,N1,D/64,2]
 Qscale ND: [N2,T,G,D/64,2]
-Kscale:    [Bn,Bs,N2,D/64,2]
-Vscale:    [Bn,Bs/64,N2,Dv,2]
+```
 
-Kscale[p,u,h,d//64,(d%64)//32]
-Vscale[p,u//64,h,d,(u%64)//32]
+| `layout_kv` | `k_descale` shape | `v_descale` shape |
+|---|---|---|
+| `PA_BBND` | `[Bn,Bs,N2,D/64,2]` | `[Bn,Bs/64,N2,Dv,2]` |
+| `PA_BNBD` | `[Bn,N2,Bs,D/64,2]` | `[Bn,N2,Bs/64,Dv,2]` |
+| `PA_NZ` | `[Bn,N2,Bs/16,D/64,16,2]` | `[Bn,N2,Dv/16,Bs/64,16,2]` |
+
+设 `p` 为物理页编号，`u` 为页内 token 下标，`h` 为 KV 头下标，`d` 为该头内的通道下标。对应的 scale 下标如下。
+
+```text
+PA_BBND Kscale[p,u,h,d//64,(d%64)//32]
+PA_BBND Vscale[p,u//64,h,d,(u%64)//32]
+PA_BNBD Kscale[p,h,u,d//64,(d%64)//32]
+PA_BNBD Vscale[p,h,u//64,d,(u%64)//32]
+PA_NZ   Kscale[p,h,u//16,d//64,u%16,(d%64)//32]
+PA_NZ   Vscale[p,h,d//16,u//64,d%16,(u%64)//32]
 ```
 
 两种 Qscale 排布的等价转换如下；Q payload 保持 TND：
@@ -107,7 +121,7 @@ def quant_flash_attn_metadata(
 | `win_left / win_right` | `int` | 均为 `-1` |
 | `layout_q / layout_out` | `str` | 均显式传 `"TND"` |
 | `layout_q_descale` | `str` | `"TND"` 或 `"N2TGD"`，与实际 Qscale 一致 |
-| `layout_kv` | `str` | 显式传 `"PA_BBND"` |
+| `layout_kv` | `str` | 显式传 `"PA_BBND"`、`"PA_BNBD"` 或 `"PA_NZ"`，与主算子一致 |
 | `is_grad_enabled` | `bool` | `False` |
 
 Metadata 的公共检查接受的配置可能比 C4 kernel 广；生成成功不能替代 QFA 的设备支持检查。有效长度的内容和实际存储容量由调用者保持一致。
@@ -158,17 +172,17 @@ C 接口使用 `aclnnQuantFlashAttnGetWorkspaceSize` / `aclnnQuantFlashAttn`，�
 
 ### 4.2 输入 Tensor
 
-所有有效 Tensor 在同一 NPU，format 为 ND；布局名称 `PA_BBND` 不要求 ACL format 为 FRACTAL_NZ。
+所有有效 Tensor 位于同一 NPU，ACL format 使用 `ND`。`PA_NZ` 通过 `layout_kv` 和第 2 节的物理排布指定。
 
 | 参数 | Python dtype | Python shape | 用途 / 要求 |
 |---|---|---|---|
 | `q` | `float4_e2m1fn_x2` | `[T,N1,D/2]` | 已量化 Q |
-| `k` | `float4_e2m1fn_x2` | `[Bn,Bs,N2,D/2]` | 分页 K |
-| `v` | `float4_e2m1fn_x2` | `[Bn,Bs,N2,Dv/2]` | 分页 V |
+| `k` | `float4_e2m1fn_x2` | 见第 2 节 | 按 `layout_kv` 排布的分页 K |
+| `v` | `float4_e2m1fn_x2` | 见第 2 节 | 按 `layout_kv` 排布的分页 V |
 | `q_descale`（DN） | `float8_e8m0fnu` | `[T,N1,D/64,2]` | 与 `layout_q_descale="TND"` 配套 |
 | `q_descale`（ND） | `float8_e8m0fnu` | `[N2,T,G,D/64,2]` | 与 `layout_q_descale="N2TGD"` 配套；与上一项二选一 |
-| `k_descale` | `float8_e8m0fnu` | `[Bn,Bs,N2,D/64,2]` | D32 scale |
-| `v_descale` | `float8_e8m0fnu` | `[Bn,Bs/64,N2,Dv,2]` | token32 scale |
+| `k_descale` | `float8_e8m0fnu` | 见第 2 节 | 按 `layout_kv` 排布，每 32 个通道共用一个 scale |
+| `v_descale` | `float8_e8m0fnu` | 见第 2 节 | 按 `layout_kv` 排布，每 32 个页内 token 共用一个 scale |
 | `block_table` | `int32` | `[B,Pmax]` | 必须；逻辑页到物理页编号 |
 | `cu_seqlens_q` | `int32` | `[B+1]` | 必须；与 Metadata 相同 |
 | `seqused_q` | `int32` | `[B]` | 可选；与 Metadata 相同 |
@@ -190,7 +204,9 @@ Causal 模板取上三角为 1、其余为 0。C4 VF 实际根据 Q/KV 坐标计
 
 `mask_mode`、`win_left/right`、`max_seqlen_q/kv` 和四个 layout 参数应与 Metadata 一致。公共默认 `BSND` 不适用于 C4。
 
-建议先使用连续 Tensor。Q/Qscale 等由 OpDef 标记 AutoContiguous；K/V/Kscale/Vscale 使用 IgnoreContiguous，PA_BBND 允许物理页轴非连续，页内轴必须满足连续性检查。现有路径通过 K 的 view 状态取得四者 stride；不要据此假定任意独立的 scale view 均可用。Python 拒绝四者的零 stride。
+建议使用连续的 K/V/Kscale/Vscale。Q/Qscale 等由 OpDef 标记为 AutoContiguous，K/V/Kscale/Vscale 标记为 IgnoreContiguous。`PA_BBND` 只允许物理页轴（轴 0）非连续，`PA_BNBD` 和 `PA_NZ` 只允许物理页轴、KV 头轴（轴 0、1）非连续。其余轴须连续。
+
+传入非连续 KV 时，K 须作为 view 传入，以便 Host 读取这四个 Tensor 的 stride。Kscale/Vscale 的非连续页轴和头轴 stride 须为偶数，单位为 E8M0 元素。Python 拒绝这四个 Tensor 的零 stride。
 
 | 输出 | dtype | shape | 含义 |
 |---|---|---|---|
@@ -202,7 +218,7 @@ Causal 模板取上三角为 1、其余为 0。C4 VF 实际根据 Q/KV 坐标计
 
 ## 5. Python 调用示例
 
-以下函数接收已经正确编码、排布的输入；不以随机字节冒充量化。先安装与源码匹配的 OPP/Python 包并导入扩展。
+先安装与源码匹配的 OPP/Python 包并导入扩展。以下函数接收已量化并按 `layout_kv` 排布的 K/V 及其 scale。将现有 `PA_BBND` 缓存转为其他布局时，需同时重排 K/V 和两个 scale。可参考[测试中的布局转换](../tests/pytest/qfa_mxfp4_test/common/quant_flash_attn_golden.py)。
 
 ```python
 import torch
@@ -211,11 +227,13 @@ import cann_ops_transformer
 
 def c4a4_attention(q, k, v, q_descale, k_descale, v_descale,
                    block_table, cu_q, used_kv, max_q, max_kv,
-                   qscale_layout="N2TGD", causal=False, quant_schema=2):
-    n1, n2, d = q.shape[1], k.shape[2], q.shape[-1] * 2
+                   qscale_layout="N2TGD", causal=False, quant_schema=2,
+                   layout_kv="PA_BBND"):
+    kv_head_axis = {"PA_BBND": 2, "PA_BNBD": 1, "PA_NZ": 1}[layout_kv]
+    n1, n2, d = q.shape[1], k.shape[kv_head_axis], q.shape[-1] * 2
     mask_mode = 3 if causal else 0
     layouts = dict(layout_q="TND", layout_q_descale=qscale_layout,
-                   layout_kv="PA_BBND", layout_out="TND")
+                   layout_kv=layout_kv, layout_out="TND")
     metadata = torch.ops.cann_ops_transformer.quant_flash_attn_metadata(
         n1, n2, d, 5, cu_seqlens_q=cu_q, seqused_kv=used_kv,
         max_seqlen_q=max_q, max_seqlen_kv=max_kv,
@@ -247,14 +265,18 @@ def c4a4_attention(q, k, v, q_descale, k_descale, v_descale,
 | [公共 ACL 转换](../../../torch_extension/cann_ops_transformer/common/aclnn_common.h) | `CollectB4ShapeInfo`、shape/stride/offset 换算 |
 | [Host checker](../op_host/checkers/quant_checker.cpp) | 量化 dtype、shape、layout、D128/D256 |
 | [Mask checker](../op_host/checkers/mask_checker.cpp) | 模板 mask 和滑窗限制 |
-| [C4 tiling](../op_host/arch35/quant_flash_attn_tiling_mxfp4.cpp) | PA_BBND 限制、模板配置 |
+| [Metadata checker](../../quant_flash_attn_metadata/op_host/quant_flash_attn_metadata_check.h) | mode 5 的 KV 布局和长度参数约束 |
+| [C4 tiling](../op_host/arch35/quant_flash_attn_tiling_mxfp4.cpp) | 三种分页 KV 布局的模板配置 |
 | [Kernel 实现说明](c4a4-kernel-imp-softmax-fp32.md) | 流水、存储、同步、数值精度 |
 
 ## 7. 验证边界与修订
 
 历史基线 `f8034b9db` 有 436 次生产入口直调及 615 次公开 API 检查通过，随后测试曾暂停；这些历史计数不作为当前代码的验收结果。此前包含 CX Pscale、标准 LSE 补偿、默认双目标和 FD 残差补偿的版本在 200 机器完成小量公开 API 双参考验证（236/236 通过）。用户随后要求删除 FD 残差补偿，当前已恢复直接 `a_i/S` 乘加；该通过结论不适用于当前代码。直接乘加版本在初轮已有少量 BF16 输出超出原门限的记录，门限未放宽。历史范围与结果见[本轮精度验证报告](../../../operators/quant_flash_attn/cx_pscale_lse_small_20261111/README.md)。本轮使用显式 `1/sqrt(D)`；旧版额外大 scale 的 13/112 项失败未纳入本轮复验，不能声明已经修复。没有本轮性能结论。
 
+2026-11-19 在 Ascend 950 上以 PR2 合并版本完成 `debug` 与 `functional document` 精度矩阵。三种 `quant_schema` 和三种 KV 布局的组合各有 5,076 个用例，共 45,684 项全部通过。`PA_BNBD` 和 `PA_NZ` 的 Attention/LSE 在同源输入下各有 15,228 组与 `PA_BBND` 逐位一致。
+
 | 日期 | 修订者 | 内容 |
 |---|---|---|
 | 2026-11-11 | Codex | 按当前代码重写原 API 文档；收敛到 PA_BBND，明确已实现入口、打包 shape、保留参数和验证边界 |
 | 2026-11-11 | Codex | CX Pscale 恢复默认偏置 124，FA/FD LSE 补偿 `+3ln(2)-ln(1.5)`，以标准 logsumexp 为忽略量化误差后的目标 |
+| 2026-11-19 | Codex | 补充 `PA_BNBD` 和 `PA_NZ` 支持，更新 K/V 与 scale 的 shape、连续性要求和调用示例 |
