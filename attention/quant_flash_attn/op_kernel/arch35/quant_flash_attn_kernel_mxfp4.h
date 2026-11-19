@@ -65,7 +65,6 @@ public:
     static constexpr uint32_t PRELOAD_N = 20; // C2落后C1 20 轮
     static constexpr uint32_t GROUP_N = 16;  // 16个task的C2在L0C累积，然后执行一次V2
     static constexpr uint32_t DELAY_P_SCALE_N = 3; // P scale 在每个group的16个task的C1完成后，再过3轮，对这16个task进行一次pscale的update
-    static constexpr uint32_t PRELOAD_TASK_CACHE_SIZE = PRELOAD_N + 1; // 存储任务信息的数组大小
 
     static constexpr bool PAGE_ATTENTION = CubeBlockType::PAGE_ATTENTION; // 是否使用paged attn，true
     static constexpr bool FLASH_DECODE = VecFaBlockType::FLASH_DECODE; // 是否使用flash decoding
@@ -99,7 +98,6 @@ public:
     VecFaBlockType vecFaBlock_;
     VecFdBlockType vecFdBlock_;
 
-    uint32_t createdTaskCount_ = 0U; //当前核在当前 section 中已经创建的有效任务数。每次成功 CreateTask 后加一，用于任务编号和描述符环形槽定位；被跳过的任务不计数
 
     // tile调度的相关参数
     uint64_t actSeqLensKv_ = 0; // 当前 batch 实际参与计算的 KV token 数
@@ -345,48 +343,120 @@ public:
             GetFAMetaDataIndex(constInfo_.aicIdx, QFA_FIRST_FD_DATA_WORKSPACE_IDX_INDEX, sectionIdx));
     }
 
+    struct TaskCursor {
+        uint32_t batchHead;
+        uint32_t queryBlock;
+        uint32_t kvBlock;
+        uint64_t taskCount = 0;
+    };
+
+    __aicore__ inline bool ReadNextTask(TaskCursor& cursor, Mxfp4RunInfo& task)
+    {
+        while (ShouldDispatchTask(cursor.batchHead, cursor.queryBlock, cursor.kvBlock)) {
+            const auto mode = GetTaskDealMode(cursor.batchHead, cursor.queryBlock, cursor.kvBlock);
+            if (mode == TASK_DEAL_MODE::CREATE_TASK) {
+                task = Mxfp4RunInfo {};
+                CalcParams(cursor.taskCount++, cursor.batchHead, cursor.queryBlock, cursor.kvBlock, task);
+                UpdateAxisInfo(mode, cursor.batchHead, cursor.queryBlock, cursor.kvBlock);
+                return true;
+            }
+            UpdateAxisInfo(mode, cursor.batchHead, cursor.queryBlock, cursor.kvBlock);
+        }
+        return false;
+    }
+
+    __aicore__ inline void RunCubePipeline(TaskCursor& cursor)
+    {
+        // One extra descriptor lets C1 be prepared without copying or overwriting the oldest C2.
+        constexpr uint32_t CACHE_SIZE = PRELOAD_N + 1;
+        Mxfp4RunInfo tasks[CACHE_SIZE];
+        uint32_t pending = 0;
+        for (; pending < PRELOAD_N && ReadNextTask(cursor, tasks[pending]); ++pending) {
+            cubeBlock_.ComputeBmm1(tasks[pending]);
+        }
+
+        uint32_t oldest = 0;
+        if (pending == PRELOAD_N) {
+            uint32_t next = PRELOAD_N;
+            while (ReadNextTask(cursor, tasks[next])) {
+                cubeBlock_.ComputeBmm2(tasks[oldest]);
+                cubeBlock_.ComputeBmm1(tasks[next]);
+                next = oldest;
+                oldest = oldest + 1 == CACHE_SIZE ? 0 : oldest + 1;
+            }
+        }
+
+        for (uint32_t retired = 0; retired < pending; ++retired) {
+            cubeBlock_.ComputeBmm2(tasks[oldest]);
+            oldest = oldest + 1 == CACHE_SIZE ? 0 : oldest + 1;
+        }
+    }
+
+    __aicore__ inline void RunVectorPipeline(TaskCursor& cursor)
+    {
+        constexpr uint64_t NO_EVENT = ~uint64_t{0};
+        Mxfp4RunInfo task;
+        bool hasTask = ReadNextTask(cursor, task);
+        if (!hasTask) {
+            return;
+        }
+
+        // A group can end after one task. At most PRELOAD_N tails are live, and
+        // V2 retires the oldest before V1 can enqueue a new tail at the same tick.
+        Mxfp4RunInfo tails[PRELOAD_N];
+        uint32_t issued = 0;
+        uint32_t scaled = 0;
+        uint32_t retired = 0;
+        uint64_t tick = 0;
+        while (hasTask || retired != issued) {
+            if (retired != issued && tails[retired % PRELOAD_N].loop + PRELOAD_N == tick) {
+                vecFaBlock_.ComputeVec2(tails[retired % PRELOAD_N]);
+                ++retired;
+            }
+            if (scaled != issued && tails[scaled % PRELOAD_N].loop + DELAY_P_SCALE_N == tick) {
+                vecFaBlock_.UpdatePScale(tails[scaled % PRELOAD_N]);
+                ++scaled;
+            }
+
+            const uint64_t nextV2 = retired == issued ? NO_EVENT : tails[retired % PRELOAD_N].loop + PRELOAD_N;
+            const uint64_t nextScale = scaled == issued ? NO_EVENT :
+                tails[scaled % PRELOAD_N].loop + DELAY_P_SCALE_N;
+            const uint64_t nextEvent = nextV2 < nextScale ? nextV2 : nextScale;
+            if (!hasTask) {
+                tick = nextEvent;
+                continue;
+            }
+
+            // Stop at the next due event or after discovering a new group tail.
+            do {
+                vecFaBlock_.ComputeVec1(task);
+                const bool groupLast = task.isGroupLast;
+                if (unlikely(groupLast)) {
+                    tails[issued % PRELOAD_N] = task;
+                    ++issued;
+                }
+                ++tick;
+                hasTask = ReadNextTask(cursor, task);
+                if (unlikely(groupLast)) {
+                    break;
+                }
+            } while (hasTask && tick < nextEvent);
+        }
+    }
+
     __aicore__ inline void FlashAttention(uint32_t sectionIdx)
     {
         GetFASectionInfo(sectionIdx);
-        Mxfp4RunInfo taskRunInfo[PRELOAD_TASK_CACHE_SIZE] {};
-        uint32_t bN2Cur = bN2Start_;
-        uint32_t gS1Cur = gS1OStart_;
-        uint32_t s2Cur = s2OStart_;
-        prevBN2Idx_ = bN2Cur;
-        prevGS1Idx_ = gS1Cur;
+        prevBN2Idx_ = bN2Start_;
+        prevGS1Idx_ = gS1OStart_;
         headS2Split_ = false;
         tailS2Split_ = false;
         mloop_ = 0;
-        createdTaskCount_ = 0;
-        uint64_t pipelineTick = 0;
-        uint32_t pendingTasks = 0;
-        while (pendingTasks != 0 || ShouldDispatchTask(bN2Cur, gS1Cur, s2Cur)) {
-            if (ShouldDispatchTask(bN2Cur, gS1Cur, s2Cur)) {
-                const TASK_DEAL_MODE taskDealMode = GetTaskDealMode(bN2Cur, gS1Cur, s2Cur);
-                if (taskDealMode != TASK_DEAL_MODE::CREATE_TASK) {
-                    UpdateAxisInfo(taskDealMode, bN2Cur, gS1Cur, s2Cur);
-                    continue;
-                }
-                Mxfp4RunInfo& currentTask = taskRunInfo[pipelineTick % PRELOAD_TASK_CACHE_SIZE];
-                ASSERT(!currentTask.isValid);
-                currentTask = Mxfp4RunInfo {};
-                CalcParams(createdTaskCount_, bN2Cur, gS1Cur, s2Cur, currentTask);
-                currentTask.isValid = true;
-                ++createdTaskCount_;
-                ++pendingTasks;
-                UpdateAxisInfo(taskDealMode, bN2Cur, gS1Cur, s2Cur);
-            }
-            if (pendingTasks != 0) {
-                const bool retiresTask = pipelineTick >= PRELOAD_N &&
-                    taskRunInfo[(pipelineTick - PRELOAD_N) % PRELOAD_TASK_CACHE_SIZE].isValid;
-                ExecuteTask(pipelineTick, taskRunInfo);
-                ++pipelineTick;
-                if (retiresTask) {
-                    --pendingTasks;
-                }
-            }
-            // Keep issuing across Q boundaries. Only the end of this section drains
-            // the pipeline; skipped coordinates do not consume task or P slots.
+        TaskCursor cursor {bN2Start_, gS1OStart_, s2OStart_};
+        if ASCEND_IS_AIC {
+            RunCubePipeline(cursor);
+        } else {
+            RunVectorPipeline(cursor);
         }
     }
 
@@ -468,44 +538,6 @@ public:
                 // 当前任务属于最后一个S1G, 并且最后一个S1G的S2被切分了
                 info.isS2SplitCore = true;
                 info.faTmpOutWsPos = headS2Split_ ? (info.faTmpOutWsPos + 1) : info.faTmpOutWsPos;
-            }
-        }
-    }
-
-    __aicore__ inline void ExecuteTask(uint64_t loop, Mxfp4RunInfo taskRunInfo[PRELOAD_TASK_CACHE_SIZE])
-    {
-        Mxfp4RunInfo& runInfo0 = taskRunInfo[loop % PRELOAD_TASK_CACHE_SIZE];                  // 本轮任务
-
-        if (loop >= PRELOAD_N) { // 可以执行C2，然后在一组C2执行完成后，执行V2
-            Mxfp4RunInfo& runInfoNegN = taskRunInfo[(loop - PRELOAD_N) % PRELOAD_TASK_CACHE_SIZE];
-            if (runInfoNegN.isValid) {
-                if ASCEND_IS_AIC {
-                    cubeBlock_.ComputeBmm2(runInfoNegN); // 子循环和同步都在cube内部处理
-                } else {
-                   if (unlikely(runInfoNegN.isGroupLast)) { // 小组最后一个C2跑完，进行一次V2
-                        vecFaBlock_.ComputeVec2(runInfoNegN);
-                    }
-                }
-                // 对 Cube 来说，C2完成，这个任务就结束了
-                // 对 vector 来说，如果不是一个组末的task，不需要执行V2，也结束了，只有最后一个V2需要执行
-                runInfoNegN.isValid = false;
-            }
-        }
-
-        if (loop >= DELAY_P_SCALE_N) { // 可以一组执行完V1的任务，进行一次P scale update
-            Mxfp4RunInfo& runInfoNegScaleN = taskRunInfo[(loop - DELAY_P_SCALE_N) % PRELOAD_TASK_CACHE_SIZE];
-            if (runInfoNegScaleN.isValid && unlikely(runInfoNegScaleN.isGroupLast)) {
-                if ASCEND_IS_AIV {
-                    vecFaBlock_.UpdatePScale(runInfoNegScaleN);
-                }
-            }
-        }
-
-        if (runInfo0.isValid) {
-            if ASCEND_IS_AIC {
-                cubeBlock_.ComputeBmm1(runInfo0); // 子循环和同步都在内部处理
-            } else {
-                vecFaBlock_.ComputeVec1(runInfo0); // 子循环和同步都在内部处理
             }
         }
     }
