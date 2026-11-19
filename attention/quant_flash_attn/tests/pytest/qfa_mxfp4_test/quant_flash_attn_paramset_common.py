@@ -17,6 +17,8 @@ import math
 
 MODELS = [('qwen36_35b', 256, 16, 2), ('qwen38_27b', 256, 24, 4), ('qwen3_30b', 128, 32, 4)]
 SCOPES = ('full', 'small')
+DEFAULT_KV_LAYOUT = 'PA_BBND'
+KV_LAYOUTS = (DEFAULT_KV_LAYOUT, 'PA_BNBD', 'PA_NZ')
 P_QUANT_SCHEMES = ('ocp', 'cx_legacy', 'cx_delta')
 PARAM_NAMES = [
     'B', 'N_q', 'N_kv', 'D', 'cu_seqlens_q', 'cu_seqlens_kv',
@@ -29,7 +31,7 @@ PARAM_NAMES = [
 TEST_PARAMS_DEFAULTS = {
     'cu_seqlens_kv': [None], 'seqused_q': [None],
     'max_seqlen_q': [-1], 'max_seqlen_kv': [-1],
-    'enable_pa': [True], 'kv_cache_layout': ['PA_BBND'], 'input_layout': ['TND'],
+    'enable_pa': [True], 'kv_cache_layout': [DEFAULT_KV_LAYOUT], 'input_layout': ['TND'],
     'p_scale': [None], 'softmax_scale': [None], 'enable_lse': [True],
     'enable_v_tail': [False], 'quant_mode': [5], 'is_contiguous': [True],
     'seed': [421], 'model': ['custom'], 'tp': [1], 'quant_schema': [None], 'p_quant_scheme': [None],
@@ -77,7 +79,7 @@ def normalize_params(params):
         raise ValueError('reference_backend must be global or kernel')
     if result['N_q'] <= 0 or result['N_kv'] <= 0 or result['N_q'] % result['N_kv']:
         raise ValueError('Q heads must be a positive multiple of KV heads')
-    if not result['enable_pa'] or result['kv_cache_layout'] not in ('PA_BBND', 'PA_BNBD', 'PA_NZ') \
+    if not result['enable_pa'] or result['kv_cache_layout'] not in KV_LAYOUTS \
             or result['input_layout'] != 'TND':
         raise ValueError('C4 requires TND input/output and PA_BBND, PA_BNBD or PA_NZ KV')
     if result['cu_seqlens_kv'] is not None:
@@ -136,23 +138,20 @@ def model_configs(scope):
             for tp in (1, 2, 4) if scope == 'full' or (index == 0 and tp == 2)]
 
 
-def build_paramset(scope, scenarios, lse_modes=(True,), kv_layouts=('PA_BBND',)):
+def build_paramset(scope, scenarios, lse_modes=(True,)):
     result = {}
     for model, dimension, heads, kv_heads, tp in model_configs(scope):
         for scenario in scenarios:
             stored, kv = scenario['qlens'], scenario['klens']
             cu = [0] + list(itertools.accumulate(stored))
-            for qlayout, mask, lse, kv_layout in itertools.product(('TND', 'N2TGD'), (0, 3), lse_modes,
-                                                                   kv_layouts):
+            for qlayout, mask, lse in itertools.product(('TND', 'N2TGD'), (0, 3), lse_modes):
                 name = f"{model}_TP{tp}_{scenario['name']}_{qlayout}_M{mask}_LSE{int(lse)}"
-                if kv_layout != 'PA_BBND' or kv_layouts != ('PA_BBND',):
-                    name = f'{name}_{kv_layout}'
                 used = scenario.get('used_q', stored if qlayout == 'TND' else None)
                 result[name] = {
                     'B': [len(stored)], 'N_q': [heads], 'N_kv': [kv_heads], 'D': [dimension],
                     'cu_seqlens_q': [cu], 'seqused_q': [used], 'seqused_kv': [kv],
                     'max_seqlen_q': [max(stored)], 'max_seqlen_kv': [max(kv)],
-                    'block_size': [scenario['page']], 'mask_mode': [mask], 'kv_cache_layout': [kv_layout],
+                    'block_size': [scenario['page']], 'mask_mode': [mask],
                     'q_scale_layout': [qlayout], 'enable_lse': [lse], 'model': [model], 'tp': [tp],
                 }
     return result

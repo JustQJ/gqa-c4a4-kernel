@@ -24,6 +24,7 @@ import statistics
 import time
 import traceback
 
+from ..quant_flash_attn_paramset_common import DEFAULT_KV_LAYOUT
 from ..quant_flash_attn_paramset_perf_rdv import case_fingerprint, sequence_lengths
 from .perf_inputs import generate_inputs, prepare_inputs
 
@@ -48,7 +49,8 @@ def prepare_call(data, case, backend):
     common = dict(cu_seqlens_q=data['cu'], seqused_q=data['used_q'], seqused_kv=data['used_kv'],
                   max_seqlen_q=case.get('max_seqlen_q', q), max_seqlen_kv=case.get('max_seqlen_kv', kv),
                   mask_mode=case['mask_mode'], layout_q='TND',
-                  layout_q_descale=case['q_scale_layout'], layout_kv='PA_BBND', layout_out='TND')
+                  layout_q_descale=case['q_scale_layout'],
+                  layout_kv=case.get('layout_kv', DEFAULT_KV_LAYOUT), layout_out='TND')
     metadata = ops.quant_flash_attn_metadata(h, hk, d, mode, **common)
     pscale = torch.tensor([case.get('c8_p_scale', 448.)], dtype=torch.float32, device=data['q'].device) if mode == 1 else None
     def call():
@@ -169,7 +171,9 @@ def execute_performance(case, options):
                   environment=provenance, measurement_scope='attention_only',
                   metric={'graph':'graph_replay_us', 'eager':'eager_event_us', 'msprof':'msprof_pending'}[options['mode']],
                   started_unix=time.time(), status='running', backends={})
-    path = Path(options['output_dir'])/f"{case['name']}_schema{case['quant_schema']}.json"
+    layout = case.get('layout_kv', DEFAULT_KV_LAYOUT)
+    layout_suffix = '' if layout == DEFAULT_KV_LAYOUT else f'_{layout}'
+    path = Path(options['output_dir'])/f"{case['name']}_schema{case['quant_schema']}{layout_suffix}.json"
     write_record(path, record)
     try:
         source = generate_inputs(case)
@@ -183,7 +187,8 @@ def execute_performance(case, options):
             gc.collect()
             torch.npu.empty_cache()
             after = torch.npu.memory_allocated()
-            result.update(allocated_before_bytes=before, allocated_after_release_bytes=after)
+            result.update(layout_kv=DEFAULT_KV_LAYOUT if backend == 'bf16' else layout,
+                          allocated_before_bytes=before, allocated_after_release_bytes=after)
             record['backends'][backend] = result
             write_record(path, record)
             value = f"{result['median_us']:.3f} us" if 'median_us' in result else 'awaiting msprof export'

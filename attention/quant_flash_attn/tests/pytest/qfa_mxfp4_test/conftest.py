@@ -13,7 +13,7 @@
 """Accuracy options and dependency-free case collection."""
 import os
 import pytest
-from .quant_flash_attn_paramset_common import P_QUANT_SCHEMES, resolve_quantization
+from .quant_flash_attn_paramset_common import DEFAULT_KV_LAYOUT, KV_LAYOUTS, P_QUANT_SCHEMES, resolve_quantization
 
 _VALID_MODES = {'gen', 'cpu', 'npu', 'compare'}
 # This is a runner module, not a pytest entry. Keep collection free of torch.
@@ -31,6 +31,8 @@ def pytest_addoption(parser):
     group = parser.getgroup('qfa_mxfp4 accuracy')
     group.addoption('--golden-mode', default='all', help='all or comma-separated gen,cpu,npu,compare')
     group.addoption('--cache-dir', default=None, help='Input and reference .pt cache directory')
+    group.addoption('--kv-layout', '--kv_layout', choices=KV_LAYOUTS, default=DEFAULT_KV_LAYOUT,
+                    help='Paged KV layout used by the QFA kernel under test')
     group.addoption('--scope', choices=('full', 'small'), default='full')
     group.addoption('--accuracy-case-set', choices=('document', 'bench16k', 'qwen3_8b'), default='document',
                     help='Functional accuracy cases: document matrix, bench16k or Qwen3-8B TP1')
@@ -77,7 +79,7 @@ def pytest_configure(config):
 
 def pytest_generate_tests(metafunc):
     if 'perf_params' in metafunc.fixturenames:
-        from .quant_flash_attn_paramset_perf_rdv import get_cases, shard_cases
+        from .quant_flash_attn_paramset_perf_rdv import get_cases, shard_cases, with_kv_layout
         config = metafunc.config
         try:
             schema, _ = resolve_quantization(config.getoption('--quant-schema'), config.getoption('--p-quant-scheme'))
@@ -86,7 +88,9 @@ def pytest_generate_tests(metafunc):
                                 config.getoption('--perf-shard-index'), config.getoption('--perf-shard-count'))
         except (ValueError, OSError) as error:
             raise pytest.UsageError(str(error)) from error
-        metafunc.parametrize('perf_params', [pytest.param(dict(case, quant_schema=schema), id=case['name'],
+        layout = config.getoption('--kv-layout')
+        cases = [with_kv_layout(dict(case, quant_schema=schema), layout) for case in cases]
+        metafunc.parametrize('perf_params', [pytest.param(case, id=case['name'],
             marks=pytest.mark.skip(reason=case.get('skip_reason') or 'Requires --run-perf')
                 if case.get('skip_reason') or not config.getoption('--run-perf') else ())
                                              for case in cases])
@@ -106,6 +110,7 @@ def pytest_generate_tests(metafunc):
     except (ValueError, OSError) as error:
         raise pytest.UsageError(str(error)) from error
     cases = [dict(case, quant_schema=schema, p_quant_scheme=scheme,
+                  kv_cache_layout=metafunc.config.getoption('--kv-layout'),
                   reference_backend=metafunc.config.getoption('--reference-backend'))
              for case in selected]
     skipped = metafunc.module.paramset.SKIP_CASES

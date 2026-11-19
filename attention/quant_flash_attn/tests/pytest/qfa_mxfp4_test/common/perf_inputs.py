@@ -13,7 +13,7 @@
 """One CPU packed input, materialized for only one NPU backend at a time."""
 import hashlib
 from ..quant_flash_attn_paramset_perf_rdv import sequence_lengths
-from ..quant_flash_attn_paramset_common import paged_kv_pool_size
+from ..quant_flash_attn_paramset_common import DEFAULT_KV_LAYOUT, paged_kv_pool_size
 
 
 def generate_inputs(case):
@@ -41,6 +41,7 @@ def generate_inputs(case):
 def prepare_inputs(source, case, backend, device):
     import torch
     from .perf_convert import convert_payload
+    from .quant_flash_attn_golden import convert_paged_kv
     b, q, kv, d, h, hk, page = (case[k] for k in ('B', 'Q', 'KV', 'D', 'N_q', 'N_kv', 'page'))
     cu, used_q, kv_lengths = sequence_lengths(case)
     tensors = []
@@ -68,4 +69,7 @@ def prepare_inputs(source, case, backend, device):
             ('qs', qshape, 123), ('ks', (pages, page, hk, d//64, 2), 123),
             ('vs', (pages, page//64, hk, d, 2), 125)):
             result[name] = torch.full(shape, code, dtype=torch.uint8, device=device).view(torch.float8_e8m0fnu)
+        layout = case.get('layout_kv', DEFAULT_KV_LAYOUT)
+        result['k'], result['v'], result['ks'], result['vs'] = convert_paged_kv(
+            result['k'], result['v'], result['ks'], result['vs'], layout)
     return result

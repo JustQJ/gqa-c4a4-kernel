@@ -193,14 +193,16 @@ class Bench16kContractTests(unittest.TestCase):
         class Parser:
             def getgroup(self, name):
                 return self
-            def addoption(self, name, **kwargs):
-                options[name] = kwargs.get('default', False)
-                choices[name] = kwargs.get('choices')
+            def addoption(self, *names, **kwargs):
+                for name in names:
+                    options[name] = kwargs.get('default', False)
+                    choices[name] = kwargs.get('choices')
         conftest.pytest_addoption(Parser())
         self.assertNotIn('--fia-shapes', options)
         self.assertEqual(choices['--accuracy-case-set'], ('document', 'bench16k', 'qwen3_8b'))
+        self.assertEqual(options['--kv-layout'], 'PA_BBND')
         options.update({'--scope': 'small', '--accuracy-case-set': 'bench16k', '--perf-case-set': 'bench16k',
-                        '--perf-kind': 'mixed', '--run-perf': True, '--quant-schema': 0})
+                        '--perf-kind': 'mixed', '--run-perf': True, '--quant-schema': 0, '--kv-layout': 'PA_NZ'})
         config = SimpleNamespace(getoption=lambda key: options[key])
         def collect(fixtures, paramset):
             result = {}
@@ -210,8 +212,13 @@ class Bench16kContractTests(unittest.TestCase):
         functional = collect(['params'], accuracy)
         self.assertEqual(len(functional), 12)
         self.assertTrue(all(case.value['quant_schema'] == 0 and case.value['p_quant_scheme'] == 'ocp' for case in functional))
-        self.assertEqual(len(collect(['perf_params'], None)), 2)
-        self.assertEqual(len(collect(['params'], debug)), 24)
+        self.assertTrue(all(case.value['kv_cache_layout'] == 'PA_NZ' for case in functional))
+        perf = collect(['perf_params'], None)
+        debug_cases = collect(['params'], debug)
+        self.assertEqual(len(perf), 2)
+        self.assertEqual(len(debug_cases), 24)
+        self.assertTrue(all(case.value['layout_kv'] == 'PA_NZ' for case in perf))
+        self.assertTrue(all(case.value['kv_cache_layout'] == 'PA_NZ' for case in debug_cases))
         self.assertEqual(conftest.perf_options(SimpleNamespace(config=config))['case_set'], 'bench16k')
         options.update({'--accuracy-case-set': 'qwen3_8b', '--perf-case-set': 'qwen3_8b'})
         functional = collect(['params'], accuracy)

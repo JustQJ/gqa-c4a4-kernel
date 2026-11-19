@@ -7,10 +7,10 @@
 
     [done] PA_BBND
 
-    [] PA_NZ
+    [done] PA_NZ
 
 
-    [] PA_BNBD
+    [done] PA_BNBD
 
 2. 针对v的静态量化，v scale是定值，可以只要一小块固定数据，不需要和k scale一样进行分页存储
 

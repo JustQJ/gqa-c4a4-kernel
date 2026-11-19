@@ -12,7 +12,7 @@
 - 新布局与 PA_BBND 的 Attention/LSE relative-L2 误差均不超过 1%；
 - 增加 C4A4 与 C8A8 在相同数值输入、相同布局下的精度对比。
 
-详细实测结果和逐案例数据存放在 [`pa-NZ-BNBD-test`](./pa-NZ-BNBD-test/) 目录。
+PR2 原始硬件验证摘要见第 10 节。当前测试入口与复用 BBND 缓存的方式见第 6 节。
 
 ## 2. 修改前的布局支持现状
 
@@ -127,48 +127,9 @@ physical_page * page_byte_stride
 
 K scale NZ 每次复制若干完整的 16-token 分形；V scale NZ 以 `Dv/16` 为 `blockCount`，每个 64-token 组对应一个 32B scale 分形。
 
-### 5.3 测试与报告
+### 5.3 测试入口
 
-#### `tests/pytest/qfa_mxfp4_test/quant_flash_attn_paramset_common.py`
-
-- 参数校验开放三种 PA 布局；
-- `build_paramset` 新增可选 `kv_layouts`，默认值仍为 `('PA_BBND',)`，所以原有用例名称、数量和执行方式不变。
-
-#### `tests/pytest/qfa_mxfp4_test/common/quant_flash_attn_golden.py`
-
-- 新增 `convert_bbnd_tensor`，仅在 NPU 输入准备阶段转换 payload/K scale/V scale；
-- CPU golden 和 Triton golden 始终读取原始 BBND 数据，避免参考结果被转换逻辑污染；
-- `layout_kv` 改为从当前用例参数透传。
-
-#### `tests/pytest/qfa_mxfp4_test/common/mxfp4_schedule.py`
-
-- metadata 的 `layout_kv` 从当前用例参数透传；
-- 调度模型本身不变。
-
-#### 新增 `quant_flash_attn_paramset_pa_layout.py`
-
-- 直接复用 BBND debug 的三个场景、模型、Q scale、mask、LSE 和 page 配置；
-- small 范围：BNBD 24 项 + NZ 24 项，共 48 项；原 BBND small 24 项用于回归和逐案例对拍。
-
-#### 新增 `test_quant_flash_attn_pa_layout.py`
-
-- 复用原 `test_runner.execute_test`、CPU kernel reference、输出校验和精度阈值；
-- 不创建另一套 golden 或放宽阈值。
-
-#### 新增 `common/pa_layout_c8_compare.py`
-
-- 4 个 C4/C8 对拍案例：D128/D256 × PA_BNBD/PA_NZ；
-- 将同一 FP4 E2M1 payload 精确展开成 FP8 E4M3，Q/K/V 数值完全一致；
-- 两种后端使用相同 scale、页表、mask、长度和物理布局；
-- 输出 C4-vs-BBND、C4-vs-C8、C4/C8-vs-quantized-CPU、C4/C8-vs-FP64-unquantized-P 指标；
-- 保存逐案例 JSON、原始输出 `.pt` 和汇总 `summary.json`。
-
-#### 新增 `common/pa_layout_report.py`
-
-- 读取已完成的 BBND/BNBD/NZ 测试缓存；
-- 逐案例验证原始输入张量完全一致；
-- 计算 Attention/LSE 的 relative-L2、RMSE、最大绝对误差和 cosine；
-- 检查原 golden 阈值与 1% BBND parity 门限，输出 JSON 和 Markdown 报告。
+debug、functional、performance 和 profiler 入口通过 `--kv-layout` 选择布局。输入以 BBND 生成，CPU 和 Triton Golden 使用 BBND 输入及调度，QFA kernel 使用转换后的 K/V、scale 及目标布局的 Metadata。性能测试在计时前转换 C4/C8 输入，BF16 FIA 基线使用 BBND。
 
 ## 6. 构建与测试方法
 
@@ -184,34 +145,30 @@ K scale NZ 每次复制若干完整的 16-token 分形；V scale NZ 以 `Dv/16` 
 
 ### 6.2 精度测试
 
-在 `attention/quant_flash_attn/tests/pytest` 下执行：
+在 `attention/quant_flash_attn/tests/pytest` 下执行。先生成 BBND 输入和 CPU/Triton Golden，再使用同一缓存验证其他布局。不同 schema 使用各自的缓存目录：
 
 ```bash
-python3 -m pytest \
-  qfa_mxfp4_test/test_quant_flash_attn_debug.py \
-  qfa_mxfp4_test/test_quant_flash_attn_pa_layout.py \
-  --scope small --quant-schema 2 --reference-backend kernel \
-  --device-id 7 --package cann_ops_transformer_c4a4 \
-  --cache-dir /home/k831/work/results/schema2/cache -q -s
+for layout in PA_BBND PA_BNBD PA_NZ; do
+  stages=npu,compare
+  if [ "$layout" = PA_BBND ]; then stages=all; fi
+  python3 -m pytest -q \
+    qfa_mxfp4_test/test_quant_flash_attn_debug.py \
+    qfa_mxfp4_test/test_quant_flash_attn_func_rdv.py \
+    --scope small --quant-schema 2 --device-id 7 --triton-reference \
+    --kv-layout "$layout" --golden-mode "$stages" --cache-dir /tmp/qfa-schema2 || break
+done
 ```
 
-`quant_schema` 分别执行 0、1、2。每次包含原 BBND 24 项回归和 BNBD/NZ 48 项精度测试。
+### 6.3 性能与采集
 
-生成 BBND parity 报告：
-
-```bash
-python3 -m qfa_mxfp4_test.common.pa_layout_report \
-  --scope small --quant-schema 2 --package cann_ops_transformer_c4a4 \
-  --cache-dir /home/k831/work/results/schema2/cache \
-  --output-dir /home/k831/work/results/schema2/report
-```
-
-执行 C4/C8 对拍：
+性能用例和 profiler 的命名或手工用例均接受 `--kv-layout`：
 
 ```bash
-python3 -m qfa_mxfp4_test.common.pa_layout_c8_compare \
-  --device-id 7 --package cann_ops_transformer_c4a4 \
-  --output-dir /home/k831/work/results/c8-comparison
+python3 -m pytest -q qfa_mxfp4_test/test_quant_flash_attn_perf_rdv.py \
+  --run-perf --perf-case-set qwen3_8b --perf-backends c4,c8 \
+  --kv-layout PA_BNBD --device-id 7 --perf-output /tmp/qfa-perf-bnbd
+python3 -m qfa_mxfp4_test.prof_quant_flash_attn --case decode_3 \
+  --kv-layout PA_NZ --device 7 --output /tmp/qfa-prof-nz
 ```
 
 ## 7. 精度判据
@@ -222,7 +179,7 @@ python3 -m qfa_mxfp4_test.common.pa_layout_c8_compare \
 - FP32 LSE：`atol=2.5e-5`、`rtol=0.005`；
 - isclose 比例、最大相对误差、shape、有限值和空行语义均由原 runner 校验。
 
-新增布局与 BBND 的同输入直接对拍判据：
+PR2 原始测试另做了同输入的布局对拍，第 10 节结果使用以下门限：
 
 ```text
 Attention relative-L2 <= 0.01
@@ -252,7 +209,7 @@ C4/C8 对拍不将两者强制视为逐位一致，因为它们使用不同的 P
 - 未修改算子 API 参数，只开放已有 `layout_kv` 字符串的 C4 使用范围；
 - 原 BBND 测试默认参数和用例数量保持不变。
 
-## 10. 本次实测结果
+## 10. PR2 原始实测结果
 
 测试环境为 Ascend 950PR、CANN 9.2.1、Python 3.12.16、PyTorch 2.10.0+cpu、torch_npu 2.10.0.post7。设备预检后选择当时无运行进程且 Health=OK 的 NPU 7。
 
@@ -285,5 +242,3 @@ C4/C8 对拍不将两者强制视为逐位一致，因为它们使用不同的 P
 | D256 / BNBD、NZ | 0.0963764 | 0.00118005 | 0.0928129 | 0.0251967 |
 
 C4 与 C8 的 Attention 差距来自 P 量化格式与路径差异；两种布局之间的精度完全一致。C8 与 FP64 未量化 P 参考更接近，符合其更宽 P 数据格式的预期。C4 与 BBND 的 1% 门限独立于上述 C4/C8 格式差异，实测为 0。
-
-详细数据见 [`pa-NZ-BNBD-test`](./pa-NZ-BNBD-test/) 中的 JUnit、pytest 日志、逐案例 parity JSON/Markdown、C4/C8 JSON/Markdown 和环境清单。

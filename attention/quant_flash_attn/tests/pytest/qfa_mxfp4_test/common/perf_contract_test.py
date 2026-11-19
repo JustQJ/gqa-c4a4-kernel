@@ -14,7 +14,7 @@
 import copy
 import unittest
 
-from ..quant_flash_attn_paramset_perf_rdv import get_cases, shard_cases, case_fingerprint, sequence_lengths
+from ..quant_flash_attn_paramset_perf_rdv import get_cases, shard_cases, case_fingerprint, sequence_lengths, with_kv_layout
 from .perf_report import summarize
 from .perf_profiler import attribute_tasks
 
@@ -50,6 +50,16 @@ class PerformanceContractTests(unittest.TestCase):
         case = get_cases('small')[0]
         self.assertNotEqual(case_fingerprint(case), case_fingerprint(dict(case, quant_schema=0)))
 
+    def test_kv_layout_changes_fingerprint_and_preserves_default(self):
+        for case in (get_cases('small')[0], get_cases(case_set='bench16k')[0]):
+            default = case_fingerprint(case)
+            self.assertEqual(case_fingerprint(with_kv_layout(case, 'PA_BBND')), default)
+            for layout in ('PA_BNBD', 'PA_NZ'):
+                selected = with_kv_layout(case, layout)
+                self.assertEqual(selected['layout_kv'], layout)
+                self.assertNotEqual(case_fingerprint(selected), default)
+                self.assertEqual(sequence_lengths(selected), sequence_lengths(case))
+
     def record(self):
         return dict(case=get_cases('small')[0], options=dict(device_id=6, warmup=3, rounds=5, repeats=20),
             environment=dict(opapi=[]), metric='graph_replay_us', measurement_scope='attention_only', status='passed',
@@ -60,6 +70,13 @@ class PerformanceContractTests(unittest.TestCase):
         self.assertEqual(report['complete'], 1)
         row = report['rows'][0]
         self.assertEqual((row['c8_over_c4'],row['bf16_over_c4'],row['bf16_over_c8']), (2.,3.,1.5))
+
+    def test_report_keeps_the_measured_kv_layout(self):
+        first, second = self.record(), self.record()
+        second['case'] = with_kv_layout(get_cases('small')[1], 'PA_NZ')
+        self.assertEqual(summarize([second])['rows'][0]['layout_kv'], 'PA_NZ')
+        with self.assertRaisesRegex(ValueError, 'Mixed timing contracts'):
+            summarize([first, second])
 
     def test_incomplete_not_counted(self):
         record = self.record()

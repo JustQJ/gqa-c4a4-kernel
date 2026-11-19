@@ -17,10 +17,11 @@ class ProfilingContractTests(unittest.TestCase):
     def test_worker_preserves_case_and_excludes_launcher(self):
         args = arguments(['--device', '7', '--package', 'custom_qfa', '--metrics', 'Default',
                           '--q-lens', '1', '3', '--kv-lens', '129', '513', '--page', '512',
-                          '--layout', 'TND', '--lse', '--include-metadata', '--post-range-check'])
+                          '--layout', 'TND', '--kv-layout', 'PA_BNBD', '--lse',
+                          '--include-metadata', '--post-range-check'])
         command = build_command(args)
         worker = arguments(command[command.index('--worker'):])
-        for key in ('device', 'package', 'q_lens', 'kv_lens', 'page', 'layout', 'lse',
+        for key in ('device', 'package', 'q_lens', 'kv_lens', 'page', 'layout', 'kv_layout', 'lse',
                     'include_metadata', 'post_range_check', 'warmup', 'repeat', 'quant_schema'):
             self.assertEqual(getattr(worker, key), getattr(args, key))
         self.assertTrue(worker.worker)
@@ -152,6 +153,7 @@ class ProfilingContractTests(unittest.TestCase):
     def test_named_worker_roundtrip_for_both_tools(self):
         for profiler in ('msprof', 'op'):
             args = arguments(['--device', '7', '--profiler', profiler, '--case', 'decode_4',
+                              '--kv-layout', 'PA_NZ',
                               '--backend', 'c8', '--p-scale', '80', '--seed', '123', '--quant-schema', '0'])
             command = build_command(args)
             worker = arguments(command[command.index('--worker'):])
@@ -161,6 +163,7 @@ class ProfilingContractTests(unittest.TestCase):
             self.assertEqual(named_cases(worker)[0]['seed'], 123)
             self.assertEqual(named_cases(worker)[0]['quant_schema'], 0)
             self.assertEqual(named_cases(worker)[0]['c8_p_scale'], 80.)
+            self.assertEqual(named_cases(worker)[0]['layout_kv'], 'PA_NZ')
             self.assertNotIn('--q-lens', command)
             if profiler == 'msprof':
                 self.assertNotEqual(command[1], 'op')

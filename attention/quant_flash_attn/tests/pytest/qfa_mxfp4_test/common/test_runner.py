@@ -15,7 +15,7 @@ import json
 import sys
 import torch
 from . import golden_cache, quant_flash_attn_golden as golden, result_compare_method
-from ..quant_flash_attn_paramset_common import normalize_params
+from ..quant_flash_attn_paramset_common import DEFAULT_KV_LAYOUT, normalize_params
 
 
 def apply_params(params):
@@ -68,58 +68,69 @@ def execute_test(params, mode, cdir=None, *, package='cann_ops_transformer', dev
         raise ValueError('reference_threads must be positive')
     torch.set_num_threads(reference_threads)
     name = p['name']
+    layout = p['kv_cache_layout']
+    reference_params = dict(p, kv_cache_layout=DEFAULT_KV_LAYOUT)
+    kernel_name = name if layout == DEFAULT_KV_LAYOUT else f'{name}_{layout}'
     if 'gen' in mode:
-        data = golden.generate_data(p)
-        input_id = golden_cache.save_input(name, data, p, cdir)
+        data = golden.generate_data(reference_params)
+        input_id = golden_cache.save_input(name, data, reference_params, cdir)
     else:
-        data, input_id = golden_cache.load_input(name, p, cdir)
-    reference = actual = None
+        data, input_id = golden_cache.load_input(name, reference_params, cdir)
+    reference = actual = tri = None
     metadata = None
+
     def schedule():
         nonlocal metadata
         if metadata is None:
             try:
                 if 'gen' in mode:
                     raise FileNotFoundError('Fresh input generation requires fresh metadata')
-                cached = golden_cache._load(name, 'schedule', p, input_id, cdir)
+                cached = golden_cache._load(name, 'schedule', reference_params, input_id, cdir)
                 if (cached.get('producer') or {}).get('package') != package:
                     raise ValueError('Metadata cache belongs to a different operator package')
                 metadata = cached['payload']
             except FileNotFoundError:
                 from .mxfp4_schedule import fetch_metadata
-                metadata = fetch_metadata(data, p, package, device_id)
-                golden_cache._save(name, 'schedule', metadata, p, input_id, cdir, producer={'package': package})
+                metadata = fetch_metadata(data, reference_params, package, device_id)
+                golden_cache._save(name, 'schedule', metadata, reference_params, input_id, cdir,
+                                   producer={'package': package})
         return metadata
     if 'cpu' in mode:
         if p['reference_backend'] == 'kernel':
             from .cpu_mxfp4_golden_kernel import cpu_mxfp4_golden_kernel
-            reference = cpu_mxfp4_golden_kernel(data, p, schedule())
+            reference = cpu_mxfp4_golden_kernel(data, reference_params, schedule())
         else:
-            reference = golden.cpu_mxfp4_golden(data, p)
+            reference = golden.cpu_mxfp4_golden(data, reference_params)
         validate_outputs(*reference, p)
-        golden_cache.save_cpu_output(name, *reference, p, input_id, cdir)
+        golden_cache.save_cpu_output(name, *reference, reference_params, input_id, cdir)
     if 'npu' in mode:
         actual = golden.npu_mxfp4_fa(data, p, package, device_id)
         validate_outputs(*actual, p)
-        golden_cache.save_npu_output(name, *actual, p, input_id, cdir, producer=_provenance(package, device_id))
+        golden_cache.save_npu_output(kernel_name, *actual, p, input_id, cdir, producer=_provenance(package, device_id))
         if triton_reference:
-            from .triton_mxfp4_golden_kernel import triton_mxfp4_golden_kernel
-            tri = triton_mxfp4_golden_kernel(data, p, schedule(), device_id)
-            validate_outputs(*tri, p)
-            golden_cache._save(name, 'triton_output', tri, p, input_id, cdir)
+            try:
+                if 'gen' in mode:
+                    raise FileNotFoundError('Fresh input generation requires fresh Triton output')
+                tri = tuple(golden_cache._load(name, 'triton_output', reference_params, input_id, cdir)['payload'])
+            except (FileNotFoundError, ValueError):
+                from .triton_mxfp4_golden_kernel import triton_mxfp4_golden_kernel
+                tri = triton_mxfp4_golden_kernel(data, reference_params, schedule(), device_id)
+                validate_outputs(*tri, reference_params)
+                golden_cache._save(name, 'triton_output', tri, reference_params, input_id, cdir)
     if 'compare' not in mode:
-        print(f'STAGES_DONE {name}: {sorted(mode)}; precision was not compared', flush=True)
+        print(f'STAGES_DONE {kernel_name}: {sorted(mode)}; precision was not compared', flush=True)
         return None, None
     if reference is None:
-        reference = golden_cache.load_cpu_output(name, p, input_id, cdir)
+        reference = golden_cache.load_cpu_output(name, reference_params, input_id, cdir)
     if actual is None:
-        actual = golden_cache.load_npu_output(name, p, input_id, cdir, package=package)
+        actual = golden_cache.load_npu_output(kernel_name, p, input_id, cdir, package=package)
     result, lse_result = compare_outputs(reference, actual, p)
-    report = dict(name=name, params=p, input_id=input_id, package=package, attention=result, lse=lse_result,
+    report = dict(name=name, params=p, reference_layout=DEFAULT_KV_LAYOUT, input_id=input_id, package=package,
+                  attention=result, lse=lse_result,
                   passed=result[0] == 'Pass' and (lse_result is None or lse_result[0] == 'Pass'))
-    tri = None
     if triton_reference:
-        tri = tuple(golden_cache._load(name, 'triton_output', p, input_id, cdir)['payload'])
+        if tri is None:
+            tri = tuple(golden_cache._load(name, 'triton_output', reference_params, input_id, cdir)['payload'])
         tr, tlse = compare_outputs(tri, actual, p)
         cr, clse = compare_outputs(reference, tri, p)
         report.update(triton_attention=tr, triton_lse=tlse, cpu_triton_attention=cr, cpu_triton_lse=clse)
@@ -130,16 +141,16 @@ def execute_test(params, mode, cdir=None, *, package='cann_ops_transformer', dev
         try:
             if 'gen' in mode:
                 raise FileNotFoundError('Fresh input generation requires fresh FP64 output')
-            fp64 = tuple(golden_cache._load(name, 'fp64_output', p, input_id, cdir)['payload'])
+            fp64 = tuple(golden_cache._load(name, 'fp64_output', reference_params, input_id, cdir)['payload'])
         except FileNotFoundError:
-            fp64 = cpu_mxfp4_golden_fp64(data, p)
-            golden_cache._save(name, 'fp64_output', fp64, p, input_id, cdir)
+            fp64 = cpu_mxfp4_golden_fp64(data, reference_params)
+            golden_cache._save(name, 'fp64_output', fp64, reference_params, input_id, cdir)
         report['fp64_gap'] = dict(kernel=reference_gap(actual, fp64), cpu=reference_gap(reference, fp64))
         if tri is not None:
             report['fp64_gap']['triton'] = reference_gap(tri, fp64)
-    path = golden_cache._path(name, 'comparison', cdir).with_suffix('.json')
+    path = golden_cache._path(kernel_name, 'comparison', cdir).with_suffix('.json')
     path.write_text(json.dumps(report, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
-    print(f"COMPARE {name}: {'PASS' if report['passed'] else 'FAIL'}", flush=True)
+    print(f"COMPARE {kernel_name}: {'PASS' if report['passed'] else 'FAIL'}", flush=True)
     if not report['passed'] and result[0] == 'Pass' and (lse_result is None or lse_result[0] == 'Pass'):
         # The original pytest entry consumes this pair; propagate a Triton-only
         # failure instead of reporting a successful CPU comparison as a pass.

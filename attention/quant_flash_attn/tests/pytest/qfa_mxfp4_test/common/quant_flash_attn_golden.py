@@ -180,6 +180,16 @@ def convert_bbnd_tensor(tensor, layout, kind):
     return bnbd.reshape(bn, heads, groups64, dimension//16, 16, pair).permute(0, 1, 3, 2, 4, 5).contiguous()
 
 
+def convert_paged_kv(key, value, key_scale, value_scale, layout):
+    """Repack payloads and scales after their element widths have been chosen."""
+    if layout == 'PA_BBND':
+        return key, value, key_scale, value_scale
+    tensors = (key, value, key_scale, value_scale)
+    kinds = ('payload', 'payload', 'k_scale', 'v_scale')
+    return tuple(convert_bbnd_tensor(tensor.view(torch.uint8), layout, kind).view(tensor.dtype)
+                 for tensor, kind in zip(tensors, kinds))
+
+
 def prepare_npu_inputs(data, device, params=None):
     fp4, e8m0 = getattr(torch, 'float4_e2m1fn_x2', None), getattr(torch, 'float8_e8m0fnu', None)
     if fp4 is None or e8m0 is None:

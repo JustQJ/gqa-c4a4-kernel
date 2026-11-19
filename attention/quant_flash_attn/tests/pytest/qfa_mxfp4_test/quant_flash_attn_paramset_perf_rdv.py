@@ -16,7 +16,7 @@ import itertools
 import json
 from pathlib import Path
 
-from .quant_flash_attn_paramset_common import model_configs
+from .quant_flash_attn_paramset_common import DEFAULT_KV_LAYOUT, model_configs
 
 BACKENDS = ('c4', 'c8', 'bf16')
 
@@ -58,6 +58,11 @@ def shard_cases(cases, index, count):
     if count < 1 or not 0 <= index < count:
         raise ValueError('Require shard-count > 0 and 0 <= shard-index < shard-count')
     return cases[index::count]
+
+
+def with_kv_layout(case, layout):
+    # Retain the historical BBND fingerprint for cases with an implicit layout.
+    return dict(case, layout_kv=layout) if layout != DEFAULT_KV_LAYOUT or 'layout_kv' in case else dict(case)
 
 
 def case_fingerprint(case):

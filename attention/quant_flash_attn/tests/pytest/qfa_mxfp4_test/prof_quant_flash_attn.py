@@ -33,6 +33,9 @@ import sys
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from qfa_mxfp4_test.quant_flash_attn_paramset_common import DEFAULT_KV_LAYOUT, KV_LAYOUTS
+from qfa_mxfp4_test.quant_flash_attn_paramset_perf_rdv import with_kv_layout
+
 RANGE_NAME = 'C4A4_PROFILE'
 KERNEL_PREFIX = 'QuantFlashAttn_'
 DEFAULT_METRICS = ('ArithmeticUtilization', 'L2Cache', 'Memory', 'MemoryL0',
@@ -59,7 +62,9 @@ def arguments(argv=None):
     parser.add_argument('--page', type=int, choices=(128, 256, 512))
     parser.add_argument('--kv-cache-num-blocks', type=int, help='Optional fixed physical page count for manual input')
     parser.add_argument('--layout', choices=('TND', 'N2TGD'),
-                        help='Q scale layout; KV always uses PA_BBND')
+                        help='Q scale layout')
+    parser.add_argument('--kv-layout', '--kv_layout', choices=KV_LAYOUTS, default=DEFAULT_KV_LAYOUT,
+                        help='Paged KV layout used by the QFA kernel under test')
     parser.add_argument('--mask', type=int, choices=(0, 3))
     parser.add_argument('--quant-schema', type=int, choices=(0, 1, 2),
                         help='C4 probability quantization scheme; ignored by C8')
@@ -155,8 +160,8 @@ def range_name(backend):
 
 def build_command(args):
     worker = [sys.executable, str(Path(__file__).resolve()), '--worker']
-    names = ['device', 'package', 'profiler', 'backend', 'case_set', 'quant_schema', 'seed', 'warmup', 'repeat', 'mode', 'mstx_backend',
-             'metrics', 'app_metrics', 'prof_warmup', 'launch_count', 'output']
+    names = ['device', 'package', 'profiler', 'backend', 'case_set', 'kv_layout', 'quant_schema', 'seed', 'warmup',
+             'repeat', 'mode', 'mstx_backend', 'metrics', 'app_metrics', 'prof_warmup', 'launch_count', 'output']
     if args.case_names:
         worker.extend(['--case', *args.case_names])
     else:
@@ -288,14 +293,16 @@ def _prepare_manual(args):
     data = golden.prepare_npu_inputs(cpu_data, f'npu:{args.device}')
     del cpu_data
     quant_mode = 5 if args.backend == 'c4' else 1
-    payloads = tuple(data.pop(key) for key in ('q_fp4', 'k_fp4', 'v_fp4'))
+    q, k, v = (data.pop(key) for key in ('q_fp4', 'k_fp4', 'v_fp4'))
     if args.backend == 'c8':
         from qfa_mxfp4_test.common.perf_convert import convert_payload
         # Exact E2M1 -> E4M3 expansion; retain the same E8M0 scales and page table.
         # Conversion/JIT and p_scale allocation stay outside the profiled range.
-        payloads = tuple(convert_payload(tensor.view(torch.uint8), 'c8', 1.) for tensor in payloads)
-    tensors = payloads + tuple(data[key] for key in ('dequant_scale_q', 'dequant_scale_k', 'v_descale'))
-    p_scale = (torch.tensor([args.p_scale], dtype=torch.float32, device=payloads[0].device)
+        q, k, v = (convert_payload(tensor.view(torch.uint8), 'c8', 1.) for tensor in (q, k, v))
+    k, v, ks, vs = golden.convert_paged_kv(k, v, data['dequant_scale_k'], data['v_descale'], args.kv_layout)
+    payloads = (q, k, v)
+    tensors = (*payloads, data['dequant_scale_q'], ks, vs)
+    p_scale = (torch.tensor([args.p_scale], dtype=torch.float32, device=q.device)
                if args.backend == 'c8' else None)
     print('OPERATOR_CONFIG', json.dumps(dict(backend=args.backend, quant_mode=quant_mode,
           payload_dtypes=[str(t.dtype) for t in payloads], payload_shapes=[list(t.shape) for t in payloads],
@@ -303,7 +310,7 @@ def _prepare_manual(args):
     common = dict(cu_seqlens_q=data['cu_seqlens_q'], seqused_q=data['seqused_q'],
                   seqused_kv=data['seqused_kv'], max_seqlen_q=params['max_seqlen_q'],
                   max_seqlen_kv=params['max_seqlen_kv'], mask_mode=args.mask, layout_q='TND',
-                  layout_q_descale=args.layout, layout_kv='PA_BBND', layout_out='TND')
+                  layout_q_descale=args.layout, layout_kv=args.kv_layout, layout_out='TND')
     ops = torch.ops.cann_ops_transformer
 
     def get_metadata():
@@ -327,6 +334,7 @@ def _prepare_manual(args):
                 softmax_scale=params['softmax_scale'], enable_lse=args.lse, quant_schema=args.quant_schema,
                 seed=args.seed, c8_p_scale=args.p_scale if args.backend == 'c8' else 448.,
                 kv_cache_num_blocks=args.kv_cache_num_blocks)
+    case = with_kv_layout(case, args.kv_layout)
     shapes = {name: list(tensor.shape) for name, tensor in zip(('q', 'k', 'v', 'qs', 'ks', 'vs'), tensors)}
     shapes['table'] = list(data['block_table_torch'].shape)
     return invoke, metadata, dict(case=case, input_sha256=digest.hexdigest(), input_shapes=shapes,
@@ -345,7 +353,7 @@ def named_cases(args):
                 case[key] = value
         if args.backend == 'c8' and args.p_scale is not None:
             case['c8_p_scale'] = args.p_scale
-        result.append(case)
+        result.append(with_kv_layout(case, args.kv_layout))
     return result
 
 
@@ -362,8 +370,6 @@ def _prepare_named(args):
         def call():
             return prepare_call(data, case, args.backend)[0]()
     shapes = {name: list(tensor.shape) for name, tensor in data.items() if tensor is not None}
-    width = case['D'] // 2 if args.backend == 'c4' else case['D']
-    assert shapes['k'] == shapes['v'] == [case['kv_cache_num_blocks'], case['page'], case['N_kv'], width]
     return call, metadata, dict(case=case, input_sha256=sha, input_shapes=shapes,
                                 payload_dtypes=[str(data[key].dtype) for key in ('q', 'k', 'v')],
                                 input_policy='paired_performance_generator')
@@ -495,7 +501,8 @@ def main(argv=None):
     args = arguments(argv)
     if args.list_cases:
         from qfa_mxfp4_test.quant_flash_attn_paramset_perf_rdv import get_cases
-        print(json.dumps(get_cases(case_set=args.case_set), indent=2))
+        cases = [with_kv_layout(case, args.kv_layout) for case in get_cases(case_set=args.case_set)]
+        print(json.dumps(cases, indent=2))
         return
     print('PROFILE_CONFIG', json.dumps(vars(args)), flush=True)
     if args.worker:
