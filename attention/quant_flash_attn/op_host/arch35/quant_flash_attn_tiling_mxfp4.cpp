@@ -55,8 +55,11 @@ void QuantFlashAttnTilingMxfp4Impl::CalcScheduleMode()
 
 ge::graphStatus QuantFlashAttnTilingMxfp4Impl::DoOpTiling()
 {
-    OP_CHECK_IF(qfaInfo_->kvLayout != QfaLayout::PA_BBND,
-                OP_LOGE(qfaInfo_->opName, "MXFP4 kernel currently supports PA_BBND KV layout only."),
+    const bool supportedKvLayout = qfaInfo_->kvLayout == QfaLayout::PA_BBND ||
+                                   qfaInfo_->kvLayout == QfaLayout::PA_BNBD ||
+                                   qfaInfo_->kvLayout == QfaLayout::PA_NZ;
+    OP_CHECK_IF(!supportedKvLayout,
+                OP_LOGE(qfaInfo_->opName, "MXFP4 kernel supports PA_BBND, PA_BNBD and PA_NZ KV layouts only."),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(SetPlatMemoryInfo() != ge::GRAPH_SUCCESS, OP_LOGE(qfaInfo_->opName, "Set plat memory info fail."),
                 return ge::GRAPH_FAILED);

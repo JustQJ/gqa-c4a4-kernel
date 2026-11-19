@@ -150,11 +150,46 @@ def cpu_mxfp4_golden(data, params):
     return out, statistics
 
 
-def prepare_npu_inputs(data, device):
+def convert_bbnd_tensor(tensor, layout, kind):
+    """Convert fully materialized physical BBND uint8 storage without changing values."""
+    if layout == 'PA_BBND':
+        return tensor
+    if kind not in ('payload', 'k_scale', 'v_scale'):
+        raise ValueError(f'Unknown KV tensor kind: {kind}')
+    if layout == 'PA_BNBD':
+        # payload/K scale: [Bn,Bs,N,...]; V scale: [Bn,Bs/64,N,D,2]
+        return (tensor.permute(0, 2, 1, 3, 4) if kind == 'v_scale' else
+                tensor.permute(0, 2, 1, *range(3, tensor.dim()))).contiguous()
+    if layout != 'PA_NZ':
+        raise ValueError(f'Unsupported KV layout: {layout}')
+    bnbd = convert_bbnd_tensor(tensor, 'PA_BNBD', kind)
+    bn, heads = bnbd.shape[:2]
+    if kind == 'payload':
+        page, row_bytes = bnbd.shape[2:4]
+        if row_bytes % 32:
+            raise ValueError('PA_NZ payload rows must contain whole 32-byte fractals')
+        return bnbd.reshape(bn, heads, page, row_bytes//32, 32).permute(0, 1, 3, 2, 4).contiguous()
+    if kind == 'k_scale':
+        page, groups, pair = bnbd.shape[2:5]
+        if page % 16:
+            raise ValueError('PA_NZ K scale requires page size divisible by 16')
+        return bnbd.reshape(bn, heads, page//16, 16, groups, pair).permute(0, 1, 2, 4, 3, 5).contiguous()
+    groups64, dimension, pair = bnbd.shape[2:5]
+    if dimension % 16:
+        raise ValueError('PA_NZ V scale requires head dimension divisible by 16')
+    return bnbd.reshape(bn, heads, groups64, dimension//16, 16, pair).permute(0, 1, 3, 2, 4, 5).contiguous()
+
+
+def prepare_npu_inputs(data, device, params=None):
     fp4, e8m0 = getattr(torch, 'float4_e2m1fn_x2', None), getattr(torch, 'float8_e8m0fnu', None)
     if fp4 is None or e8m0 is None:
         raise RuntimeError('Installed torch/torch_npu must provide FP4 E2M1 and E8M0 dtypes')
-    converted = {name: tensor.to(device) if tensor is not None else None for name, tensor in data.items()}
+    layout = normalize_params(params)['kv_cache_layout'] if params is not None else 'PA_BBND'
+    staged = dict(data)
+    for name, kind in (('k_fp4', 'payload'), ('v_fp4', 'payload'),
+                       ('dequant_scale_k', 'k_scale'), ('v_descale', 'v_scale')):
+        staged[name] = convert_bbnd_tensor(staged[name], layout, kind)
+    converted = {name: tensor.to(device) if tensor is not None else None for name, tensor in staged.items()}
     for name in ('q_fp4', 'k_fp4', 'v_fp4'):
         converted[name] = converted[name].view(fp4)
     for name in ('dequant_scale_q', 'dequant_scale_k', 'v_descale'):
@@ -167,7 +202,8 @@ def invoke_operator(ops, data, params):
     common = dict(cu_seqlens_q=data['cu_seqlens_q'], seqused_q=data['seqused_q'],
                   seqused_kv=data['seqused_kv'], max_seqlen_q=p['max_seqlen_q'],
                   max_seqlen_kv=p['max_seqlen_kv'], mask_mode=p['mask_mode'],
-                  layout_q='TND', layout_q_descale=p['q_scale_layout'], layout_kv='PA_BBND', layout_out='TND')
+                  layout_q='TND', layout_q_descale=p['q_scale_layout'], layout_kv=p['kv_cache_layout'],
+                  layout_out='TND')
     metadata = ops.quant_flash_attn_metadata(p['N_q'], p['N_kv'], p['D'], 5, **common)
     mask = None
     if p['mask_mode'] == 3:
@@ -184,7 +220,7 @@ def npu_mxfp4_fa(data, params, package='cann_ops_transformer', device_id=0):
     importlib.import_module(package)
     device = f'npu:{device_id}'
     torch.npu.set_device(device_id)
-    prepared = prepare_npu_inputs(data, device)
+    prepared = prepare_npu_inputs(data, device, params)
     output, lse = invoke_operator(torch.ops.cann_ops_transformer, prepared, params)
     torch.npu.synchronize()
     if output.device != prepared['q_fp4'].device or lse.device != output.device:

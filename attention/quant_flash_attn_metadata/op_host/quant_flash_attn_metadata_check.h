@@ -182,11 +182,12 @@ inline aclnnStatus QuantFlashAttnMetadataCheck::CheckBaseAttr(int64_t batchSize,
             "When quantMode is %ld (MxFP4), layoutQ only supports TND, but got %s", quantMode,
             layoutQ);
 
-    // 一致性校验：MxFP4 (quantMode=5) 场景下，layoutKv 支持 PA_BBND/PA_NZ
+    // 一致性校验：MxFP4 (quantMode=5) 场景下，layoutKv 支持 PA_BBND/PA_BNBD/PA_NZ
     CHECK_COND(!(quantMode == A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32 &&
-                 strcmp(layoutKv, "PA_BBND") != 0 && strcmp(layoutKv, "PA_NZ") != 0),
+                 strcmp(layoutKv, "PA_BBND") != 0 && strcmp(layoutKv, "PA_BNBD") != 0 &&
+                 strcmp(layoutKv, "PA_NZ") != 0),
             ACLNN_ERR_RUNTIME_ERROR,
-            "When quantMode is %ld (MxFP4), layoutKv only supports PA_BBND/PA_NZ, but got %s", quantMode,
+            "When quantMode is %ld (MxFP4), layoutKv only supports PA_BBND/PA_BNBD/PA_NZ, but got %s", quantMode,
             layoutKv);
 
     // 一致性校验：MxFP4 (quantMode=5) 场景下，layoutQDescale 暂时只支持 TND/N2TGD

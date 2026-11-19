@@ -22,7 +22,7 @@ def fetch_metadata(data, params, package, device_id):
         cu_seqlens_q=device('cu_seqlens_q'), seqused_q=device('seqused_q'),
         seqused_kv=device('seqused_kv'), max_seqlen_q=p['max_seqlen_q'],
         max_seqlen_kv=p['max_seqlen_kv'], mask_mode=p['mask_mode'], layout_q='TND',
-        layout_q_descale=p['q_scale_layout'], layout_kv='PA_BBND', layout_out='TND')
+        layout_q_descale=p['q_scale_layout'], layout_kv=p['kv_cache_layout'], layout_out='TND')
     torch.npu.synchronize()
     return metadata.cpu().reshape(-1).tolist()
 

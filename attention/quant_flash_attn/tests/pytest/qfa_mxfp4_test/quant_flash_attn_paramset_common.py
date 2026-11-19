@@ -77,8 +77,9 @@ def normalize_params(params):
         raise ValueError('reference_backend must be global or kernel')
     if result['N_q'] <= 0 or result['N_kv'] <= 0 or result['N_q'] % result['N_kv']:
         raise ValueError('Q heads must be a positive multiple of KV heads')
-    if not result['enable_pa'] or result['kv_cache_layout'] != 'PA_BBND' or result['input_layout'] != 'TND':
-        raise ValueError('C4 requires TND input/output and PA_BBND KV')
+    if not result['enable_pa'] or result['kv_cache_layout'] not in ('PA_BBND', 'PA_BNBD', 'PA_NZ') \
+            or result['input_layout'] != 'TND':
+        raise ValueError('C4 requires TND input/output and PA_BBND, PA_BNBD or PA_NZ KV')
     if result['cu_seqlens_kv'] is not None:
         raise ValueError('Paged KV uses seqused_kv; cu_seqlens_kv must be None')
     if result['q_scale_layout'] not in ('TND', 'N2TGD') or result['mask_mode'] not in (0, 3):
@@ -135,20 +136,23 @@ def model_configs(scope):
             for tp in (1, 2, 4) if scope == 'full' or (index == 0 and tp == 2)]
 
 
-def build_paramset(scope, scenarios, lse_modes=(True,)):
+def build_paramset(scope, scenarios, lse_modes=(True,), kv_layouts=('PA_BBND',)):
     result = {}
     for model, dimension, heads, kv_heads, tp in model_configs(scope):
         for scenario in scenarios:
             stored, kv = scenario['qlens'], scenario['klens']
             cu = [0] + list(itertools.accumulate(stored))
-            for qlayout, mask, lse in itertools.product(('TND', 'N2TGD'), (0, 3), lse_modes):
+            for qlayout, mask, lse, kv_layout in itertools.product(('TND', 'N2TGD'), (0, 3), lse_modes,
+                                                                   kv_layouts):
                 name = f"{model}_TP{tp}_{scenario['name']}_{qlayout}_M{mask}_LSE{int(lse)}"
+                if kv_layout != 'PA_BBND' or kv_layouts != ('PA_BBND',):
+                    name = f'{name}_{kv_layout}'
                 used = scenario.get('used_q', stored if qlayout == 'TND' else None)
                 result[name] = {
                     'B': [len(stored)], 'N_q': [heads], 'N_kv': [kv_heads], 'D': [dimension],
                     'cu_seqlens_q': [cu], 'seqused_q': [used], 'seqused_kv': [kv],
                     'max_seqlen_q': [max(stored)], 'max_seqlen_kv': [max(kv)],
-                    'block_size': [scenario['page']], 'mask_mode': [mask],
+                    'block_size': [scenario['page']], 'mask_mode': [mask], 'kv_cache_layout': [kv_layout],
                     'q_scale_layout': [qlayout], 'enable_lse': [lse], 'model': [model], 'tp': [tp],
                 }
     return result

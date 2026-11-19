@@ -100,9 +100,9 @@ ge::graphStatus QuantChecker::CheckKDescaleDimMxFp4(const QfaTilingInfo& qfaInfo
     if (qfaInfo.quantMode != QfaQuantMode::A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32) {
         return ge::GRAPH_SUCCESS;
     }
-    const auto expected = (qfaInfo.kvLayout == QfaLayout::PA_BBND) ? DIM_NUM_5 : DIM_NUM_6;
+    const auto expected = (qfaInfo.kvLayout == QfaLayout::PA_NZ) ? DIM_NUM_6 : DIM_NUM_5;
     OP_CHECK_IF(qfaInfo.opParamInfo.kDescale.shape->GetStorageShape().GetDimNum() != expected,
-                OP_LOGE(qfaInfo.opName, "MxFP4 k_descale must be 5D for PA_BBND or 6D for PA_NZ"),
+                OP_LOGE(qfaInfo.opName, "MxFP4 k_descale must be 5D for PA_BBND/PA_BNBD or 6D for PA_NZ"),
                 return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
@@ -112,9 +112,9 @@ ge::graphStatus QuantChecker::CheckVDescaleDimMxFp4(const QfaTilingInfo& qfaInfo
     if (qfaInfo.quantMode != QfaQuantMode::A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32) {
         return ge::GRAPH_SUCCESS;
     }
-    const auto expected = (qfaInfo.kvLayout == QfaLayout::PA_BBND) ? DIM_NUM_5 : DIM_NUM_6;
+    const auto expected = (qfaInfo.kvLayout == QfaLayout::PA_NZ) ? DIM_NUM_6 : DIM_NUM_5;
     OP_CHECK_IF(qfaInfo.opParamInfo.vDescale.shape->GetStorageShape().GetDimNum() != expected,
-                OP_LOGE(qfaInfo.opName, "MxFP4 v_descale must be 5D for PA_BBND or 6D for PA_NZ"),
+                OP_LOGE(qfaInfo.opName, "MxFP4 v_descale must be 5D for PA_BBND/PA_BNBD or 6D for PA_NZ"),
                 return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
@@ -139,6 +139,8 @@ ge::graphStatus QuantChecker::CheckKDescaleShapeMxFp4(const QfaTilingInfo& qfaIn
     std::vector<int64_t> expected;
     if (qfaInfo.kvLayout == QfaLayout::PA_BBND) {
         expected = {qfaInfo.totalBlockNum, qfaInfo.blockSize, qfaInfo.n2Size, qfaInfo.qkHeadDim / 64, 2};
+    } else if (qfaInfo.kvLayout == QfaLayout::PA_BNBD) {
+        expected = {qfaInfo.totalBlockNum, qfaInfo.n2Size, qfaInfo.blockSize, qfaInfo.qkHeadDim / 64, 2};
     } else {
         expected = {qfaInfo.totalBlockNum, qfaInfo.n2Size, qfaInfo.blockSize / 16,
                     qfaInfo.qkHeadDim / 64, 16, 2};
@@ -154,6 +156,8 @@ ge::graphStatus QuantChecker::CheckVDescaleShapeMxFp4(const QfaTilingInfo& qfaIn
     std::vector<int64_t> expected;
     if (qfaInfo.kvLayout == QfaLayout::PA_BBND) {
         expected = {qfaInfo.totalBlockNum, qfaInfo.blockSize / 64, qfaInfo.n2Size, qfaInfo.vHeadDim, 2};
+    } else if (qfaInfo.kvLayout == QfaLayout::PA_BNBD) {
+        expected = {qfaInfo.totalBlockNum, qfaInfo.n2Size, qfaInfo.blockSize / 64, qfaInfo.vHeadDim, 2};
     } else {
         expected = {qfaInfo.totalBlockNum, qfaInfo.n2Size, qfaInfo.vHeadDim / 16,
                     qfaInfo.blockSize / 64, 16, 2};
@@ -1082,7 +1086,7 @@ const std::map<QfaQuantMode, QfaLayoutConstraintConfig> QFA_LAYOUT_CONSTRAINT_TA
     {QfaQuantMode::A4C4_QKV_HIF4_P_FP8_E4M3_SOFTMAX_FP16,
      {{QfaLayout::BNSD}, {QfaLayout::BNSD}, {QfaLayout::BNSD}, {QfaLayout::BNSD}, true}},
     {QfaQuantMode::A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP32,
-     {{QfaLayout::TND}, {QfaLayout::PA_BBND, QfaLayout::PA_NZ}, {QfaLayout::TND},
+     {{QfaLayout::TND}, {QfaLayout::PA_BBND, QfaLayout::PA_BNBD, QfaLayout::PA_NZ}, {QfaLayout::TND},
       {QfaLayout::TND, QfaLayout::N2TGD}, false}},
 };
 
