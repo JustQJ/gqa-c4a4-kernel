@@ -23,6 +23,7 @@
 #include "kernel_operator_list_tensor_intf.h"
 #include "memory_copy_arch35_quant_flash_attn.h"
 #include "quant_flash_attn_mxfp4_common.h"
+#include "c_api/cube_datamove/cube_datamove.h"
 using namespace AscendC;
 using namespace AscendC::Impl::Detail;
 using namespace regbaseutil;
@@ -56,6 +57,11 @@ public:
     static constexpr uint32_t s2SplitSize = 128U;
     static constexpr uint32_t MXFP_GROUP_SIZE = 32U;
     static constexpr uint32_t MXFP_DIVISOR_SIZE = 64U;
+    // V 槽 D 之后补的常数 1 通道数;紧凑补列模板与 L0 目的分形都按这个宽度组织
+    static constexpr uint32_t PADDING_CHANNEL_COUNT = 16U;
+    // 一个 64 token 块的补列分形:64 token x 16 通道 FP4 = 512B
+    static constexpr uint32_t PAD_FRACTAL_BYTES = MXFP_DIVISOR_SIZE * PADDING_CHANNEL_COUNT / 2;
+    static constexpr uint32_t PAD_SCALE_BYTES = MXFP_DIVISOR_SIZE * PADDING_CHANNEL_COUNT / MXFP_GROUP_SIZE;
     static constexpr LayOutTypeEnum LAYOUT = layout;
     static constexpr bool PAGE_ATTENTION = (KvLayoutType > 0);
     static constexpr bool USE_DN = useDn;
@@ -171,8 +177,9 @@ public:
         constexpr uint32_t mm1QScaleSize = mBaseSize * dBaseSize / MXFP_GROUP_SIZE;
         constexpr uint32_t mmKVSize = dBaseSize * s2BaseSize / 2;
         constexpr uint32_t mmKVScaleSize = s2BaseSize * dBaseSize / MXFP_GROUP_SIZE;
-        constexpr uint32_t mmVPaddngSize = s2BaseSize * (dBaseSize + 16) / 2;
-        constexpr uint32_t mmVPaddngScaleSize = s2BaseSize * (dBaseSize + 16) / MXFP_GROUP_SIZE;
+        // 紧凑补列模板:仅保留 16 个补列通道,按 64 token 一块连续组织
+        constexpr uint32_t mmVPaddngSize = s2BaseSize * PADDING_CHANNEL_COUNT / 2;
+        constexpr uint32_t mmVPaddngScaleSize = s2BaseSize * PADDING_CHANNEL_COUNT / MXFP_GROUP_SIZE;
         static_assert(P_SLOT_COUNT * (CrossBufferType::l1PBufferBytes_ + CrossBufferType::l1PScaleBufferBytes_) +
                       mm1QSize + mm1QScaleSize + 4 * (mmKVSize + mmKVScaleSize) +
                       mmVPaddngSize + mmVPaddngScaleSize <= 512 * 1024, "MXFP4 L1 capacity exceeded");
@@ -209,9 +216,9 @@ public:
     __aicore__ inline void InitPaddingL1()
     {
         constexpr uint32_t payloadBytes =
-            s2BaseSize * (dBaseSize + 16) / 2;
+            s2BaseSize * PADDING_CHANNEL_COUNT / 2;
         constexpr uint32_t scaleBytes =
-            s2BaseSize * (dBaseSize + 16) / MXFP_GROUP_SIZE;
+            s2BaseSize * PADDING_CHANNEL_COUNT / MXFP_GROUP_SIZE;
 
         Buffer<BufferType::L1>& valuePaddingL1Buffer = l1VPaddingBuffers_.Get();
         LocalTensor<uint8_t> valuePaddingL1Bytes = valuePaddingL1Buffer.GetTensor<uint8_t>();
@@ -231,23 +238,29 @@ public:
         valuePaddingL1Buffer.Set<HardEvent::MTE2_MTE1>();
     }
 
+    // 只搬 D 之后的 16 个补列通道:payload 走 fp4 的 l12l0a/l12l0b C API,
+    // 直接以 V 槽内补列分形为目的地址;MX scale 与 payload 的 L0 地址是 /16 映射,
+    // 用 asc_copy_l12l0a_mx/asc_copy_l12l0b_mx 独立指定到补列的 scale 分形。
     __aicore__ inline void InitPaddingL0(const LocalTensor<KV_T>& valueL0Tensor, uint32_t alignedKvTokenCount)
     {
-        LoadData2DParamsV2 payloadLoadParams {};
-        payloadLoadParams.mStep = (dVBaseSize + 16) / 16;
-        payloadLoadParams.kStep = alignedKvTokenCount / 64;
-        payloadLoadParams.srcStride = (dVBaseSize + 16) / 16;
-        payloadLoadParams.dstStride = (dVBaseSize + 16) / 16;
-        payloadLoadParams.ifTranspose = false;
-        LoadData2DMxParams scaleLoadParams {};
-        scaleLoadParams.xStep = (dVBaseSize + 16) / 16;
-        scaleLoadParams.yStep = alignedKvTokenCount / 64;
-        scaleLoadParams.srcStride = s2BaseSize / 64;
-        scaleLoadParams.dstStride = alignedKvTokenCount / 64;
+        constexpr uint32_t padFractalIndex = dVBaseSize / 16;       // 补列所在 M 分形序号
+        constexpr uint32_t l0RowFractals = (dVBaseSize + 16) / 16;  // V 槽 M 方向分形高度
+        constexpr uint32_t payloadBytes = s2BaseSize * PADDING_CHANNEL_COUNT / 2;
+        const uint32_t kvBlocks = alignedKvTokenCount / 64;
         LocalTensor<uint8_t> valuePaddingL1Bytes = l1VPaddingBuffers_.Get().template GetTensor<uint8_t>();
-        LoadData(valueL0Tensor, valuePaddingL1Bytes.template ReinterpretCast<KV_T>(),
-                 valuePaddingL1Bytes[s2BaseSize * (dVBaseSize + 16) / 2].template ReinterpretCast<SCALE_T>(),
-                     payloadLoadParams, scaleLoadParams);
+        if constexpr (USE_DN) {
+            asc_copy_l12l0a(
+                (__ca__ KV_T*)(valueL0Tensor.GetPhyAddr() + padFractalIndex * PAD_FRACTAL_BYTES),
+                (__cbuf__ KV_T*)valuePaddingL1Bytes.GetPhyAddr(), 0, 0, 1, kvBlocks, 1, l0RowFractals);
+            asc_copy_l12l0a_mx(valueL0Tensor.GetPhyAddr() / 16 + padFractalIndex * kvBlocks * PAD_SCALE_BYTES,
+                (__cbuf__ fp8_e8m0_t*)valuePaddingL1Bytes[payloadBytes].GetPhyAddr(), 0, 0, 1, kvBlocks, 1, 1);
+        } else {
+            asc_copy_l12l0b(
+                (__cb__ KV_T*)(valueL0Tensor.GetPhyAddr() + padFractalIndex * PAD_FRACTAL_BYTES),
+                (__cbuf__ KV_T*)valuePaddingL1Bytes.GetPhyAddr(), 0, 0, 1, kvBlocks, 1, l0RowFractals);
+            asc_copy_l12l0b_mx(valueL0Tensor.GetPhyAddr() / 16 + padFractalIndex * kvBlocks * PAD_SCALE_BYTES,
+                (__cbuf__ fp8_e8m0_t*)valuePaddingL1Bytes[payloadBytes].GetPhyAddr(), 0, 0, 1, kvBlocks, 1, 1);
+        }
         PipeBarrier<PIPE_MTE1>();
     }
 

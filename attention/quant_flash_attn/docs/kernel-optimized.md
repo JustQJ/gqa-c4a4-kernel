@@ -4,7 +4,7 @@
 
 1. 精度要严格保证通过
 
-    小的改动通过 tests\pytest\qfa_mxfp4_test\test_quant_flash_attn_func_rdv.py 的 --accuracy-case-set document --scope small 测试集 + --accuracy-case-set bench16k 测试集
+    小的改动通过 tests\pytest\qfa_mxfp4_test\test_quant_flash_attn_func_rdv.py 的 --accuracy-case-set document --scope small 测试集 + --accuracy-case-set bench16k 测试集 + PA_BBND/PA_NZ/PA_BNBD 这几个layout都要通过
 
     多次大的改动要进行一次 tests\pytest\qfa_mxfp4_test\test_quant_flash_attn_func_rdv.py 的 --accuracy-case-set document --scope full 测试集
 
@@ -295,3 +295,61 @@ msprof / PipeUtilization 每侧采集 20 次应用预热及 5 次目标调用。
 同轮 C8 对比中，最终 C4 的 msprof 任务耗时低 4.31%。两个 profiler 均观测到 C4 的 AIC Scalar 和 AIV Vector 耗时更低、AIV Scalar 耗时更高。历史 DN64→DN128 配对测得 C4 的 msprof 任务耗时从 1214.181 μs 降至 1085.908 μs，AIC Scalar 降低 15.11%。同轮 msprof op 的逐核 AIC/AIV Scalar 均值分别降低 18.66% 和 8.10%。各流水存在重叠，任务耗时以各工具的总耗时字段为准。[同轮对照明细](c4a4-d256-results-20261118.md)
 
 四路采集均为 `validated`，无数据丢失，输出有限且释放后 allocated 为 0。两路 Default 各完整抓取 5 次，每次含 7 类指标。原始采集包的 412 个成员已逐项核对 SHA256、大小和成员集合。[复算与原始指标](../../../operators/quant_flash_attn/d256_results_20261118_card7_01/results-audit.json) · [原始采集包](../../../operators/quant_flash_attn/d256_results_20261118_card7_01/collection-evidence.tar.gz)
+
+### V 补列紧凑化：InitPaddingL0 只搬 16 通道补列（2026-11-20）
+
+每个 PV 块原先无条件执行 `InitPaddingL0`，把整个 `N×(D+16)` 常数模板从 L1 搬进 L0 V 槽，而 `LoadV2L0` 随后只覆盖真实 D 列，补列之外的全部搬运是浪费。本轮把 L1 常数模板缩为 16 通道紧凑布局（`s2BaseSize×16`），`InitPaddingL0` 改用 C API 只搬补列分形：payload 走 `asc_copy_l12l0a`/`asc_copy_l12l0b` 的 fp4 重载直接写到 V 槽内 D/16 号分形，MX scale 走 `asc_copy_l12l0a_mx`/`asc_copy_l12l0b_mx` 独立寻址到补列 scale 分形。DN/ND 两路径均改；L1 常数区从 ~17–19 KiB 降到 1–2.25 KiB。
+
+A/B 定义：A = 基线包 `cann_ops_transformer_qfa_base_20261119`（HEAD `90dbcef38`），B = 候选包 `cann_ops_transformer_qfa_compact_pad_20261119`（仅 `quant_flash_attn_block_cube_mxfp4.h` 不同）。测试在 184 机器 `tp_a4c4_gqa_kernel_ops` 容器，CANN 9.2.1，精度在物理卡 6、性能与 PMU 在物理卡 4 采集。A/B 两包的输入 SHA256 与 case 指纹逐例一致（12/12）。
+
+#### 精度
+
+按验收标准执行 document small + bench16k 两套 case-set × PA_BBND/PA_BNBD/PA_NZ 三种 layout，共 6 批次：
+
+| 批次 | 结果 |
+| --- | --- |
+| document small × PA_BBND | 204 passed |
+| bench16k × PA_BBND | 12 passed |
+| document small × PA_BNBD | 204 passed |
+| bench16k × PA_BNBD | 12 passed |
+| document small × PA_NZ | 204 passed |
+| bench16k × PA_NZ | 12 passed |
+
+#### Graph 性能
+
+12 case、graph 模式（预热 3、5 轮 × 20 回放取中位数），与总表口径一致。C4 全部 12 例几何平均 1.0217×。
+
+| case | C4 A（μs） | C4 B（μs） | 变化 |
+| --- | ---: | ---: | ---: |
+| single_prefill_1 | 262.2 | 260.2 | -0.74% |
+| single_prefill_2 | 966.1 | 968.2 | +0.21% |
+| single_prefill_3 | 1348.1 | 1350.0 | +0.14% |
+| dual_prefill_1 | 1247.8 | 1246.7 | -0.09% |
+| dual_prefill_2 | 1382.0 | 1293.0 | -6.44% |
+| dual_prefill_3 | 2490.3 | 2355.4 | -5.42% |
+| decode_1 | 218.8 | 214.8 | -1.85% |
+| decode_2 | 521.3 | 517.8 | -0.67% |
+| decode_3 | 48.2 | 48.9 | +1.51% |
+| decode_4 | 61.4 | 60.3 | -1.65% |
+| mixed_1 | 1296.6 | 1239.5 | -4.40% |
+| mixed_2 | 3607.1 | 3402.9 | -5.66% |
+
+收益集中在 KV 体量大的 prefill/mixed 用例（-4.4% ~ -6.4%）；`dual_prefill_1` 与 decode 组在噪声带内。本轮噪声带用同包复测（A2）标定：均值 -0.54%、最大 |Δ| 5.34%、标准差 2.0（在不受本改动影响的 C8 路径上测得，跨包 B/A 分布与之不可区分）。解读 C4 单例时应对照该噪声带；重 prefill 4 例方向一致且幅度超出噪声带。
+
+#### dual_prefill_1 的 MTE1 读写量复算
+
+`msprof op --aic-metrics=Default` 经兼容适配器采集（该 CANN 9.2.1 环境下 MSTX 门控产出空数据，须去掉 `--mstx*` 并将内核名写为 `QuantFlashAttn_*` 通配），两侧各 5 次抓取、28 个 AIC 核、1650 MHz。输入为 bench16k_dual_prefill_1（B2、Q[4096,3988]、KV[4096,12056]、D256、page128、PA_NZ、schema2），A/B 的 kernel 对象与 tiling-key 一致。逐核均值：
+
+| 指标 | A 基线 | B 紧凑补列 | 变化 |
+| --- | ---: | ---: | ---: |
+| MTE1 活跃带宽×时间（搬运量） | 190.41 MiB | 148.87 MiB | -21.8% |
+| L1 读（MTE1 读侧） | 174.88 MiB | 137.02 MiB | -21.7% |
+| L0A+L0B 写（MTE1 写侧） | 91.15 MiB | 65.86 MiB | -27.8% |
+| MTE1 活跃时间 | 615.61 μs | 511.59 μs | -16.9% |
+| MTE2 读量（对照，应不变） | 60.06 MiB | 60.05 MiB | -0.02% |
+| MTE2 活跃时间（对照） | 682.12 μs | 688.00 μs | +0.86% |
+| AIC 任务耗时 | 1152.16 μs | 1152.56 μs | +0.03% |
+
+MTE1 读/写降幅与事前估算的 -23.2%/-29.6% 基本吻合（估算按 32 核摊分，实测该 shape 为 28 核，单核份额略高）。MTE2 读量与 AIC 任务耗时不变，证明改动只作用于 L1→L0 的 padding 搬运，不影响 GM→L1 流量与计算排布；`dual_prefill_1` 本身是 cube 受限用例，收益主要体现在重 prefill/mixed 用例上。
+
+[逐例性能 JSON 与 PMU 复算](../../../operators/quant_flash_attn/compact_pad_20261119_card4_01/) · [PMU 原始采集包](../../../operators/quant_flash_attn/compact_pad_20261119_card4_01/pmu-evidence.tar.gz)
