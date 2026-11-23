@@ -34,16 +34,32 @@ using fa_base_matmul::Buffer;
 using fa_base_matmul::BufferManager;
 using fa_base_matmul::BufferType;
 using fa_base_matmul::SyncType;
-struct Mxfp4RunInfo : RunInfoX {
-    bool isGroupLast = false; // 是否为一个16个task构成的组的末尾task，在这个task后，会进行p的scale更新，以及进行一次集合的V2
-    // Assigned by AIV ComputeVec1 and retained in the controller's task ring.
-    // Independent of loop/16: a Q block/split may end with a short group.
-    // Cube does not consume this AIV-local field.
-    uint64_t v1GroupId = ~uint64_t{0};
-    // KV 页号缓存：创建段一次查表，K/V 的 payload/scale 四处搬运共用同一组页号
-    //（按任务 token 区间覆盖的物理页序）。s2Idx 恒为 s2BaseSize(<=256) 的倍数、
-    // blockSize >= 64，页数 <= 256/64+1 = 5，取 8 兜底。
-    uint32_t kvPageIdx[8] = {};
+// Only the row coordinates and task boundaries are shared between Cube and Vector.
+struct Mxfp4TaskInfo {
+    uint32_t loop;
+    uint32_t bIdx;
+    uint32_t realN2Idx;
+    uint32_t gS1Idx;
+    uint32_t actMSize;
+    uint32_t actMSizeAlign32;
+    uint32_t s2Idx;
+    uint32_t actSingleLoopS2Size;
+    bool isLastS2Loop;
+    bool isGroupLast;
+};
+
+struct Mxfp4CubeTask : Mxfp4TaskInfo {
+    static constexpr uint32_t KV_PAGE_CAPACITY = 8U;
+    uint32_t n2Idx;
+    uint32_t kvPageIdx[KV_PAGE_CAPACITY]; // CacheKvPageIndices fills the entries consumed by this task.
+};
+
+struct Mxfp4VecTask : Mxfp4TaskInfo {
+    int64_t causalOffset;
+    bool isFirstS2Loop;
+    bool isS2SplitCore;
+    uint32_t faTmpOutWsPos;
+    uint64_t v1GroupId; // Written by V1 before the delayed P-scale update and V2.
 };
 
 struct Mxfp4SubRunInfo {

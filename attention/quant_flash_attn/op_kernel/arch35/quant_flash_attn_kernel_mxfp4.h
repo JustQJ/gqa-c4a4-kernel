@@ -84,8 +84,12 @@ public:
     using T = typename CubeBlockType::MM_T; // Cube block 定义的矩阵计算结果类型
     using OUT_T = typename VecFaBlockType::OUT_T; // 最终输出的数据类型
 
-    static constexpr uint32_t FP4_NUM_PER_32B = 64; // 不是 32 / sizeof(INPUT_T)，因为INPUT_T是fp4x2_e2m1_t
-
+#ifdef __DAV_C310_CUBE__
+    using CoreTask = Mxfp4CubeTask;
+#else
+    using CoreTask = Mxfp4VecTask;
+#endif
+    static constexpr bool TRACK_FD_SPLIT = FLASH_DECODE && std::is_same_v<CoreTask, Mxfp4VecTask>;
 
     // 输入tensor的GM的地址
     GlobalTensor<int32_t> cuSeqLensGmQ_;
@@ -105,8 +109,6 @@ public:
     VecFaBlockType vecFaBlock_;
     VecFdBlockType vecFdBlock_;
 
-    uint32_t createdTaskCount_ = 0U; //当前核在当前 section 中已经创建的有效任务数。每次成功 CreateTask 后加一，用于任务编号和描述符环形槽定位；被跳过的任务不计数
-
     // tile调度的相关参数
     uint64_t actSeqLensKv_ = 0; // 当前 batch 实际参与计算的 KV token 数
     uint64_t actSeqLensQ_ = 0; // 当前 batch 实际参与计算的 Q token 数
@@ -115,7 +117,6 @@ public:
     uint32_t prevBIdx_ = 0; // 上一个batch编号，用于判断是否到了一个新的batch，新的batch需要读取新的q和kv的长度
     uint32_t prevBN2Idx_ = 0; // 上一个BN2的合并的编号，用于判断是否到了一个新的head块，和prevGS1Idx_一起判断是否切到新的M
     uint32_t prevGS1Idx_ = 0; // 上一个M块的编号，需要切换到新的M块
-    uint32_t mloop_ = 0; // 当前 section 内用于区分不同 M 块计算状态的编号。同一个 M 块遍历多个 S2 task 时保持相同；源码在 s2Cur == curS2Start_ 时递增。Vector 用它选择 Softmax 的 max/sum 状态槽
     bool headS2Split_ = 0; // 判断当前M开始的S2块是否是第一个S2块
     bool tailS2Split_ = 0; // 判断当前M结束的S2块是否是最后一个S2块，用于确定fd的写入
 
@@ -358,204 +359,143 @@ public:
         bN2End_ = faMetaDataGm_.GetValue(GetFAMetaDataIndex(constInfo_.aicIdx, QFA_BN2_END_INDEX, sectionIdx));
         gS1OEnd_ = faMetaDataGm_.GetValue(GetFAMetaDataIndex(constInfo_.aicIdx, QFA_M_END_INDEX, sectionIdx));
         s2OEnd_ = faMetaDataGm_.GetValue(GetFAMetaDataIndex(constInfo_.aicIdx, QFA_S2_END_INDEX, sectionIdx));
-        coreFirstTmpOutWsPos_ = faMetaDataGm_.GetValue(
-            GetFAMetaDataIndex(constInfo_.aicIdx, QFA_FIRST_FD_DATA_WORKSPACE_IDX_INDEX, sectionIdx));
+        if constexpr (TRACK_FD_SPLIT) {
+            coreFirstTmpOutWsPos_ = faMetaDataGm_.GetValue(
+                GetFAMetaDataIndex(constInfo_.aicIdx, QFA_FIRST_FD_DATA_WORKSPACE_IDX_INDEX, sectionIdx));
+        }
     }
 
     __aicore__ inline void FlashAttention(uint32_t sectionIdx)
     {
         GetFASectionInfo(sectionIdx);
-        Mxfp4RunInfo taskRunInfo[PRELOAD_TASK_CACHE_SIZE] {};
-        uint32_t bN2Cur = bN2Start_;
-        uint32_t gS1Cur = gS1OStart_;
-        uint32_t s2Cur = s2OStart_;
-        prevBN2Idx_ = bN2Cur;
-        prevGS1Idx_ = gS1Cur;
-        headS2Split_ = false;
-        tailS2Split_ = false;
-        mloop_ = 0;
-        createdTaskCount_ = 0;
-        uint64_t pipelineTick = 0;
-        uint32_t pendingTasks = 0;
-        bool hasMoreCoords = ShouldDispatchTask(bN2Cur, gS1Cur, s2Cur);
-        while (pendingTasks != 0 || hasMoreCoords) {
-            if (hasMoreCoords) {
-                // 本拍最多创建到 task t+LEAD，创建时即预取 K。
-                const uint64_t createLimit = pipelineTick + KV_PREFETCH_LEAD + 1U;
-                bool skipOnly = true;
-                while (hasMoreCoords && createdTaskCount_ < createLimit) {
-                    const TASK_DEAL_MODE taskDealMode = GetTaskDealMode(bN2Cur, gS1Cur, s2Cur);
-                    const bool createTask = taskDealMode == TASK_DEAL_MODE::CREATE_TASK;
-                    if (createTask) {
-                        Mxfp4RunInfo& currentTask = taskRunInfo[createdTaskCount_ % PRELOAD_TASK_CACHE_SIZE];
-                        ASSERT(!currentTask.isValid);
-                        currentTask = Mxfp4RunInfo {};
-                        CalcParams(createdTaskCount_, bN2Cur, gS1Cur, s2Cur, currentTask);
-                        currentTask.isValid = true;
-                        ++createdTaskCount_;
-                        ++pendingTasks;
-                        if ASCEND_IS_AIC {
-                            // 创建即预取：守卫与 Bmm1 消费侧严格一致，保证槽事件配对。
-                            if (currentTask.actMSize != 0 && currentTask.actSingleLoopS2Size != 0) {
-                                cubeBlock_.CacheKvPageIndices(currentTask);
-                                cubeBlock_.template PrefetchKvL1<true>(currentTask, KeySlotOf(currentTask.loop));
-                            }
-                        }
-                        skipOnly = false;
-                    }
-                    UpdateAxisInfo(taskDealMode, bN2Cur, gS1Cur, s2Cur);
-                    hasMoreCoords = ShouldDispatchTask(bN2Cur, gS1Cur, s2Cur);
-                    if (!createTask) {
-                        break;
-                    }
-                }
-                if (skipOnly) {
-                    continue; // 本迭代只发生了坐标跳过（未创建任务），不消耗 tick
-                }
-            }
-            if (pendingTasks != 0) {
-                const bool retiresTask = pipelineTick >= PRELOAD_N &&
-                    taskRunInfo[(pipelineTick - PRELOAD_N) % PRELOAD_TASK_CACHE_SIZE].isValid;
-                ExecuteTask(pipelineTick, taskRunInfo);
-                ++pipelineTick;
-                if (retiresTask) {
-                    --pendingTasks;
-                }
-            }
-            // Keep issuing across Q boundaries. Only the end of this section drains
-            // the pipeline; skipped coordinates do not consume task or P slots.
+        prevBN2Idx_ = bN2Start_;
+        prevGS1Idx_ = gS1OStart_;
+        if constexpr (TRACK_FD_SPLIT) {
+            headS2Split_ = false;
+            tailS2Split_ = false;
         }
+        DispatchRows();
     }
 
-    __aicore__ inline void CalcParams(uint64_t loop, uint32_t bN2Cur, uint32_t gS1Cur, uint32_t s2Cur, Mxfp4RunInfo& info)
+    // Both cores enumerate the same rows and task numbers. The task type selects the
+    // descriptor fields and the pipeline at compile time.
+    template <typename Task = CoreTask>
+    __aicore__ inline void DispatchRows()
     {
-        info.loop = loop;
-        info.mloop = mloop_;
-        info.bIdx = bN2Cur / (constInfo_.realN2Size); // batch idx
-        info.n2Idx = (bN2Cur / (constInfo_.realN2Size / constInfo_.n2Size)) % constInfo_.n2Size; // 实际的kv head的idx
-        info.realN2Idx = bN2Cur % constInfo_.realN2Size; // 实际的head idx
-        info.gS1Idx = gS1Cur * mBaseSize; // M的行idx
-        if constexpr (LAYOUT_Q == LayOutTypeEnum::LAYOUT_BSH || LAYOUT_Q == LayOutTypeEnum::LAYOUT_SBH ||
-                      LAYOUT_Q == LayOutTypeEnum::LAYOUT_TND) {
-            // S1G layout
-            info.s1Idx = info.gS1Idx / constInfo_.realGSize; // query 的行
-        } else {
-            // GS1 layout
-            info.s1Idx = info.gS1Idx % actSeqLensQ_;
-        }
-        info.s2Idx = s2Cur * s2BaseSize; // kv token的起点
-        info.actS1Size = actSeqLensQ_;  // 实际的 query 的长度
-        info.actS2Size = actSeqLensKv_; // 实际的 kv 的长度
-
-        info.actMSize = mBaseSize;
-        uint64_t gS1Size = info.actS1Size * constInfo_.realGSize;
-        if (((gS1Cur + 1) * mBaseSize) > gS1Size) { // 实际的计算m行，去掉padding的行
-            info.actMSize = gS1Size - gS1Cur * mBaseSize;
-        }
-        info.actSingleLoopS2Size = s2BaseSize;
-        if (((s2Cur + 1) * s2BaseSize) > info.actS2Size) { // // 实际的计算s2行，去掉padding的行
-            info.actSingleLoopS2Size = info.actS2Size - s2Cur * s2BaseSize;
-        }
-
-        bool splitCurBlock = false;
-        info.actSingleLoopS2SizeAlign =
-            AttentionCommon::Align((uint32_t)info.actSingleLoopS2Size, FP4_NUM_PER_32B);
-
-        info.isChangeBatch = false;
-
-        GetPreNextTokenLeftUp(actSeqLensQ_, actSeqLensKv_, info.preTokensLeftUp, info.nextTokensLeftUp);
-
-        // 情况1: loop不等于0时, 第一个S2 inner循环就是第一个S2 outer循环, 即s2Cur=0
-        // 情况2: loop=0时, 如果(bN2Start, gS1OStart, s2Start)任务有效, 对于当前核, 为第一个S2 inner循环
-        // 情况3: loop=0时, 如果(bN2Start, gS1OStart, s2Start)任务无效,
-        // 下一个有效任务一定是某个head的第一个S2外切块，s2Cur=0
-        info.isFirstS2Loop = (loop == 0) || (s2Cur == curS2Start_);
-        info.isS2SplitCore = false;
-        info.faTmpOutWsPos = coreFirstTmpOutWsPos_;
-        info.isLastS2Loop = s2Cur + 1 == curS2End_;
-        info.isGroupLast = info.isLastS2Loop || ((s2Cur - curS2Start_ + 1U) % GROUP_N == 0U);
-
-        info.actMSizeAlign32 = (info.actMSize + 31) >> 5 << 5;
-        // DN 固定 Q64；ND 按完整 Q16 scale 块均分给两个 AIV。
-        info.vecMbaseIdx = 0;
-        info.actVecMSize = info.actMSize;
-        if ASCEND_IS_AIV {
-            const uint32_t rowsPerAiv = USE_DN ? 64U : info.actMSizeAlign32 / CV_RATIO;
-            info.vecMbaseIdx = constInfo_.subBlockIdx * rowsPerAiv;
-            info.actVecMSize = info.actMSize > info.vecMbaseIdx ?
-                AttentionCommon::Min(rowsPerAiv, info.actMSize - info.vecMbaseIdx) : 0U;
-        }
-        /*
-        所有的切分只会发生在当前core处理的第一个head的第一个M行，和最后一个head的最后一个行，中间的任务都是完整的M块
-        Q块A：            KV块4、5、6、7  ← 首块，只算后半段
-        Q块B：KV块0、1、2、3、4、5、6、7  ← 中间块，完整计算
-        Q块C：KV块0、1、2                 ← 尾块，只算前半段
-        */
-        if ((bN2Start_ == bN2End_ && gS1OStart_ == gS1OEnd_)) {
-            // 所有任务属于同一个S1G，因为当前的区间是左闭右开，所以当前Q行不会被当前core完整处理，因为
-            // 如果完整处理，gS1OStart_ 不应该等于 gS1OEnd_
-            // 同时，属于同一个行，只会写到一个faTmpOutWsPos中，不需要两个faTmpOutWsPos
-            // 只有不同的Q块，才会需要两个faTmpOutWsPos
-            info.isS2SplitCore = true;
-        } else {
-            if (headS2Split_ && (bN2Cur == bN2Start_) && (gS1Cur == gS1OStart_)) {
-                // 当前任务属于第一个S1G, 并且第一个S1G的S2被切分了
-                info.isS2SplitCore = true;
-            } else if (tailS2Split_ && (bN2Cur == bN2End_) && (gS1Cur == gS1OEnd_)) {
-                // 当前任务属于最后一个S1G, 并且最后一个S1G的S2被切分了
-                info.isS2SplitCore = true;
-                info.faTmpOutWsPos = headS2Split_ ? (info.faTmpOutWsPos + 1) : info.faTmpOutWsPos;
+        constexpr bool isCube = std::is_same_v<Task, Mxfp4CubeTask>;
+        Task tasks[PRELOAD_TASK_CACHE_SIZE];
+        uint32_t head = bN2Start_;
+        uint32_t row = gS1OStart_;
+        uint32_t s2 = s2OStart_;
+        uint64_t created = 0;
+        uint64_t tick = 0;
+        while (ShouldDispatchTask(head, row, s2)) {
+            const auto mode = GetTaskDealMode(head, row, s2);
+            if (mode != TASK_DEAL_MODE::CREATE_TASK) {
+                UpdateAxisInfo(mode, head, row, s2);
+                continue;
             }
-        }
-    }
 
-    __aicore__ inline void ExecuteTask(uint64_t loop, Mxfp4RunInfo taskRunInfo[PRELOAD_TASK_CACHE_SIZE])
-    {
-        Mxfp4RunInfo& runInfo0 = taskRunInfo[loop % PRELOAD_TASK_CACHE_SIZE];                  // 本轮任务
-
-        // 滞后流 V 预取：task j 的 Bmm2 在 tick j+PRELOAD_N 消费，本拍（tick j+PRELOAD_N-LEAD）
-        // 提前 LEAD 拍把 V(j) 发射进偶数槽。loop+LEAD>=PRELOAD_N 保证任务号不下溢（SYNC-10）。
-        if (loop + KV_PREFETCH_LEAD >= PRELOAD_N) {
-            Mxfp4RunInfo& vInfo =
-                taskRunInfo[(loop + KV_PREFETCH_LEAD - PRELOAD_N) % PRELOAD_TASK_CACHE_SIZE];
-            if (vInfo.isValid && vInfo.actMSize != 0 && vInfo.actSingleLoopS2Size != 0) {
-                if ASCEND_IS_AIC {
-                    cubeBlock_.template PrefetchKvL1<false>(vInfo, ValueSlotOf(vInfo.loop));
-                }
-            }
-        }
-
-        if (loop >= PRELOAD_N) { // 可以执行C2，然后在一组C2执行完成后，执行V2
-            Mxfp4RunInfo& runInfoNegN = taskRunInfo[(loop - PRELOAD_N) % PRELOAD_TASK_CACHE_SIZE];
-            if (runInfoNegN.isValid) {
-                if ASCEND_IS_AIC {
-                    cubeBlock_.ComputeBmm2(runInfoNegN, ValueSlotOf(runInfoNegN.loop));
-                } else {
-                   if (unlikely(runInfoNegN.isGroupLast)) { // 小组最后一个C2跑完，进行一次V2
-                        vecFaBlock_.ComputeVec2(runInfoNegN);
-                    }
-                }
-                // 对 Cube 来说，C2完成，这个任务就结束了
-                // 对 vector 来说，如果不是一个组末的task，不需要执行V2，也结束了，只有最后一个V2需要执行
-                runInfoNegN.isValid = false;
-            }
-        }
-
-        if (loop >= DELAY_P_SCALE_N) { // 可以一组执行完V1的任务，进行一次P scale update
-            Mxfp4RunInfo& runInfoNegScaleN = taskRunInfo[(loop - DELAY_P_SCALE_N) % PRELOAD_TASK_CACHE_SIZE];
-            if (runInfoNegScaleN.isValid && unlikely(runInfoNegScaleN.isGroupLast)) {
-                if ASCEND_IS_AIV {
-                    vecFaBlock_.UpdatePScale(runInfoNegScaleN);
-                }
-            }
-        }
-
-        if (runInfo0.isValid) {
-            if ASCEND_IS_AIC {
-                cubeBlock_.ComputeBmm1(runInfo0, KeySlotOf(runInfo0.loop));
+            const uint32_t realHead = head % constInfo_.realN2Size;
+            const uint32_t queryStart = row * mBaseSize;
+            const uint32_t rows = AttentionCommon::Min(static_cast<uint64_t>(mBaseSize),
+                actSeqLensQ_ * constInfo_.realGSize - queryStart);
+            const uint32_t alignedRows = (rows + 31U) & ~31U;
+            uint32_t kvHead = 0;
+            int64_t causalOffset = 0;
+            bool splitRow = false;
+            uint32_t workspaceSlot = 0;
+            if constexpr (isCube) {
+                kvHead = USE_DN ? realHead / constInfo_.gSize : realHead;
             } else {
-                vecFaBlock_.ComputeVec1(runInfo0); // 子循环和同步都在内部处理
+                causalOffset = static_cast<int64_t>(actSeqLensKv_) - static_cast<int64_t>(actSeqLensQ_);
+                if constexpr (FLASH_DECODE) {
+                    const bool firstRow = head == bN2Start_ && row == gS1OStart_;
+                    const bool lastRow = head == bN2End_ && row == gS1OEnd_;
+                    splitRow = (firstRow && lastRow) || (firstRow && headS2Split_) || (lastRow && tailS2Split_);
+                    workspaceSlot = coreFirstTmpOutWsPos_ + (!firstRow && lastRow && headS2Split_ && tailS2Split_);
+                }
             }
+
+            for (; s2 < curS2End_; ++s2) {
+                Task& task = tasks[created % PRELOAD_TASK_CACHE_SIZE];
+                task.loop = created;
+                task.bIdx = prevBIdx_;
+                task.realN2Idx = realHead;
+                task.gS1Idx = queryStart;
+                task.actMSize = rows;
+                task.actMSizeAlign32 = alignedRows;
+                task.s2Idx = s2 * s2BaseSize;
+                task.actSingleLoopS2Size = AttentionCommon::Min(static_cast<uint64_t>(s2BaseSize),
+                    actSeqLensKv_ - task.s2Idx);
+                task.isLastS2Loop = s2 + 1U == curS2End_;
+                task.isGroupLast = task.isLastS2Loop || (s2 - curS2Start_ + 1U) % GROUP_N == 0U;
+                if constexpr (isCube) {
+                    task.n2Idx = kvHead;
+                    if (rows != 0 && task.actSingleLoopS2Size != 0) {
+                        cubeBlock_.CacheKvPageIndices(task);
+                        cubeBlock_.template PrefetchKvL1<true>(task, KeySlotOf(task.loop));
+                    }
+                } else {
+                    task.isFirstS2Loop = created == 0 || s2 == curS2Start_;
+                    task.causalOffset = causalOffset;
+                    if constexpr (FLASH_DECODE) {
+                        task.isS2SplitCore = splitRow;
+                        task.faTmpOutWsPos = workspaceSlot;
+                    }
+                }
+                ++created;
+                // K for tick+LEAD has been issued. Advance one tick before reusing its parity slot.
+                if (created > KV_PREFETCH_LEAD) {
+                    ExecuteTick(tick++, created, tasks);
+                }
+            }
+            UpdateAxisInfo(TASK_DEAL_MODE::SKIP_REMAINING_S2, head, row, s2);
+        }
+        if (created != 0) {
+            while (tick < created + PRELOAD_N) {
+                ExecuteTick(tick++, created, tasks);
+            }
+        }
+    }
+
+    __aicore__ inline void ExecuteTick(uint64_t tick, uint64_t created, Mxfp4CubeTask* tasks)
+    {
+        if (tick + KV_PREFETCH_LEAD >= PRELOAD_N) {
+            const uint64_t v = tick + KV_PREFETCH_LEAD - PRELOAD_N;
+            if (v < created) {
+                auto& task = tasks[v % PRELOAD_TASK_CACHE_SIZE];
+                if (task.actMSize != 0 && task.actSingleLoopS2Size != 0) {
+                    cubeBlock_.template PrefetchKvL1<false>(task, ValueSlotOf(task.loop));
+                }
+            }
+        }
+        if (tick >= PRELOAD_N) {
+            auto& pv = tasks[(tick - PRELOAD_N) % PRELOAD_TASK_CACHE_SIZE];
+            cubeBlock_.ComputeBmm2(pv, ValueSlotOf(pv.loop));
+        }
+        if (tick < created) {
+            auto& qk = tasks[tick % PRELOAD_TASK_CACHE_SIZE];
+            cubeBlock_.ComputeBmm1(qk, KeySlotOf(qk.loop));
+        }
+    }
+
+    __aicore__ inline void ExecuteTick(uint64_t tick, uint64_t created, Mxfp4VecTask* tasks)
+    {
+        if (tick >= PRELOAD_N) {
+            auto& v2 = tasks[(tick - PRELOAD_N) % PRELOAD_TASK_CACHE_SIZE];
+            if (v2.isGroupLast) {
+                vecFaBlock_.ComputeVec2(v2);
+            }
+        }
+        if (tick >= DELAY_P_SCALE_N && tick - DELAY_P_SCALE_N < created) {
+            auto& scale = tasks[(tick - DELAY_P_SCALE_N) % PRELOAD_TASK_CACHE_SIZE];
+            if (scale.isGroupLast) {
+                vecFaBlock_.UpdatePScale(scale);
+            }
+        }
+        if (tick < created) {
+            vecFaBlock_.ComputeVec1(tasks[tick % PRELOAD_TASK_CACHE_SIZE]);
         }
     }
 
@@ -653,10 +593,6 @@ public:
             return TASK_DEAL_MODE::SKIP_REMAINING_S2;
         }
 
-        if (s2Cur == curS2Start_) {
-            mloop_++; // 推进一个新的m行
-        }
-
         return TASK_DEAL_MODE::CREATE_TASK;
     }
 
@@ -667,12 +603,16 @@ public:
         // 只有第一个开始的M行和最后一个结束的M行，s2的开始和结束才可能不是0和最后一个块
         // 中间的M行一定会处理一整行kv
         if ((bN2Cur == bN2Start_) && (gS1Cur == gS1OStart_)) {
-            headS2Split_ = s2OStart_ != 0U;
+            if constexpr (TRACK_FD_SPLIT) {
+                headS2Split_ = s2OStart_ != 0U;
+            }
             curS2Start_ = s2OStart_;
         }
 
         if ((bN2Cur == bN2End_) && (gS1Cur == gS1OEnd_)) {
-            tailS2Split_ = s2OEnd_ != 0U;
+            if constexpr (TRACK_FD_SPLIT) {
+                tailS2Split_ = s2OEnd_ != 0U;
+            }
             curS2End_ = s2OEnd_;
         }
     }
@@ -734,11 +674,15 @@ public:
         curS2End_ = s2EndWithSparse;
 
         if (bN2Cur == bN2Start_ && gS1Cur == gS1OStart_) { // first line
-            headS2Split_ = s2OStart_ > s2StartWithSparse ? true : false; // 如果不是起点，就是切分了
+            if constexpr (TRACK_FD_SPLIT) {
+                headS2Split_ = s2OStart_ > s2StartWithSparse;
+            }
             curS2Start_ = AttentionCommon::Max(s2StartWithSparse, s2OStart_);
         }
         if (bN2Cur == bN2End_ && gS1Cur == gS1OEnd_) { // last line
-            tailS2Split_ = s2OEnd_ > 0U ? true : false; // 如果s2不是终点，s2就被切分了，当前需要存储到workspace
+            if constexpr (TRACK_FD_SPLIT) {
+                tailS2Split_ = s2OEnd_ > 0U;
+            }
             curS2End_ = s2OEnd_ > 0U ? AttentionCommon::Min(s2EndWithSparse, s2OEnd_) : s2EndWithSparse;
         }
         return;

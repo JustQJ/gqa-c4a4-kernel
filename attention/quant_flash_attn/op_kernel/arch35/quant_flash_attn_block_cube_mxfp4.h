@@ -49,6 +49,11 @@ public:
     static_assert(mBaseSize == 128 && (dBaseSize == 128 || dBaseSize == 256),
                   "MXFP4 supports M128 and D128/D256 only");
     static_assert(s2BaseSize == (dBaseSize == 128 ? 256 : 128), "Unsupported MXFP4 task size");
+    // CheckBlockSizeMxFp4 accepts power-of-two pages starting at 64 tokens.
+    // Each task starts at a multiple of s2BaseSize.
+    static constexpr uint32_t MIN_KV_PAGE_TOKENS = 64U;
+    static_assert(s2BaseSize <= Mxfp4CubeTask::KV_PAGE_CAPACITY * MIN_KV_PAGE_TOKENS,
+                  "MXFP4 S2 tile exceeds the KV page cache capacity");
     static_assert(KvLayoutType >= 1 && KvLayoutType <= 3 && layout == LayOutTypeEnum::LAYOUT_TND,
                   "MXFP4 requires Q TND and paged KV (PA_BBND, PA_BNBD or PA_NZ)");
     static_assert(isDAligned, "MXFP4 unaligned D is not implemented");
@@ -140,6 +145,10 @@ public:
     uint64_t pvGroupSequence_ = 0; // Matches Vector nextGroupId_ across sections.
     bool qCached_ = false;
     uint32_t queryL0ReadyCount_ = 0; // Initial QK issues populate the dimension-specific dedicated L0 slots.
+    uint32_t pageShift_ = 0;
+    // PV alternates two dedicated V slots. MX padding depends on the aligned K length in each slot.
+    uint32_t previousPvLength_ = 0;
+    uint32_t olderPvLength_ = 0;
     const ConstInfo_t& constInfo_;
 
     /*=================================function============================================= */
@@ -157,6 +166,8 @@ public:
         this->kvSeqParserPtr_ = &kvParser;
         if constexpr (PAGE_ATTENTION) {
             blockTableGm_.SetGlobalBuffer((__gm__ int32_t*)blockTable);
+            // The MXFP4 host checker accepts only powers of two from 64 through 1024.
+            pageShift_ = __builtin_ctz(static_cast<uint32_t>(constInfo_.blockSize));
         }
 
         queryGm_.SetGlobalBuffer((__gm__ uint8_t*)query);
@@ -246,6 +257,12 @@ public:
     // 用 asc_copy_l12l0a_mx/asc_copy_l12l0b_mx 独立指定到补列的 scale 分形。
     __aicore__ inline void InitPaddingL0(const LocalTensor<KV_T>& valueL0Tensor, uint32_t alignedKvTokenCount)
     {
+        const uint32_t slotLength = olderPvLength_;
+        olderPvLength_ = previousPvLength_;
+        previousPvLength_ = alignedKvTokenCount;
+        if (slotLength == alignedKvTokenCount) {
+            return; // LoadV2L0 only overwrites the data channels for this length.
+        }
         constexpr uint32_t padFractalIndex = dVBaseSize / 16;       // 补列所在 M 分形序号
         constexpr uint32_t l0RowFractals = (dVBaseSize + 16) / 16;  // V 槽 M 方向分形高度
         constexpr uint32_t payloadBytes = s2BaseSize * PADDING_CHANNEL_COUNT / 2;
@@ -267,13 +284,24 @@ public:
         PipeBarrier<PIPE_MTE1>();
     }
 
-    __aicore__ inline void ComputeBmm1(Mxfp4RunInfo& runInfo, uint32_t slot)
+    __aicore__ inline void ComputeBmm1(Mxfp4CubeTask& runInfo, uint32_t slot)
     {
-        if (runInfo.actMSize == 0 || runInfo.actSingleLoopS2Size == 0) {
+        if (runInfo.actMSize == mBaseSize && runInfo.actSingleLoopS2Size == s2BaseSize &&
+            qCached_ && queryL0ReadyCount_ == QK_L0_SLOT_COUNT) {
+            ComputeBmm1Tile<true>(runInfo, slot);
+        } else {
+            ComputeBmm1Tile<false>(runInfo, slot);
+        }
+    }
+
+    template <bool FullCached>
+    __aicore__ inline void ComputeBmm1Tile(Mxfp4CubeTask& runInfo, uint32_t slot)
+    {
+        if (!FullCached && (runInfo.actMSize == 0 || runInfo.actSingleLoopS2Size == 0)) {
             return;
         }
         Buffer<BufferType::L1>& queryL1Buffer = l1QBuffers_.Get();
-        if (!qCached_) {
+        if (!FullCached && !qCached_) {
             queryL0ReadyCount_ = 0;
             queryL1Buffer.template Wait<HardEvent::MTE1_MTE2>();
             if constexpr (USE_DN) {
@@ -292,10 +320,13 @@ public:
         LocalTensor<SCALE_T> keyScaleL1Tensor = keyL1Buffer.template GetTensor<uint8_t>(s2BaseSize * dBaseSize / 2)
                           .template ReinterpretCast<SCALE_T>();
         keyL1Buffer.template Wait<HardEvent::MTE2_MTE1>();
-        for (uint32_t subBlockS2Offset = 0; subBlockS2Offset < runInfo.actSingleLoopS2Size;
+        const uint32_t rows = FullCached ? mBaseSize : runInfo.actMSize;
+        const uint32_t alignedRows = FullCached ? mBaseSize : runInfo.actMSizeAlign32;
+        const uint32_t tokens = FullCached ? s2BaseSize : runInfo.actSingleLoopS2Size;
+        for (uint32_t subBlockS2Offset = 0; subBlockS2Offset < tokens;
             subBlockS2Offset += s2SplitSize) {
             const uint32_t validKvTokenCount = AttentionCommon::Min(s2SplitSize,
-                runInfo.actSingleLoopS2Size - subBlockS2Offset);
+                tokens - subBlockS2Offset);
             // 三组 Get 同步轮转；只等待本槽的 FIX 完成，不排空另一槽。
             // 因而下一槽的 Mmad 可与本槽的 L0C -> UB Fixpipe 重叠。
             Buffer<BufferType::L0A>& qkLeftL0ABuffer = mm1LeftBuffers_.Get();
@@ -309,30 +340,30 @@ public:
             if constexpr (USE_DN) {
                 LoadK2L0(qkLeftL0ABuffer.template GetTensor<KV_T>(), keyL1Tensor, keyScaleL1Tensor,
                     subBlockS2Offset, validKvTokenCount);
-                if (queryL0ReadyCount_ < QK_L0_SLOT_COUNT) {
+                if (!FullCached && queryL0ReadyCount_ < QK_L0_SLOT_COUNT) {
                     LoadQ2L0(qkRightL0BBuffer.template GetTensor<Q_T>(), queryL1Tensor, queryScaleL1Tensor, runInfo);
                 }
             } else {
-                if (queryL0ReadyCount_ < QK_L0_SLOT_COUNT) {
+                if (!FullCached && queryL0ReadyCount_ < QK_L0_SLOT_COUNT) {
                     LoadQ2L0(qkLeftL0ABuffer.template GetTensor<Q_T>(), queryL1Tensor, queryScaleL1Tensor, runInfo);
                 }
                 LoadK2L0(qkRightL0BBuffer.template GetTensor<KV_T>(), keyL1Tensor, keyScaleL1Tensor,
                     subBlockS2Offset, validKvTokenCount);
             }
-            if (queryL0ReadyCount_ < QK_L0_SLOT_COUNT) {
+            if (!FullCached && queryL0ReadyCount_ < QK_L0_SLOT_COUNT) {
                 ++queryL0ReadyCount_;
             }
             qkLeftL0ABuffer.template Set<HardEvent::MTE1_M>();
             qkLeftL0ABuffer.template Wait<HardEvent::MTE1_M>();
             qkResultL0CBuffer.template Wait<HardEvent::FIX_M>();
             MatmulQK(qkResultL0CBuffer.template GetTensor<T>(), qkLeftL0ABuffer.template GetTensor<INPUT_T>(),
-                     qkRightL0BBuffer.template GetTensor<INPUT_T>(), validKvTokenCount, runInfo.actMSize);
+                     qkRightL0BBuffer.template GetTensor<INPUT_T>(), validKvTokenCount, rows);
             qkLeftL0ABuffer.template Set<HardEvent::M_MTE1>();
             qkResultL0CBuffer.template Set<HardEvent::M_FIX>();
             qkResultL0CBuffer.template Wait<HardEvent::M_FIX>();
             const uint32_t scoreSlot = scoreSequence_++ % CrossBufferType::SCORE_SLOT_COUNT;
             crossBuffers_.waitBmm1Buffer(scoreSlot);
-            FixpipeMm1(crossBuffers_.GetBmm1Slot(scoreSlot), qkResultL0CBuffer.template GetTensor<T>(), runInfo,
+            FixpipeMm1(crossBuffers_.GetBmm1Slot(scoreSlot), qkResultL0CBuffer.template GetTensor<T>(), rows, alignedRows,
                 validKvTokenCount);
             // Even an AIV with no valid query rows receives and acknowledges this event.
             crossBuffers_.setBmm1Buffer(scoreSlot);
@@ -345,9 +376,19 @@ public:
         }
     }
 
-    __aicore__ inline void ComputeBmm2(Mxfp4RunInfo& runInfo, uint32_t slot)
+    __aicore__ inline void ComputeBmm2(Mxfp4CubeTask& runInfo, uint32_t slot)
     {
-        if (runInfo.actMSize == 0 || runInfo.actSingleLoopS2Size == 0) {
+        if (runInfo.actMSize == mBaseSize && runInfo.actSingleLoopS2Size == s2BaseSize) {
+            ComputeBmm2Tile<true>(runInfo, slot);
+        } else {
+            ComputeBmm2Tile<false>(runInfo, slot);
+        }
+    }
+
+    template <bool FullTile>
+    __aicore__ inline void ComputeBmm2Tile(Mxfp4CubeTask& runInfo, uint32_t slot)
+    {
+        if (!FullTile && (runInfo.actMSize == 0 || runInfo.actSingleLoopS2Size == 0)) {
             return;
         }
         ASSERT(pvGroupTasks_ < 16);
@@ -363,7 +404,8 @@ public:
         LocalTensor<SCALE_T> valueScaleL1Tensor = valueL1Buffer.template GetTensor<uint8_t>(s2BaseSize * dVBaseSize / 2)
                           .template ReinterpretCast<SCALE_T>();
         valueL1Buffer.template Wait<HardEvent::MTE2_MTE1>();
-        const uint32_t alignedKvTokenCount = (runInfo.actSingleLoopS2Size + 63U) / 64U * 64U;
+        const uint32_t alignedRows = FullTile ? mBaseSize : runInfo.actMSizeAlign32;
+        const uint32_t alignedKvTokenCount = FullTile ? s2BaseSize : (runInfo.actSingleLoopS2Size + 63U) / 64U * 64U;
         Buffer<BufferType::L0A>& pvLeftL0ABuffer = mm2LeftBuffers_.Get();
         Buffer<BufferType::L0B, SyncType::NO_SYNC>& pvRightL0BBuffer = mm2RightBuffers_.Get();
         pvLeftL0ABuffer.template Wait<HardEvent::M_MTE1>();
@@ -371,9 +413,9 @@ public:
             InitPaddingL0(pvLeftL0ABuffer.template GetTensor<KV_T>(), alignedKvTokenCount);
             LoadV2L0(pvLeftL0ABuffer.template GetTensor<KV_T>(), valueL1Tensor, valueScaleL1Tensor,
                 alignedKvTokenCount);
-            LoadP2L0(pvRightL0BBuffer.template GetTensor<INPUT_T>(), runInfo.loop % P_SLOT_COUNT, alignedKvTokenCount, runInfo.actMSizeAlign32);
+            LoadP2L0(pvRightL0BBuffer.template GetTensor<INPUT_T>(), runInfo.loop % P_SLOT_COUNT, alignedKvTokenCount, alignedRows);
         } else {
-            LoadP2L0(pvLeftL0ABuffer.template GetTensor<INPUT_T>(), runInfo.loop % P_SLOT_COUNT, alignedKvTokenCount, runInfo.actMSizeAlign32);
+            LoadP2L0(pvLeftL0ABuffer.template GetTensor<INPUT_T>(), runInfo.loop % P_SLOT_COUNT, alignedKvTokenCount, alignedRows);
             InitPaddingL0(pvRightL0BBuffer.template GetTensor<KV_T>(), alignedKvTokenCount);
             LoadV2L0(pvRightL0BBuffer.template GetTensor<KV_T>(), valueL1Tensor, valueScaleL1Tensor,
                 alignedKvTokenCount);
@@ -392,7 +434,7 @@ public:
             pvResultL0CBuffer.template Set<HardEvent::M_FIX>();
             pvResultL0CBuffer.template Wait<HardEvent::M_FIX>();
             crossBuffers_.watBmm2Buffer();
-            FixpipeMm2(crossBuffers_.GetBmm2Slot(0), pvResultL0CBuffer.template GetTensor<T>(), runInfo);
+            FixpipeMm2(crossBuffers_.GetBmm2Slot(0), pvResultL0CBuffer.template GetTensor<T>(), alignedRows);
             crossBuffers_.setBmm2Buffer();
             pvResultL0CBuffer.template Set<HardEvent::FIX_M>();
             pvGroupTasks_ = 0;
@@ -401,14 +443,12 @@ public:
     }
 
     // 仅缓存本任务有效 token 覆盖的页号，供 K/V payload 与 scale 搬运按页序复用。
-    __aicore__ inline void CacheKvPageIndices(Mxfp4RunInfo& runInfo)
+    __aicore__ inline void CacheKvPageIndices(Mxfp4CubeTask& runInfo)
     {
         static_assert(KvLayoutType >= 1 && KvLayoutType <= 3, "MXFP4 KV copy requires a paged KV layout");
-        const uint32_t blockSize = constInfo_.blockSize;
-        const uint64_t firstPage = static_cast<uint64_t>(runInfo.s2Idx) / blockSize;
+        const uint64_t firstPage = static_cast<uint64_t>(runInfo.s2Idx) >> pageShift_;
         const uint64_t lastPage =
-            (static_cast<uint64_t>(runInfo.s2Idx) + runInfo.actSingleLoopS2Size - 1U) / blockSize;
-        ASSERT(lastPage - firstPage < 8U);
+            (static_cast<uint64_t>(runInfo.s2Idx) + runInfo.actSingleLoopS2Size - 1U) >> pageShift_;
         uint32_t cached = 0;
         for (uint64_t page = firstPage; page <= lastPage; ++page) {
             runInfo.kvPageIdx[cached++] = blockTableGm_.GetValue(
@@ -421,7 +461,7 @@ public:
     // MTE2_MTE1。调用方保证 slot 与消费侧公式一致（K 奇数槽 / V 偶数槽，按任务号奇偶），
     // 且该 task 通过与消费侧相同的 actMSize/actSingleLoopS2Size 非零守卫。
     template <bool IsKey>
-    __aicore__ inline void PrefetchKvL1(Mxfp4RunInfo& runInfo, uint32_t slot)
+    __aicore__ inline void PrefetchKvL1(Mxfp4CubeTask& runInfo, uint32_t slot)
     {
         Buffer<BufferType::L1>& kvL1Buffer = l1KVBuffers_.Get(slot);
         kvL1Buffer.template Wait<HardEvent::MTE1_MTE2>();
@@ -451,7 +491,7 @@ public:
     // fractals of the head are contiguous in GM and in the destination slot.
     template <typename Strides>
     __aicore__ inline uint64_t FullPageHeadOffset(const Strides& strides, uint32_t unitsPerHead, uint32_t interleavedHeadStride,
-                                                   const Mxfp4RunInfo& runInfo)
+                                                   const Mxfp4CubeTask& runInfo)
     {
         const uint64_t pageStride = strides.bnStride == 0 ?
             static_cast<uint64_t>(constInfo_.n2Size) * unitsPerHead : strides.bnStride / 2;
@@ -462,7 +502,7 @@ public:
 
     template <bool IsKey>
     __aicore__ inline void CopyFullKvPage(LocalTensor<KV_T> payload, LocalTensor<SCALE_T> scale,
-                                          Mxfp4RunInfo& runInfo)
+                                          Mxfp4CubeTask& runInfo)
     {
         constexpr uint32_t rowBytes = dBaseSize / 2;
         constexpr uint32_t payloadBytes = s2BaseSize * rowBytes;
@@ -562,31 +602,31 @@ public:
     }
 
     __aicore__ inline void FixpipeMm1(const LocalTensor<float>& scoreUbTensor, const LocalTensor<T>& scoreL0CTensor,
-                                     Mxfp4RunInfo& runInfo, uint32_t validKvTokenCount)
+                                     uint32_t rows, uint32_t alignedRows, uint32_t validKvTokenCount)
     {
         if constexpr (!ENABLE_QF322F32_PRE) {
             // Dual destination requires NoQuant. V1 applies the FP32 score
             // scale exactly once. DN keeps the fixed Q64 split even for tails;
             // padded Q columns stay inside this L0C slot and are not output.
             FixpipeParamsC310<CO2Layout::ROW_MAJOR> scoreFixpipeParams {};
-            scoreFixpipeParams.mSize = USE_DN ? validKvTokenCount : runInfo.actMSizeAlign32;
+            scoreFixpipeParams.mSize = USE_DN ? validKvTokenCount : alignedRows;
             scoreFixpipeParams.nSize = USE_DN ? mBaseSize : (validKvTokenCount + 7U) / 8U * 8U;
             scoreFixpipeParams.srcStride = USE_DN ?
-                (validKvTokenCount + 15U) / 16U * 16U : runInfo.actMSizeAlign32;
+                (validKvTokenCount + 15U) / 16U * 16U : alignedRows;
             scoreFixpipeParams.dstStride = USE_DN ? mBaseSize / CV_RATIO : s2SplitSize;
             scoreFixpipeParams.dualDstCtl = USE_DN ? 2 : 1;
             scoreFixpipeParams.quantPre = QuantMode_t::NoQuant;
             scoreFixpipeParams.params.ndNum = 1;
             Fixpipe<float, T, FIXPIPE_CONFIG>(scoreUbTensor, scoreL0CTensor, scoreFixpipeParams);
         } else {
-            const uint32_t l0cRowStride = ((USE_DN ? validKvTokenCount : runInfo.actMSize) + 15U) / 16U * 16U;
+            const uint32_t l0cRowStride = ((USE_DN ? validKvTokenCount : rows) + 15U) / 16U * 16U;
             for (uint32_t aivIndex = 0; aivIndex < CV_RATIO; ++aivIndex) {
-                const uint32_t rowsPerAiv = USE_DN ? mBaseSize / CV_RATIO : runInfo.actMSizeAlign32 / CV_RATIO;
+                const uint32_t rowsPerAiv = USE_DN ? mBaseSize / CV_RATIO : alignedRows / CV_RATIO;
                 const uint32_t firstQueryRow = aivIndex * rowsPerAiv;
-                if (firstQueryRow >= runInfo.actMSize) {
+                if (firstQueryRow >= rows) {
                     continue;
                 }
-                const uint32_t validQueryRowCount = AttentionCommon::Min(rowsPerAiv, runInfo.actMSize - firstQueryRow);
+                const uint32_t validQueryRowCount = AttentionCommon::Min(rowsPerAiv, rows - firstQueryRow);
                 FixpipeParamsC310<CO2Layout::ROW_MAJOR> scoreFixpipeParams {};
                 scoreFixpipeParams.mSize = USE_DN ? validKvTokenCount : validQueryRowCount;
                 scoreFixpipeParams.nSize = ((USE_DN ? validQueryRowCount : validKvTokenCount) + 7U) / 8U * 8U;
@@ -609,35 +649,12 @@ public:
     }
 
     __aicore__ inline void FixpipeMm2(const LocalTensor<float>& pvResultUbTensor,
-        const LocalTensor<T>& pvResultL0CTensor, const Mxfp4RunInfo& runInfo)
+        const LocalTensor<T>& pvResultL0CTensor, uint32_t alignedRows)
     {
-        if constexpr (!USE_DN) {
-          if (runInfo.actMSizeAlign32 < mBaseSize) {
-            const uint32_t rowsPerAiv = runInfo.actMSizeAlign32 / CV_RATIO;
-            for (uint32_t aivIndex = 0; aivIndex < CV_RATIO; ++aivIndex) {
-                const uint32_t firstQueryRow = aivIndex * rowsPerAiv;
-                if (firstQueryRow >= runInfo.actMSize) {
-                    continue;
-                }
-                FixpipeParamsC310<CO2Layout::ROW_MAJOR> params {};
-                params.mSize = AttentionCommon::Min(rowsPerAiv, runInfo.actMSize - firstQueryRow);
-                params.nSize = dVBaseSize + 8;
-                params.srcStride = runInfo.actMSizeAlign32;
-                params.dstStride = dVBaseSize + 8;
-                params.dualDstCtl = 0;
-                params.subBlockId = aivIndex;
-                params.quantPre = QuantMode_t::NoQuant;
-                params.params.ndNum = 1;
-                Fixpipe<float, T, FIXPIPE_CONFIG>(pvResultUbTensor,
-                    pvResultL0CTensor[firstQueryRow * 16U], params);
-            }
-            return;
-          }
-        }
         FixpipeParamsC310<CO2Layout::ROW_MAJOR> pvFixpipeParams {};
-        pvFixpipeParams.mSize = USE_DN ? dVBaseSize + 1 : mBaseSize;
+        pvFixpipeParams.mSize = USE_DN ? dVBaseSize + 1 : alignedRows;
         pvFixpipeParams.nSize = USE_DN ? mBaseSize : dVBaseSize + 8;
-        pvFixpipeParams.srcStride = USE_DN ? dVBaseSize + 16 : mBaseSize;
+        pvFixpipeParams.srcStride = USE_DN ? dVBaseSize + 16 : alignedRows;
         pvFixpipeParams.dstStride = USE_DN ? mBaseSize / CV_RATIO : dVBaseSize + 8;
         pvFixpipeParams.dualDstCtl = USE_DN ? 2 : 1;
         pvFixpipeParams.quantPre = QuantMode_t::NoQuant;
@@ -646,7 +663,7 @@ public:
     }
 
     __aicore__ inline void LoadQ2L0(const LocalTensor<Q_T>& queryL0Tensor, const LocalTensor<Q_T>& queryL1Tensor,
-                                   const LocalTensor<SCALE_T>& queryScaleL1Tensor, Mxfp4RunInfo& runInfo)
+                                   const LocalTensor<SCALE_T>& queryScaleL1Tensor, Mxfp4CubeTask& runInfo)
     {
         LoadData2DParamsV2 queryLoadParams {};
         queryLoadParams.mStep = (!USE_DN && !ENABLE_QF322F32_PRE) ?
@@ -747,7 +764,7 @@ public:
         }
     }
 
-    __aicore__ inline void CopyQGm2L1Dn(const LocalTensor<Q_T>& queryL1Tensor, Mxfp4RunInfo& runInfo)
+    __aicore__ inline void CopyQGm2L1Dn(const LocalTensor<Q_T>& queryL1Tensor, Mxfp4CubeTask& runInfo)
     {
         static_assert(LAYOUT == LayOutTypeEnum::LAYOUT_TND, "MXFP4 Q copy currently supports TND only");
         if (runInfo.actMSize == 0) {
@@ -765,7 +782,7 @@ public:
                          queryHeadCount * queryRowBytes, runInfo.actMSizeAlign32);
     }
 
-    __aicore__ inline void CopyQGm2L1Nd(const LocalTensor<Q_T>& queryL1Tensor, Mxfp4RunInfo& runInfo)
+    __aicore__ inline void CopyQGm2L1Nd(const LocalTensor<Q_T>& queryL1Tensor, Mxfp4CubeTask& runInfo)
     {
         static_assert(LAYOUT == LayOutTypeEnum::LAYOUT_TND, "MXFP4 Q copy currently supports TND only");
         if (runInfo.actMSize == 0) {
@@ -831,7 +848,7 @@ public:
         }
     }
 
-    __aicore__ inline void CopyQScaleGm2L1(const LocalTensor<SCALE_T>& queryScaleL1Tensor, Mxfp4RunInfo& runInfo)
+    __aicore__ inline void CopyQScaleGm2L1(const LocalTensor<SCALE_T>& queryScaleL1Tensor, Mxfp4CubeTask& runInfo)
     {
         static_assert(LAYOUT == LayOutTypeEnum::LAYOUT_TND, "MXFP4 Q scale copy currently supports TND only");
         if (runInfo.actMSize == 0) {
@@ -867,7 +884,7 @@ public:
 
     __aicore__ inline void CopyKvPayloadGm2L1(const LocalTensor<uint8_t>& kvPayloadL1Tensor,
                                              const GlobalTensor<uint8_t>& kvPayloadGmTensor, uint64_t pageLogicalStride,
-                                             uint64_t headLogicalStride, uint32_t payloadRowBytes, Mxfp4RunInfo& runInfo)
+                                             uint64_t headLogicalStride, uint32_t payloadRowBytes, Mxfp4CubeTask& runInfo)
     {
         static_assert(KvLayoutType >= 1 && KvLayoutType <= 3, "MXFP4 KV copy requires a paged KV layout");
 
@@ -883,7 +900,7 @@ public:
         uint32_t pageChunk = 0; // 页序号：与 runInfo.kvPageIdx 的缓存序一致
         while (copiedTokenCount < runInfo.actSingleLoopS2Size) {
             const uint64_t logicalTokenIndex = static_cast<uint64_t>(runInfo.s2Idx) + copiedTokenCount;
-            const uint32_t pageTokenOffset = logicalTokenIndex % blockSize;
+            const uint32_t pageTokenOffset = logicalTokenIndex & (blockSize - 1U);
             const uint32_t pageTokenCount =
                 AttentionCommon::Min(static_cast<uint32_t>(runInfo.actSingleLoopS2Size - copiedTokenCount),
                                       blockSize - pageTokenOffset);
@@ -909,14 +926,14 @@ public:
     }
 
     // 调用者负责目标槽、payload/scale 区域及同步；搬运函数不分配或轮转 buffer。
-    __aicore__ inline void CopyKGm2L1(const LocalTensor<KV_T>& keyL1Tensor, Mxfp4RunInfo& runInfo)
+    __aicore__ inline void CopyKGm2L1(const LocalTensor<KV_T>& keyL1Tensor, Mxfp4CubeTask& runInfo)
     {
         LocalTensor<uint8_t> keyL1Bytes = keyL1Tensor.template ReinterpretCast<uint8_t>();
         CopyKvPayloadGm2L1(keyL1Bytes, keyGm_, constInfo_.keyStrides.bnStride, constInfo_.keyStrides.n2Stride,
             dBaseSize / 2, runInfo);
     }
 
-    __aicore__ inline void CopyKScaleGm2L1(const LocalTensor<SCALE_T>& keyScaleL1Tensor, Mxfp4RunInfo& runInfo)
+    __aicore__ inline void CopyKScaleGm2L1(const LocalTensor<SCALE_T>& keyScaleL1Tensor, Mxfp4CubeTask& runInfo)
     {
         static_assert(KvLayoutType >= 1 && KvLayoutType <= 3, "MXFP4 K scale copy requires a paged KV layout");
         // 三种布局统一转换为 L1 [ceil(S/16),D/64,16,2]；PA_NZ 与该分形天然一致。
@@ -941,7 +958,7 @@ public:
         uint32_t pageChunk = 0; // 页序号：与 runInfo.kvPageIdx 的缓存序一致
         while (copiedTokenCount < runInfo.actSingleLoopS2Size) {
             const uint64_t logicalTokenIndex = static_cast<uint64_t>(runInfo.s2Idx) + copiedTokenCount;
-            const uint32_t pageTokenOffset = logicalTokenIndex % blockSize;
+            const uint32_t pageTokenOffset = logicalTokenIndex & (blockSize - 1U);
             const uint32_t pageTokenCount =
                 AttentionCommon::Min(static_cast<uint32_t>(runInfo.actSingleLoopS2Size - copiedTokenCount),
                                       blockSize - pageTokenOffset);
@@ -964,7 +981,7 @@ public:
         }
     }
 
-    __aicore__ inline void CopyVGm2L1(const LocalTensor<KV_T>& valueL1Tensor, Mxfp4RunInfo& runInfo)
+    __aicore__ inline void CopyVGm2L1(const LocalTensor<KV_T>& valueL1Tensor, Mxfp4CubeTask& runInfo)
     {
         LocalTensor<uint8_t> valueL1Bytes = valueL1Tensor.template ReinterpretCast<uint8_t>();
         CopyKvPayloadGm2L1(valueL1Bytes, valueGm_, constInfo_.valueStrides.bnStride, constInfo_.valueStrides.n2Stride,
@@ -983,7 +1000,7 @@ public:
         }
     }
 
-    __aicore__ inline void CopyVScaleGm2L1(const LocalTensor<SCALE_T>& valueScaleL1Tensor, Mxfp4RunInfo& runInfo)
+    __aicore__ inline void CopyVScaleGm2L1(const LocalTensor<SCALE_T>& valueScaleL1Tensor, Mxfp4CubeTask& runInfo)
     {
         static_assert(KvLayoutType >= 1 && KvLayoutType <= 3, "MXFP4 V scale copy requires a paged KV layout");
         // L1 固定为 [Dv/16,S2/64,16,2]；PA_NZ 直拷 32B 分形，BBND/BNBD 做 ND2NZ。
@@ -1008,7 +1025,7 @@ public:
         while (copiedScaleGroupCount < scaleGroupCount) {
             const uint64_t logicalScaleGroupIndex = static_cast<uint64_t>(runInfo.s2Idx) / MXFP_DIVISOR_SIZE +
                 copiedScaleGroupCount;
-            const uint32_t pageScaleGroupOffset = logicalScaleGroupIndex % scaleGroupsPerPage;
+            const uint32_t pageScaleGroupOffset = logicalScaleGroupIndex & (scaleGroupsPerPage - 1U);
             const uint32_t pageScaleGroupCount = AttentionCommon::Min(scaleGroupCount - copiedScaleGroupCount,
                 scaleGroupsPerPage - pageScaleGroupOffset);
             const uint64_t physicalPageIndex = runInfo.kvPageIdx[pageChunk++];
@@ -1065,7 +1082,7 @@ public:
     using KV_T = INPUT_T;
     using MM_T = T;
     using ConstInfoX = ConstInfo_t;
-    using RunInfoX = Mxfp4RunInfo;
+    using RunInfoX = Mxfp4CubeTask;
     __aicore__ inline QuantFlashAttnBlockCubeMxfp4Dummy(ConstInfoX&) {}
 };
 

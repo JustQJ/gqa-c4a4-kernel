@@ -215,7 +215,7 @@ public:
         tPipe_->ReleaseEventID<HardEvent::MTE3_V>(copyToVectorEvent_);
     }
 
-    __aicore__ inline void ComputeVec1(Mxfp4RunInfo& runInfo)
+    __aicore__ inline void ComputeVec1(Mxfp4VecTask& runInfo)
     {
         if (runInfo.actMSize == 0 || runInfo.actSingleLoopS2Size == 0) {
             return;
@@ -245,7 +245,7 @@ public:
                 params.qGs1Start = static_cast<uint64_t>(runInfo.gS1Idx) + firstRow;
                 params.qGroupSize = USE_DN ? 1U : constInfo_.realGSize;
                 params.kvStart = static_cast<uint64_t>(runInfo.s2Idx) + chunkOffset;
-                params.causalOffset = static_cast<int64_t>(runInfo.actS2Size) - static_cast<int64_t>(runInfo.actS1Size);
+                params.causalOffset = runInfo.causalOffset;
                 params.scoreScale = constInfo_.scaleValue;
                 LocalTensor<float> score = crossBuffers_.GetBmm1Slot(scoreSlot);
                 if constexpr (USE_DN) {
@@ -277,7 +277,7 @@ public:
         SealProbabilityGroup(runInfo);
     }
 
-    __aicore__ inline void UpdatePScale(const Mxfp4RunInfo& runInfo)
+    __aicore__ inline void UpdatePScale(const Mxfp4VecTask& runInfo)
     {
         GroupOwner& owner = GetGroupOwner(runInfo, GroupState::SEALED);
         ASSERT(runInfo.isGroupLast || runInfo.isLastS2Loop);
@@ -322,7 +322,7 @@ public:
         crossBuffers_.setPscaleUpdate(runInfo.v1GroupId);
     }
 
-    __aicore__ inline void ComputeVec2(const Mxfp4RunInfo& runInfo)
+    __aicore__ inline void ComputeVec2(const Mxfp4VecTask& runInfo)
     {
         GroupOwner& owner = GetGroupOwner(runInfo, GroupState::READY);
         ASSERT(runInfo.isGroupLast || runInfo.isLastS2Loop);
@@ -400,19 +400,19 @@ private:
     TEventID vectorToCopyEvent_, copyToVectorEvent_;
     TEventID pVectorToCopyEvents_[P_SLOT_COUNT], pCopyToVectorEvents_[P_SLOT_COUNT];
 
-    __aicore__ inline uint32_t GetAivRowCapacity(const Mxfp4RunInfo& runInfo) const
+    __aicore__ inline uint32_t GetAivRowCapacity(const Mxfp4VecTask& runInfo) const
     {
         // ND short M blocks use both AIVs. Each share is a whole Q16 scale block.
         return USE_DN ? VEC_ROWS : runInfo.actMSizeAlign32 / CV_RATIO;
     }
 
-    __aicore__ inline uint32_t GetValidQueryRows(const Mxfp4RunInfo& runInfo) const
+    __aicore__ inline uint32_t GetValidQueryRows(const Mxfp4VecTask& runInfo) const
     {
         const uint32_t firstRow = constInfo_.subBlockIdx * GetAivRowCapacity(runInfo);
         return runInfo.actMSize > firstRow ? AttentionCommon::Min(GetAivRowCapacity(runInfo), runInfo.actMSize - firstRow) : 0;
     }
 
-    __aicore__ inline LocalTensor<float> BeginProbabilityGroup(Mxfp4RunInfo& runInfo)
+    __aicore__ inline LocalTensor<float> BeginProbabilityGroup(Mxfp4VecTask& runInfo)
     {
         const uint32_t groupSlot = nextGroupId_ % GROUP_MAX_SLOTS;
         GroupOwner& owner = groupOwners_[groupSlot];
@@ -434,7 +434,7 @@ private:
         return maximum;
     }
 
-    __aicore__ inline void SealProbabilityGroup(const Mxfp4RunInfo& runInfo)
+    __aicore__ inline void SealProbabilityGroup(const Mxfp4VecTask& runInfo)
     {
         GroupOwner& owner = GetGroupOwner(runInfo, GroupState::ACCUMULATING);
         ++owner.taskCount;
@@ -447,7 +447,7 @@ private:
         }
     }
 
-    __aicore__ inline GroupOwner& GetGroupOwner(const Mxfp4RunInfo& runInfo, GroupState expectedState)
+    __aicore__ inline GroupOwner& GetGroupOwner(const Mxfp4VecTask& runInfo, GroupState expectedState)
     {
         GroupOwner& owner = groupOwners_[runInfo.v1GroupId % GROUP_MAX_SLOTS];
         ASSERT(owner.id == runInfo.v1GroupId && owner.state == expectedState);
@@ -467,7 +467,7 @@ private:
     }
 
     __aicore__ inline void CopyProbabilityToL1(const LocalTensor<uint8_t>& destination,
-                                              const LocalTensor<uint8_t>& source, const Mxfp4RunInfo& runInfo)
+                                              const LocalTensor<uint8_t>& source, const Mxfp4VecTask& runInfo)
     {
         const uint32_t firstRow = constInfo_.subBlockIdx * GetAivRowCapacity(runInfo);
         if constexpr (USE_DN) {
@@ -481,7 +481,7 @@ private:
         }
     }
 
-    __aicore__ inline void WriteAttentionResult(const Mxfp4RunInfo& runInfo,
+    __aicore__ inline void WriteAttentionResult(const Mxfp4VecTask& runInfo,
         const LocalTensor<float>& historyOutput, const LocalTensor<float>& rowSum,
         const LocalTensor<float>& reference)
     {
