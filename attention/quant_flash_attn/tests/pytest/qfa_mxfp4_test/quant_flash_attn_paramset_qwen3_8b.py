@@ -18,6 +18,7 @@ CASE_SET = 'qwen3_8b'
 # Keep four times the largest case's required pages: B128 * KV16384 / page128.
 KV_CACHE_NUM_BLOCKS = 16384 * 4
 KV_CACHE_SHAPE = (KV_CACHE_NUM_BLOCKS, 128, 8 * 128)
+PAGE_SIZES = {CASE_SET: 128, 'qwen3_8b_page256': 256}
 
 
 def _kv_range(batch):
@@ -45,28 +46,30 @@ _SPECS = (
 )
 
 
-def get_performance_cases(scope='full'):
+def get_performance_cases(scope='full', case_set=CASE_SET):
     if scope not in ('small', 'full'):
         raise ValueError('qwen3_8b scope must be small or full; both select the same 16 cases')
+    page = PAGE_SIZES[case_set]
+    num_blocks = KV_CACHE_NUM_BLOCKS * KV_CACHE_SHAPE[1] // page
     cases = []
     for name, kind, queries, keys in _SPECS:
         qlens, kvlens = list(queries), list(keys)
         cases.append(dict(
-            name=CASE_SET + '_' + name, case_set=CASE_SET, model=CASE_SET, tp=1,
+            name=case_set + '_' + name, case_set=case_set, model=CASE_SET, tp=1,
             kind=kind, B=len(qlens), Q=max(qlens), KV=max(kvlens), D=128, N_q=32, N_kv=8,
-            page=128, layout_kv='PA_BBND', mask_mode=3,
+            page=page, layout_kv='PA_BBND', mask_mode=3,
             q_scale_layout='N2TGD' if kind == 'decode' else 'TND',
             enable_lse=False, seed=421, quant_schema=2, c8_p_scale=448., softmax_scale=128 ** -0.5,
             cu_seqlens_q=[0] + list(itertools.accumulate(qlens)),
             seqused_q=qlens, seqused_kv=kvlens, max_seqlen_q=max(qlens), max_seqlen_kv=max(kvlens),
-            kv_cache_num_blocks=KV_CACHE_NUM_BLOCKS, logical_kv_cache_shape=list(KV_CACHE_SHAPE),
+            kv_cache_num_blocks=num_blocks, logical_kv_cache_shape=[num_blocks, page, KV_CACHE_SHAPE[2]],
         ))
     return cases
 
 
-def get_accuracy_cases(scope='full'):
+def get_accuracy_cases(scope='full', case_set=CASE_SET):
     result = []
-    for case in get_performance_cases(scope):
+    for case in get_performance_cases(scope, case_set):
         params = {key: copy.deepcopy(case[key]) for key in (
             'name', 'case_set', 'model', 'tp', 'B', 'N_q', 'N_kv', 'D',
             'cu_seqlens_q', 'seqused_q', 'seqused_kv', 'max_seqlen_q', 'max_seqlen_kv',
@@ -80,16 +83,18 @@ def get_accuracy_cases(scope='full'):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--case-set', choices=tuple(PAGE_SIZES), default=CASE_SET)
     parser.add_argument('--scope', choices=('small', 'full'), default='full')
     parser.add_argument('--accuracy', action='store_true')
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
-    cases = get_accuracy_cases(args.scope) if args.accuracy else get_performance_cases(args.scope)
+    loader = get_accuracy_cases if args.accuracy else get_performance_cases
+    cases = loader(args.scope, args.case_set)
     if args.output:
         with args.output.open('x', encoding='utf-8') as stream:
-            json.dump(dict(case_set=CASE_SET, cases=cases), stream, indent=2, allow_nan=False)
+            json.dump(dict(case_set=args.case_set, cases=cases), stream, indent=2, allow_nan=False)
             stream.write('\n')
-    summary = dict(case_set=CASE_SET, count=len(cases), logical_kv_cache_shape=KV_CACHE_SHAPE)
+    summary = dict(case_set=args.case_set, count=len(cases), logical_kv_cache_shape=cases[0]['logical_kv_cache_shape'])
     if not args.accuracy:
         summary['kinds'] = dict(Counter(case['kind'] for case in cases))
     print(json.dumps(summary, indent=2))

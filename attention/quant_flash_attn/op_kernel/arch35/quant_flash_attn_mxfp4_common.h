@@ -40,6 +40,10 @@ struct Mxfp4RunInfo : RunInfoX {
     // Independent of loop/16: a Q block/split may end with a short group.
     // Cube does not consume this AIV-local field.
     uint64_t v1GroupId = ~uint64_t{0};
+    // KV 页号缓存：创建段一次查表，K/V 的 payload/scale 四处搬运共用同一组页号
+    //（按任务 token 区间覆盖的物理页序）。s2Idx 恒为 s2BaseSize(<=256) 的倍数、
+    // blockSize >= 64，页数 <= 256/64+1 = 5，取 8 兜底。
+    uint32_t kvPageIdx[8] = {};
 };
 
 struct Mxfp4SubRunInfo {

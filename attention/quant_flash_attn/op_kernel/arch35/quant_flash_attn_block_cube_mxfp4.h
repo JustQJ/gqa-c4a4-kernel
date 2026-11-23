@@ -66,6 +66,9 @@ public:
     static constexpr bool PAGE_ATTENTION = (KvLayoutType > 0);
     static constexpr bool USE_DN = useDn;
     static constexpr bool ENABLE_QF322F32_PRE = enableQf322F32Pre;
+    // KV lookahead 预取：覆盖全部 paged KV 布局（PA_BBND/PA_BNBD/PA_NZ）、DN/ND、D128/D256。
+    // K/V 分别使用奇数槽和偶数槽，每个槽容纳一份 payload 和 scale。
+    static constexpr uint32_t KV_SLOT_COUNT = 4U;
     static constexpr FixpipeConfig FIXPIPE_CONFIG = {CO2Layout::ROW_MAJOR, true};
 
     using Q_T = INPUT_T;
@@ -114,7 +117,7 @@ public:
     // L1 buffers
     CrossBufferType crossBuffers_;
     BuffersPolicySingleBuffer<BufferType::L1> l1QBuffers_;
-    BuffersPolicy4buff<BufferType::L1> l1KVBuffers_; // FP4 K/V payload + E8M0 scale
+    BuffersPolicy4buff<BufferType::L1> l1KVBuffers_; // FP4 K/V payload + E8M0 scale（槽 0-3）
     BuffersPolicySingleBuffer<BufferType::L1> l1VPaddingBuffers_; // rowsum需要的常数1
 
     // L0 buffers
@@ -181,7 +184,7 @@ public:
         constexpr uint32_t mmVPaddngSize = s2BaseSize * PADDING_CHANNEL_COUNT / 2;
         constexpr uint32_t mmVPaddngScaleSize = s2BaseSize * PADDING_CHANNEL_COUNT / MXFP_GROUP_SIZE;
         static_assert(P_SLOT_COUNT * (CrossBufferType::l1PBufferBytes_ + CrossBufferType::l1PScaleBufferBytes_) +
-                      mm1QSize + mm1QScaleSize + 4 * (mmKVSize + mmKVScaleSize) +
+                      mm1QSize + mm1QScaleSize + KV_SLOT_COUNT * (mmKVSize + mmKVScaleSize) +
                       mmVPaddngSize + mmVPaddngScaleSize <= 512 * 1024, "MXFP4 L1 capacity exceeded");
         l1QBuffers_.Init(l1BufferManager_, mm1QSize + mm1QScaleSize);
         l1KVBuffers_.Init(l1BufferManager_, mmKVSize + mmKVScaleSize);
@@ -264,7 +267,7 @@ public:
         PipeBarrier<PIPE_MTE1>();
     }
 
-    __aicore__ inline void ComputeBmm1(Mxfp4RunInfo& runInfo)
+    __aicore__ inline void ComputeBmm1(Mxfp4RunInfo& runInfo, uint32_t slot)
     {
         if (runInfo.actMSize == 0 || runInfo.actSingleLoopS2Size == 0) {
             return;
@@ -284,14 +287,10 @@ public:
             queryL1Buffer.template Wait<HardEvent::MTE2_MTE1>();
             qCached_ = true;
         }
-        Buffer<BufferType::L1>& keyL1Buffer = l1KVBuffers_.Get();
-        keyL1Buffer.template Wait<HardEvent::MTE1_MTE2>();
+        Buffer<BufferType::L1>& keyL1Buffer = l1KVBuffers_.Get(slot);
         LocalTensor<KV_T> keyL1Tensor = keyL1Buffer.template GetTensor<KV_T>();
         LocalTensor<SCALE_T> keyScaleL1Tensor = keyL1Buffer.template GetTensor<uint8_t>(s2BaseSize * dBaseSize / 2)
                           .template ReinterpretCast<SCALE_T>();
-        CopyKGm2L1(keyL1Tensor, runInfo);
-        CopyKScaleGm2L1(keyScaleL1Tensor, runInfo);
-        keyL1Buffer.template Set<HardEvent::MTE2_MTE1>();
         keyL1Buffer.template Wait<HardEvent::MTE2_MTE1>();
         for (uint32_t subBlockS2Offset = 0; subBlockS2Offset < runInfo.actSingleLoopS2Size;
             subBlockS2Offset += s2SplitSize) {
@@ -346,7 +345,7 @@ public:
         }
     }
 
-    __aicore__ inline void ComputeBmm2(Mxfp4RunInfo& runInfo)
+    __aicore__ inline void ComputeBmm2(Mxfp4RunInfo& runInfo, uint32_t slot)
     {
         if (runInfo.actMSize == 0 || runInfo.actSingleLoopS2Size == 0) {
             return;
@@ -359,14 +358,10 @@ public:
             crossBuffers_.waitPscaleUpdate(pvGroupSequence_);
             pvResultL0CBuffer.template Wait<HardEvent::FIX_M>();
         }
-        Buffer<BufferType::L1>& valueL1Buffer = l1KVBuffers_.Get();
-        valueL1Buffer.template Wait<HardEvent::MTE1_MTE2>();
+        Buffer<BufferType::L1>& valueL1Buffer = l1KVBuffers_.Get(slot);
         LocalTensor<KV_T> valueL1Tensor = valueL1Buffer.template GetTensor<KV_T>();
         LocalTensor<SCALE_T> valueScaleL1Tensor = valueL1Buffer.template GetTensor<uint8_t>(s2BaseSize * dVBaseSize / 2)
                           .template ReinterpretCast<SCALE_T>();
-        CopyVGm2L1(valueL1Tensor, runInfo);
-        CopyVScaleGm2L1(valueScaleL1Tensor, runInfo);
-        valueL1Buffer.template Set<HardEvent::MTE2_MTE1>();
         valueL1Buffer.template Wait<HardEvent::MTE2_MTE1>();
         const uint32_t alignedKvTokenCount = (runInfo.actSingleLoopS2Size + 63U) / 64U * 64U;
         Buffer<BufferType::L0A>& pvLeftL0ABuffer = mm2LeftBuffers_.Get();
@@ -402,6 +397,105 @@ public:
             pvResultL0CBuffer.template Set<HardEvent::FIX_M>();
             pvGroupTasks_ = 0;
             ++pvGroupSequence_;
+        }
+    }
+
+    // 仅缓存本任务有效 token 覆盖的页号，供 K/V payload 与 scale 搬运按页序复用。
+    __aicore__ inline void CacheKvPageIndices(Mxfp4RunInfo& runInfo)
+    {
+        static_assert(KvLayoutType >= 1 && KvLayoutType <= 3, "MXFP4 KV copy requires a paged KV layout");
+        const uint32_t blockSize = constInfo_.blockSize;
+        const uint64_t firstPage = static_cast<uint64_t>(runInfo.s2Idx) / blockSize;
+        const uint64_t lastPage =
+            (static_cast<uint64_t>(runInfo.s2Idx) + runInfo.actSingleLoopS2Size - 1U) / blockSize;
+        ASSERT(lastPage - firstPage < 8U);
+        uint32_t cached = 0;
+        for (uint64_t page = firstPage; page <= lastPage; ++page) {
+            runInfo.kvPageIdx[cached++] = blockTableGm_.GetValue(
+                static_cast<uint64_t>(runInfo.bIdx) * constInfo_.maxBlockNumPerBatch + page);
+        }
+    }
+
+    // 派发循环提前发射的 KV GM->L1 搬运：等待该槽上一任 MTE1 消费者释放后，向指定槽
+    // 发射 payload+scale 搬运；消费侧（Bmm1/Bmm2）随后只等
+    // MTE2_MTE1。调用方保证 slot 与消费侧公式一致（K 奇数槽 / V 偶数槽，按任务号奇偶），
+    // 且该 task 通过与消费侧相同的 actMSize/actSingleLoopS2Size 非零守卫。
+    template <bool IsKey>
+    __aicore__ inline void PrefetchKvL1(Mxfp4RunInfo& runInfo, uint32_t slot)
+    {
+        Buffer<BufferType::L1>& kvL1Buffer = l1KVBuffers_.Get(slot);
+        kvL1Buffer.template Wait<HardEvent::MTE1_MTE2>();
+        LocalTensor<KV_T> kvL1Tensor = kvL1Buffer.template GetTensor<KV_T>();
+        LocalTensor<SCALE_T> kvScaleL1Tensor =
+            kvL1Buffer.template GetTensor<uint8_t>(s2BaseSize * dBaseSize / 2).template ReinterpretCast<SCALE_T>();
+        if (CanCopyFullKvPage() && runInfo.actSingleLoopS2Size == s2BaseSize) {
+            CopyFullKvPage<IsKey>(kvL1Tensor, kvScaleL1Tensor, runInfo);
+        } else if constexpr (IsKey) {
+            CopyKGm2L1(kvL1Tensor, runInfo);
+            CopyKScaleGm2L1(kvScaleL1Tensor, runInfo);
+        } else {
+            CopyVGm2L1(kvL1Tensor, runInfo);
+            CopyVScaleGm2L1(kvScaleL1Tensor, runInfo);
+        }
+        kvL1Buffer.template Set<HardEvent::MTE2_MTE1>();
+    }
+
+    __aicore__ inline bool CanCopyFullKvPage() const
+    {
+        // BBND interleaves heads. Its scale-copy source stride is a 16-bit field.
+        return constInfo_.blockSize == s2BaseSize &&
+            (KvLayoutType != 1 || constInfo_.n2Size <= 65535U / dVBaseSize);
+    }
+
+    // A full page belongs to one task when blockSize == s2BaseSize. All NZ
+    // fractals of the head are contiguous in GM and in the destination slot.
+    template <typename Strides>
+    __aicore__ inline uint64_t FullPageHeadOffset(const Strides& strides, uint32_t unitsPerHead, uint32_t interleavedHeadStride,
+                                                   const Mxfp4RunInfo& runInfo)
+    {
+        const uint64_t pageStride = strides.bnStride == 0 ?
+            static_cast<uint64_t>(constInfo_.n2Size) * unitsPerHead : strides.bnStride / 2;
+        const uint64_t headStride = KvLayoutType == 1 ? interleavedHeadStride :
+            (strides.n2Stride == 0 ? unitsPerHead : strides.n2Stride / 2);
+        return static_cast<uint64_t>(runInfo.kvPageIdx[0]) * pageStride + runInfo.n2Idx * headStride;
+    }
+
+    template <bool IsKey>
+    __aicore__ inline void CopyFullKvPage(LocalTensor<KV_T> payload, LocalTensor<SCALE_T> scale,
+                                          Mxfp4RunInfo& runInfo)
+    {
+        constexpr uint32_t rowBytes = dBaseSize / 2;
+        constexpr uint32_t payloadBytes = s2BaseSize * rowBytes;
+        constexpr uint32_t scalePairs = s2BaseSize * dBaseSize / 64;
+        const auto& payloadStrides = IsKey ? constInfo_.keyStrides : constInfo_.valueStrides;
+        const auto& scaleStrides = IsKey ? constInfo_.kDescaleStrides : constInfo_.vDescaleStrides;
+        auto src = (IsKey ? keyGm_ : valueGm_)[FullPageHeadOffset(payloadStrides, payloadBytes, rowBytes, runInfo)];
+        auto scaleSrc = (IsKey ? keyScaleGm_ : valueScaleGm_)[FullPageHeadOffset(scaleStrides, scalePairs, IsKey ? dBaseSize / 64 : dVBaseSize, runInfo)];
+        auto dst = payload.template ReinterpretCast<uint8_t>();
+        auto scaleDst = scale.template ReinterpretCast<uint16_t>();
+        if constexpr (KvLayoutType == 3) {
+            DataCopy(dst, src, payloadBytes);
+            DataCopy(scaleDst, scaleSrc, scalePairs);
+        } else {
+            const uint32_t headCount = KvLayoutType == 1 ? constInfo_.n2Size : 1U;
+            CopyFp4RowsGm2L1(dst, src, s2BaseSize, rowBytes, rowBytes * headCount, s2BaseSize);
+            if constexpr (IsKey) {
+                Dn2NzParams params {};
+                params.dnNum = 1;
+                params.dValue = s2BaseSize;
+                params.nValue = params.dstNzC0Stride = dBaseSize / 64;
+                params.srcDValue = (dBaseSize / 64) * headCount;
+                params.dstNzNStride = 1;
+                DataCopy(scaleDst, scaleSrc, params);
+            } else {
+                Nd2NzParams params {};
+                params.ndNum = 1;
+                params.nValue = params.dstNzC0Stride = s2BaseSize / 64;
+                params.dValue = dBaseSize;
+                params.srcDValue = dBaseSize * headCount;
+                params.dstNzNStride = 1;
+                DataCopy(scaleDst, scaleSrc, params);
+            }
         }
     }
 
@@ -786,14 +880,14 @@ public:
         const uint64_t pageByteStride = pageLogicalStride == 0 ?
             static_cast<uint64_t>(constInfo_.n2Size) * defaultHeadByteStride : pageLogicalStride / 2;
         uint32_t copiedTokenCount = 0;
+        uint32_t pageChunk = 0; // 页序号：与 runInfo.kvPageIdx 的缓存序一致
         while (copiedTokenCount < runInfo.actSingleLoopS2Size) {
             const uint64_t logicalTokenIndex = static_cast<uint64_t>(runInfo.s2Idx) + copiedTokenCount;
             const uint32_t pageTokenOffset = logicalTokenIndex % blockSize;
             const uint32_t pageTokenCount =
                 AttentionCommon::Min(static_cast<uint32_t>(runInfo.actSingleLoopS2Size - copiedTokenCount),
                                       blockSize - pageTokenOffset);
-            const uint64_t physicalPageIndex = blockTableGm_.GetValue(
-                static_cast<uint64_t>(runInfo.bIdx) * constInfo_.maxBlockNumPerBatch + logicalTokenIndex / blockSize);
+            const uint64_t physicalPageIndex = runInfo.kvPageIdx[pageChunk++];
             const uint64_t payloadGmByteOffset = physicalPageIndex * pageByteStride +
                 static_cast<uint64_t>(runInfo.n2Idx) * headByteStride;
             if constexpr (KvLayoutType == 3) {
@@ -844,14 +938,14 @@ public:
         keyScaleCopyParams.dstNzC0Stride = scalePairsPerKeyRow;
         keyScaleCopyParams.dstNzNStride = 1;
         uint32_t copiedTokenCount = 0;
+        uint32_t pageChunk = 0; // 页序号：与 runInfo.kvPageIdx 的缓存序一致
         while (copiedTokenCount < runInfo.actSingleLoopS2Size) {
             const uint64_t logicalTokenIndex = static_cast<uint64_t>(runInfo.s2Idx) + copiedTokenCount;
             const uint32_t pageTokenOffset = logicalTokenIndex % blockSize;
             const uint32_t pageTokenCount =
                 AttentionCommon::Min(static_cast<uint32_t>(runInfo.actSingleLoopS2Size - copiedTokenCount),
                                       blockSize - pageTokenOffset);
-            const uint64_t physicalPageIndex = blockTableGm_.GetValue(
-                static_cast<uint64_t>(runInfo.bIdx) * constInfo_.maxBlockNumPerBatch + logicalTokenIndex / blockSize);
+            const uint64_t physicalPageIndex = runInfo.kvPageIdx[pageChunk++];
             const uint64_t keyScaleGmPairOffset = physicalPageIndex * pagePairStride +
                 static_cast<uint64_t>(runInfo.n2Idx) * headPairStride;
             if constexpr (KvLayoutType == 3) {
@@ -910,15 +1004,14 @@ public:
         valueScaleCopyParams.dstNzC0Stride = s2BaseSize / MXFP_DIVISOR_SIZE;
         valueScaleCopyParams.dstNzNStride = 1;
         uint32_t copiedScaleGroupCount = 0;
+        uint32_t pageChunk = 0; // 页序号：与 runInfo.kvPageIdx 的缓存序一致
         while (copiedScaleGroupCount < scaleGroupCount) {
             const uint64_t logicalScaleGroupIndex = static_cast<uint64_t>(runInfo.s2Idx) / MXFP_DIVISOR_SIZE +
                 copiedScaleGroupCount;
             const uint32_t pageScaleGroupOffset = logicalScaleGroupIndex % scaleGroupsPerPage;
             const uint32_t pageScaleGroupCount = AttentionCommon::Min(scaleGroupCount - copiedScaleGroupCount,
                 scaleGroupsPerPage - pageScaleGroupOffset);
-            const uint64_t physicalPageIndex = blockTableGm_.GetValue(
-                static_cast<uint64_t>(runInfo.bIdx) * constInfo_.maxBlockNumPerBatch +
-                    logicalScaleGroupIndex / scaleGroupsPerPage);
+            const uint64_t physicalPageIndex = runInfo.kvPageIdx[pageChunk++];
             const uint64_t valueScaleGmPairOffset = physicalPageIndex * pagePairStride +
                 static_cast<uint64_t>(runInfo.n2Idx) * headPairStride;
             if constexpr (KvLayoutType == 3) {

@@ -89,7 +89,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--expected', type=int, required=True)
     parser.add_argument('--scope', choices=('small', 'full'), default='small')
-    parser.add_argument('--case-set', choices=('document', 'mxfp8', 'bench16k', 'qwen3_8b'), default='document')
+    parser.add_argument('--case-set', choices=('document', 'mxfp8', 'bench16k', 'qwen3_8b', 'qwen3_8b_page256'), default='document')
     parser.add_argument('--kind', choices=('all', 'prefill', 'decode', 'mixed'), default='all')
     parser.add_argument('--kv-layout', '--kv_layout', choices=KV_LAYOUTS, default=DEFAULT_KV_LAYOUT)
     args = parser.parse_args()
@@ -102,7 +102,7 @@ def main():
         raise SystemExit('Case IDs do not exactly cover the selected performance scope')
     if any(record['case'].get('layout_kv', DEFAULT_KV_LAYOUT) != args.kv_layout for record in records):
         raise SystemExit('Case KV layout does not match --kv-layout')
-    if args.case_set in ('bench16k', 'qwen3_8b'):
+    if args.case_set in ('bench16k', 'qwen3_8b', 'qwen3_8b_page256'):
         for record in records:
             expected = with_kv_layout(dict(expected_cases[record['case']['name']],
                                            quant_schema=record['case']['quant_schema']), args.kv_layout)

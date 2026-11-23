@@ -65,7 +65,13 @@ public:
     static constexpr uint32_t PRELOAD_N = 20; // C2落后C1 20 轮
     static constexpr uint32_t GROUP_N = 16;  // 16个task的C2在L0C累积，然后执行一次V2
     static constexpr uint32_t DELAY_P_SCALE_N = 3; // P scale 在每个group的16个task的C1完成后，再过3轮，对这16个task进行一次pscale的update
-    static constexpr uint32_t PRELOAD_TASK_CACHE_SIZE = PRELOAD_N + 1; // 存储任务信息的数组大小
+    // KV lookahead 预取：全部布局（BBND/BNBD/NZ）、DN/ND、D128/D256 生效。创建指针领先
+    // 执行 LEAD 个 tick：K 在创建时发射（提前 LEAD 拍），V 在 Bmm2 消费前 LEAD 拍发射；
+    // 每流在途 (LEAD+1) 个槽（K 奇数槽、V 偶数槽，槽号 = 2*(taskLoop % (LEAD+1)) (+1 for K)）。
+    // 任务环 live set 为 [t-20, t+LEAD]，大小 PRELOAD_N+1+LEAD。
+    static constexpr uint32_t KV_PREFETCH_LEAD = 1U;
+    static constexpr uint32_t KV_STREAM_SLOTS = KV_PREFETCH_LEAD + 1U; // 每流槽数
+    static constexpr uint32_t PRELOAD_TASK_CACHE_SIZE = PRELOAD_N + 1U + KV_PREFETCH_LEAD;
 
     static constexpr bool PAGE_ATTENTION = CubeBlockType::PAGE_ATTENTION; // 是否使用paged attn，true
     static constexpr bool FLASH_DECODE = VecFaBlockType::FLASH_DECODE; // 是否使用flash decoding
@@ -137,6 +143,17 @@ public:
     ActualSeqLensParser<ActualSeqLensMode::BY_BATCH, int32_t> kvSeqUsedParser_;
 
     // ===========================================function========================================================================
+    // KV lookahead 槽号公式：按任务号奇偶取槽，发射侧（创建时/滞后 1 拍）与消费侧
+    // （Bmm1/Bmm2）使用同一公式，间隔为偶数拍，槽号天然一致。
+    __aicore__ inline static uint32_t KeySlotOf(uint64_t taskLoop)
+    {
+        return 1U + 2U * static_cast<uint32_t>(taskLoop % KV_STREAM_SLOTS); // K 流占奇数槽
+    }
+    __aicore__ inline static uint32_t ValueSlotOf(uint64_t taskLoop)
+    {
+        return 2U * static_cast<uint32_t>(taskLoop % KV_STREAM_SLOTS); // V 流占偶数槽
+    }
+
     __aicore__ inline QuantFlashAttnKernelMxfp4(): cubeBlock_(constInfo_), vecFaBlock_(constInfo_), vecFdBlock_(constInfo_){};
     __aicore__ inline void Init(__gm__ uint8_t* query, __gm__ uint8_t* key, __gm__ uint8_t* value,
                                 __gm__ uint8_t* sinks, __gm__ uint8_t* attnMask, __gm__ uint8_t* cuSeqLensQ,
@@ -360,21 +377,41 @@ public:
         createdTaskCount_ = 0;
         uint64_t pipelineTick = 0;
         uint32_t pendingTasks = 0;
-        while (pendingTasks != 0 || ShouldDispatchTask(bN2Cur, gS1Cur, s2Cur)) {
-            if (ShouldDispatchTask(bN2Cur, gS1Cur, s2Cur)) {
-                const TASK_DEAL_MODE taskDealMode = GetTaskDealMode(bN2Cur, gS1Cur, s2Cur);
-                if (taskDealMode != TASK_DEAL_MODE::CREATE_TASK) {
+        bool hasMoreCoords = ShouldDispatchTask(bN2Cur, gS1Cur, s2Cur);
+        while (pendingTasks != 0 || hasMoreCoords) {
+            if (hasMoreCoords) {
+                // 本拍最多创建到 task t+LEAD，创建时即预取 K。
+                const uint64_t createLimit = pipelineTick + KV_PREFETCH_LEAD + 1U;
+                bool skipOnly = true;
+                while (hasMoreCoords && createdTaskCount_ < createLimit) {
+                    const TASK_DEAL_MODE taskDealMode = GetTaskDealMode(bN2Cur, gS1Cur, s2Cur);
+                    const bool createTask = taskDealMode == TASK_DEAL_MODE::CREATE_TASK;
+                    if (createTask) {
+                        Mxfp4RunInfo& currentTask = taskRunInfo[createdTaskCount_ % PRELOAD_TASK_CACHE_SIZE];
+                        ASSERT(!currentTask.isValid);
+                        currentTask = Mxfp4RunInfo {};
+                        CalcParams(createdTaskCount_, bN2Cur, gS1Cur, s2Cur, currentTask);
+                        currentTask.isValid = true;
+                        ++createdTaskCount_;
+                        ++pendingTasks;
+                        if ASCEND_IS_AIC {
+                            // 创建即预取：守卫与 Bmm1 消费侧严格一致，保证槽事件配对。
+                            if (currentTask.actMSize != 0 && currentTask.actSingleLoopS2Size != 0) {
+                                cubeBlock_.CacheKvPageIndices(currentTask);
+                                cubeBlock_.template PrefetchKvL1<true>(currentTask, KeySlotOf(currentTask.loop));
+                            }
+                        }
+                        skipOnly = false;
+                    }
                     UpdateAxisInfo(taskDealMode, bN2Cur, gS1Cur, s2Cur);
-                    continue;
+                    hasMoreCoords = ShouldDispatchTask(bN2Cur, gS1Cur, s2Cur);
+                    if (!createTask) {
+                        break;
+                    }
                 }
-                Mxfp4RunInfo& currentTask = taskRunInfo[pipelineTick % PRELOAD_TASK_CACHE_SIZE];
-                ASSERT(!currentTask.isValid);
-                currentTask = Mxfp4RunInfo {};
-                CalcParams(createdTaskCount_, bN2Cur, gS1Cur, s2Cur, currentTask);
-                currentTask.isValid = true;
-                ++createdTaskCount_;
-                ++pendingTasks;
-                UpdateAxisInfo(taskDealMode, bN2Cur, gS1Cur, s2Cur);
+                if (skipOnly) {
+                    continue; // 本迭代只发生了坐标跳过（未创建任务），不消耗 tick
+                }
             }
             if (pendingTasks != 0) {
                 const bool retiresTask = pipelineTick >= PRELOAD_N &&
@@ -476,11 +513,23 @@ public:
     {
         Mxfp4RunInfo& runInfo0 = taskRunInfo[loop % PRELOAD_TASK_CACHE_SIZE];                  // 本轮任务
 
+        // 滞后流 V 预取：task j 的 Bmm2 在 tick j+PRELOAD_N 消费，本拍（tick j+PRELOAD_N-LEAD）
+        // 提前 LEAD 拍把 V(j) 发射进偶数槽。loop+LEAD>=PRELOAD_N 保证任务号不下溢（SYNC-10）。
+        if (loop + KV_PREFETCH_LEAD >= PRELOAD_N) {
+            Mxfp4RunInfo& vInfo =
+                taskRunInfo[(loop + KV_PREFETCH_LEAD - PRELOAD_N) % PRELOAD_TASK_CACHE_SIZE];
+            if (vInfo.isValid && vInfo.actMSize != 0 && vInfo.actSingleLoopS2Size != 0) {
+                if ASCEND_IS_AIC {
+                    cubeBlock_.template PrefetchKvL1<false>(vInfo, ValueSlotOf(vInfo.loop));
+                }
+            }
+        }
+
         if (loop >= PRELOAD_N) { // 可以执行C2，然后在一组C2执行完成后，执行V2
             Mxfp4RunInfo& runInfoNegN = taskRunInfo[(loop - PRELOAD_N) % PRELOAD_TASK_CACHE_SIZE];
             if (runInfoNegN.isValid) {
                 if ASCEND_IS_AIC {
-                    cubeBlock_.ComputeBmm2(runInfoNegN); // 子循环和同步都在cube内部处理
+                    cubeBlock_.ComputeBmm2(runInfoNegN, ValueSlotOf(runInfoNegN.loop));
                 } else {
                    if (unlikely(runInfoNegN.isGroupLast)) { // 小组最后一个C2跑完，进行一次V2
                         vecFaBlock_.ComputeVec2(runInfoNegN);
@@ -503,7 +552,7 @@ public:
 
         if (runInfo0.isValid) {
             if ASCEND_IS_AIC {
-                cubeBlock_.ComputeBmm1(runInfo0); // 子循环和同步都在内部处理
+                cubeBlock_.ComputeBmm1(runInfo0, KeySlotOf(runInfo0.loop));
             } else {
                 vecFaBlock_.ComputeVec1(runInfo0); // 子循环和同步都在内部处理
             }

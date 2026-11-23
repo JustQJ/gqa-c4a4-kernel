@@ -2,6 +2,8 @@
 
 参数定义：[quant_flash_attn_paramset_qwen3_8b.py](quant_flash_attn_paramset_qwen3_8b.py)。精度、性能和统一 profiler 的集合名均为 `qwen3_8b`，`small` / `full` 都选择这16项，可用 `--perf-kind` 筛选6项 prefill、6项 decode、4项 mixed。
 
+用 `--accuracy-case-set qwen3_8b_page256`、`--perf-case-set qwen3_8b_page256` 或 profiler 的 `--case-set qwen3_8b_page256` 运行页长 256 的同一组场景。页池为 32768 页，Q/KV 长度、头数和总 token 容量与原集相同。
+
 ## 模型维度与原有覆盖
 
 根据用户提供的 Qwen3-8B 配置，按 **TP=1** 使用 `N_q=32, N_kv=8, D=128`，GQA分组数为4，`softmax_scale=1/sqrt(128)`。逻辑Q为 `[sum(Q),32,128]`，每个token的K/V各为 `[8,128]`。这是单层attention的量化算子bench；模型配置的BF16权重、36层、RoPE等不属于本参数集的整网验证范围。

@@ -199,7 +199,7 @@ class Bench16kContractTests(unittest.TestCase):
                     choices[name] = kwargs.get('choices')
         conftest.pytest_addoption(Parser())
         self.assertNotIn('--fia-shapes', options)
-        self.assertEqual(choices['--accuracy-case-set'], ('document', 'bench16k', 'qwen3_8b'))
+        self.assertEqual(choices['--accuracy-case-set'], ('document', 'bench16k', 'qwen3_8b', 'qwen3_8b_page256'))
         self.assertEqual(options['--kv-layout'], 'PA_BBND')
         options.update({'--scope': 'small', '--accuracy-case-set': 'bench16k', '--perf-case-set': 'bench16k',
                         '--perf-kind': 'mixed', '--run-perf': True, '--quant-schema': 0, '--kv-layout': 'PA_NZ'})

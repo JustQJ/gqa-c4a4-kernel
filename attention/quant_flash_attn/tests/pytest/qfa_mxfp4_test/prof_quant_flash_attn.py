@@ -47,7 +47,7 @@ def arguments(argv=None):
     parser.add_argument('--device', '--device-id', type=int)
     parser.add_argument('--profiler', choices=('msprof', 'op', 'both'), default='op',
                         help='Application profiling, operator profiling, or both sequentially')
-    parser.add_argument('--case-set', choices=('bench16k', 'qwen3_8b'), default='bench16k')
+    parser.add_argument('--case-set', choices=('bench16k', 'qwen3_8b', 'qwen3_8b_page256'), default='bench16k')
     parser.add_argument('--case', '--case-name', dest='case_names', nargs='+',
                         help='Names in the selected set, e.g. decode_3; use all for the full collection')
     parser.add_argument('--list-cases', action='store_true', help='List names and parameters without NPU access')

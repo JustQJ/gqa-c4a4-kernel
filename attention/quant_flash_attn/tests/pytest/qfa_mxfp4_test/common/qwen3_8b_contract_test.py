@@ -69,6 +69,21 @@ class Qwen3EightBContractTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 loader('invalid')
 
+    def test_page256_preserves_workload_and_pool_capacity(self):
+        suite = 'qwen3_8b_page256'
+        original = get_cases(case_set='qwen3_8b')
+        cases = get_cases(case_set=suite)
+        accuracy = accuracy_cases(case_set=suite)
+        self.assertEqual((len(original), len(cases), len(accuracy)), (16, 16, 16))
+        for old, new, acc in zip(original, cases, accuracy):
+            self.assertEqual(new['name'], old['name'].replace('qwen3_8b_', suite + '_', 1))
+            self.assertEqual((new['page'], acc['block_size']), (256, 256))
+            self.assertEqual(new['logical_kv_cache_shape'], [32768, 256, 1024])
+            self.assertEqual(old['page'] * old['kv_cache_num_blocks'], new['page'] * new['kv_cache_num_blocks'])
+            for key in ('cu_seqlens_q', 'seqused_q', 'seqused_kv', 'N_q', 'N_kv', 'D', 'q_scale_layout'):
+                self.assertEqual(old[key], new[key])
+                self.assertEqual(new[key], acc[key])
+
     def test_actual_generators_use_model_dimensions_and_fixed_pool(self):
         fake = SimpleNamespace(
             uint8='uint8', int32='int32', int64='int64',
