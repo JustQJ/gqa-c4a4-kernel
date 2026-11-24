@@ -150,6 +150,11 @@ void QuantFlashAttnTilingMxfp4Impl::SplitPolicy()
                                            static_cast<int32_t>(qfaInfo_->maskMode), qfaInfo_->winLeft,
                                            qfaInfo_->winRight, static_cast<uint32_t>(qfaInfo_->qLayout),
                                            static_cast<uint32_t>(qfaInfo_->quantMode), sOuterFactor_, sInnerFactor_);
+    if (platformInfo_.cvRatio == 2 && qfa_tiling_util::UseMxfp4M64Decode(
+            decodeS1GMerge_, qfaInfo_->qkHeadDim, qfaInfo_->vHeadDim, qfaInfo_->maxSeqQ, qfaInfo_->gSize)) {
+        sOuterFactor_ = qfa_tiling_util::SOUTER_32;
+        sInnerFactor_ = qfa_tiling_util::SINNER_256;
+    }
     CalcNumBlocks(platformInfo_.aicNum);
     flashDecodeFlag_ = true;
 }
@@ -173,7 +178,9 @@ void QuantFlashAttnTilingMxfp4Impl::UpdateTilingKeyConfig()
         dVsize = DSIZE_256;
     }
 
-    if (sOuter == SOUTER_128 && sInner == SINNER_128 && dSize == DSIZE_256 && dVsize == DSIZE_256) {
+    if (sOuter == qfa_tiling_util::SOUTER_64 && sInner == SINNER_256 && dSize == DSIZE_256 && dVsize == DSIZE_256) {
+        tilingKeyInfo_.config = Config_S1Aligned64_S2Aligned256_DAligned256_DVAligned256;
+    } else if (sOuter == SOUTER_128 && sInner == SINNER_128 && dSize == DSIZE_256 && dVsize == DSIZE_256) {
         tilingKeyInfo_.config = Config_S1Aligned128_S2Aligned128_DAligned256_DVAligned256;
     } else {
         tilingKeyInfo_.config = Config_S1Aligned128_S2Aligned256_DAligned128_DVAligned128;

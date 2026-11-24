@@ -98,7 +98,8 @@ public:
     static constexpr uint32_t s2BaseSize = (uint32_t)s2TemplateType;
     static constexpr uint32_t dBaseSize = (uint32_t)dTemplateType;
     static constexpr uint32_t dVBaseSize = (uint32_t)dVTemplateType;
-    static constexpr uint32_t s2SplitSize = 128U;
+    static constexpr bool SMALL_ND = !USE_DN && mBaseSize == 64;
+    static constexpr uint32_t s2SplitSize = SMALL_ND ? 256U : 128U;
 
     static constexpr uint32_t SCORE_SLOT_COUNT = 2;
 
@@ -127,7 +128,8 @@ public:
     static constexpr uint32_t ubBmm1BufferBytes_ = mBaseSize / CV_RATIO * s2SplitSize * sizeof(float);
     // 对于pv结果，因为我们要使用cube计算rowsum，所以需要进行对齐
     // 对于 DN，我们计算的是(PV)^T = [D, M]，所以补齐一行为 [D+1, M]，而ND的结果是[M, D]，本来是[M, D+1]，但是为了让每行都32B对齐，所以增加7个float padding，变成 [M, D+8]
-    static constexpr uint32_t ubBmm2BufferBytes_ = USE_DN? mBaseSize / CV_RATIO * (dVBaseSize + 1) * sizeof(float) : mBaseSize / CV_RATIO * (dVBaseSize + 8) * sizeof(float);
+    static constexpr uint32_t ubBmm2BufferBytes_ = mBaseSize / CV_RATIO *
+        (dVBaseSize + (USE_DN ? 1U : 8U)) * sizeof(float);
 
 
     /*============================function============================================*/

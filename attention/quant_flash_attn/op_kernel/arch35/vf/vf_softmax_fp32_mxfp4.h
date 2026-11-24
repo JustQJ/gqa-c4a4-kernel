@@ -620,7 +620,8 @@ __simd_vf__ inline void SoftmaxQuantizeDnChunkFp32Vf(
 // causal可见条件为 queryRow>=causalFirstRow+kvIndex*causalRowStep（HasMask=true）；kvIndex为chunk内索引。
 // causalRowStep为合轴G，causalFirstRow为第一个KV的最早可见本地Q行，可为负数，允许token的G跨M块。
 template <uint32_t ChunkN, uint32_t TaskN,
-          bool HasMask, QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT, bool ScorePreScaled = false>
+          bool HasMask, QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT, bool ScorePreScaled = false,
+          uint32_t StorageRows = VEC1_ROWS>
 __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
     __ubuf__ uint8_t* packedPUb, __ubuf__ float* groupMaxUb, __ubuf__ float* globalMaxUb,
     __ubuf__ float* scoreUb, __ubuf__ uint8_t* ByteIdxUb, __ubuf__ uint16_t* HalfIdxUb,
@@ -676,7 +677,7 @@ __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
     for (uint16_t block = 0; block < ChunkN / 64; ++block) {
         const uint32_t firstToken = block * 64;
         const uint32_t firstGroup = chunkKvOffset / QUANT_GROUP_SIZE + block * 2;
-        __ubuf__ uint8_t* packedBlock = packedPUb + (chunkKvOffset / 64 + block) * VEC1_ROWS * 32;
+        __ubuf__ uint8_t* packedBlock = packedPUb + (chunkKvOffset / 64 + block) * StorageRows * 32;
         Adds(chunkIndices, keyIndices, static_cast<int32_t>(firstToken), all);
         Compares<int32_t, CMPMODE::LT>(validKv, chunkIndices, static_cast<int32_t>(validKvTokens), all);
         if constexpr (HasMask) {
@@ -970,7 +971,8 @@ __aicore__ inline void SoftmaxDnChunkFp32(const LocalTensor<uint8_t>& packedProb
         alignedKv32, alignedKv64);
 }
 
-template <uint32_t ChunkN, uint32_t TaskN, bool HasMask, QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT, bool ScorePreScaled = false>
+template <uint32_t ChunkN, uint32_t TaskN, bool HasMask, QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT,
+          bool ScorePreScaled = false, uint32_t StorageRows = VEC1_ROWS>
 __aicore__ inline void SoftmaxNdChunkFp32(const LocalTensor<uint8_t>& packedProbability,
     const LocalTensor<float>& taskGroupExponent, const LocalTensor<float>& runningGroupMaximum,
     const LocalTensor<float>& score, const LocalTensor<uint8_t>& byteIndices,
@@ -981,12 +983,12 @@ __aicore__ inline void SoftmaxNdChunkFp32(const LocalTensor<uint8_t>& packedProb
         const int64_t firstQuery = static_cast<int64_t>(params.qGs1Start / params.qGroupSize) +
             params.causalOffset;
         if (params.validN != 0 && firstQuery >= lastKey) { // 在第一个query能看到所有的kv时，在causal也不需要mask
-            SoftmaxNdChunkFp32<ChunkN, TaskN, false, QUANT_SCHEMA, ScorePreScaled>(packedProbability,
+            SoftmaxNdChunkFp32<ChunkN, TaskN, false, QUANT_SCHEMA, ScorePreScaled, StorageRows>(packedProbability,
                 taskGroupExponent, runningGroupMaximum, score, byteIndices, halfwordIndices, params);
             return;
         }
     }
-    SoftmaxQuantizeNdChunkFp32Vf<ChunkN, TaskN, HasMask, QUANT_SCHEMA, ScorePreScaled>(
+    SoftmaxQuantizeNdChunkFp32Vf<ChunkN, TaskN, HasMask, QUANT_SCHEMA, ScorePreScaled, StorageRows>(
         (__ubuf__ uint8_t*)packedProbability.GetPhyAddr(), (__ubuf__ float*)taskGroupExponent.GetPhyAddr(),
         (__ubuf__ float*)runningGroupMaximum.GetPhyAddr(), (__ubuf__ float*)score.GetPhyAddr(),
         (__ubuf__ uint8_t*)byteIndices.GetPhyAddr(), (__ubuf__ uint16_t*)halfwordIndices.GetPhyAddr(),

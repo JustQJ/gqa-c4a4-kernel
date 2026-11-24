@@ -296,7 +296,7 @@ __aicore__ inline void processOutDn(const LocalTensor<OutputType>& output,
 // groupResultUb 为 FP32 [64,Dv+8]，第 Dv 列是本组 rowsum；historyOutputUb 为 FP32 [64,Dv]。
 // historySumUb / historyMultiplierUb 为 FP32 [64]；UpdateHistory=false 不读取旧状态或 alpha。
 // 有效 Q 行数在同一 Q 块的各组间保持不变；首组清零无效行，空组 PV 按零处理。
-template <bool UpdateHistory, uint32_t ValueDimension>
+template <bool UpdateHistory, uint32_t ValueDimension, uint32_t StorageRows = 64>
 __simd_vf__ inline void processUpdateNdVF(__ubuf__ float* historyOutputUb,
     __ubuf__ float* groupResultUb, __ubuf__ float* historyMultiplierUb,
     __ubuf__ float* historySumUb, uint32_t validQueryRows)
@@ -376,7 +376,7 @@ __simd_vf__ inline void processUpdateNdVF(__ubuf__ float* historyOutputUb,
     }
     if constexpr (!UpdateHistory) {
         // rowsum尾行已在上面清零；首组还需初始化PV尾行，不读取无效Cube数据。
-        for (uint16_t queryRow = validQueryRows; queryRow < 64; ++queryRow) {
+        for (uint16_t queryRow = validQueryRows; queryRow < StorageRows; ++queryRow) {
             __ubuf__ float* historyRowUb = historyOutputUb + queryRow * ValueDimension;
             StoreAlign(historyRowUb, vreg_zero, preg_all32);
             StoreAlign(historyRowUb + 64, vreg_zero, preg_all32);
@@ -388,12 +388,12 @@ __simd_vf__ inline void processUpdateNdVF(__ubuf__ float* historyOutputUb,
     }
 }
 
-template <bool UpdateHistory, uint32_t ValueDimension>
+template <bool UpdateHistory, uint32_t ValueDimension, uint32_t StorageRows = 64>
 __aicore__ inline void processUpdateNd(const LocalTensor<float>& historyOutput,
     const LocalTensor<float>& groupResult, const LocalTensor<float>& historyMultiplier,
     const LocalTensor<float>& historySum, uint32_t validQueryRows)
 {
-    processUpdateNdVF<UpdateHistory, ValueDimension>((__ubuf__ float*)historyOutput.GetPhyAddr(),
+    processUpdateNdVF<UpdateHistory, ValueDimension, StorageRows>((__ubuf__ float*)historyOutput.GetPhyAddr(),
         (__ubuf__ float*)groupResult.GetPhyAddr(), (__ubuf__ float*)historyMultiplier.GetPhyAddr(),
         (__ubuf__ float*)historySum.GetPhyAddr(), validQueryRows);
 }

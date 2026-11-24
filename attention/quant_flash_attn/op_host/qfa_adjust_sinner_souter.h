@@ -24,6 +24,7 @@ constexpr uint32_t LAYOUT_BSND = 0;
 constexpr uint32_t LAYOUT_BNSD = 1;
 constexpr uint32_t LAYOUT_TND = 2;
 
+constexpr uint32_t SOUTER_32 = 32;
 constexpr uint32_t SOUTER_64 = 64;
 constexpr uint32_t SOUTER_128 = 128;
 constexpr uint32_t SINNER_128 = 128;
@@ -31,6 +32,14 @@ constexpr uint32_t SINNER_256 = 256;
 constexpr uint32_t SINNER_512 = 512;
 constexpr uint32_t SINNER_1024 = 1024;
 constexpr uint32_t DSIZE_256 = 256;
+
+// Both the host tiler and AICPU metadata must use the explicit public max Q
+// attribute. Reading actual lengths on only one side can select different tiles.
+inline bool UseMxfp4M64Decode(bool isDecode, uint32_t d, uint32_t dv, int64_t maxSeqQ, uint32_t groupSize)
+{
+    return isDecode && d == DSIZE_256 && dv == DSIZE_256 && groupSize != 0 &&
+           maxSeqQ > 0 && maxSeqQ <= SOUTER_64 / groupSize;
+}
 
 /**
  * @brief 根据算子参数决定 sOuter / sInner 切块大小，纯函数，不依赖任何类。

@@ -313,6 +313,13 @@ bool QuantFlashAttnMetadataCpuKernel::ParamsInit()
             maskMode_, static_cast<int64_t>(winLeft_), static_cast<int64_t>(winRight_),
             optiling::quant_flash_attn::qfa_tiling_util::LAYOUT_BSND, static_cast<uint32_t>(quantMode_), sOuterFactor,
             sInnerFactor);
+        namespace tile = optiling::quant_flash_attn::qfa_tiling_util;
+        const uint32_t headDimV = headDimV_ > 0 ? headDimV_ : headDim_;
+        if (quantMode_ == 5 && aivCoreNum_ / aicCoreNum_ == 2 && numHeadsKv_ != 0 &&
+            tile::UseMxfp4M64Decode(isMxfp4Decode, headDim_, headDimV, maxSeqlenQ_, numHeadsQ_ / numHeadsKv_)) {
+            sOuterFactor = tile::SOUTER_32;
+            sInnerFactor = tile::SINNER_256;
+        }
     }
     mBaseSize_ = sOuterFactor;
     s2BaseSize_ = sInnerFactor;

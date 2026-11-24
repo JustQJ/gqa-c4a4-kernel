@@ -258,20 +258,22 @@ __simd_vf__ inline void UpdatePScaleDnVf(__ubuf__ uint8_t* encodedScale,
     }
 }
 
-// ND：输入每个 task 为 [Q64,TaskN/32] FP32 指数，输出为 [4,TaskN/64+1,16,2] 字节。
+// ND: each task stores [StorageRows, TaskN/32] FP32 exponents and
+// [StorageRows/16, TaskN/64+1, 16, 2] scale bytes.
 // TaskN256 八路、TaskN128 四路按阶段展开；每路连续读取 [Q8,8] 或 [Q16,4]。
-template <uint32_t TaskN, QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT, uint32_t RowCapacity = 64>
+template <uint32_t TaskN, QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT, uint32_t RowCapacity = 64,
+          uint32_t StorageRows = 64>
 __simd_vf__ inline void UpdatePScaleNdVf(__ubuf__ uint8_t* encodedScale,
     __ubuf__ float* firstTaskExponent, __ubuf__ float* secondTaskExponent,
     __ubuf__ float* groupReference, __ubuf__ float* previousReference,
     __ubuf__ float* historyMultiplier, uint16_t firstTaskCount, uint16_t secondTaskCount, bool firstGroup)
 {
     static_assert(TaskN == 128 || TaskN == 256, "MXFP4 Pscale supports TaskN128/256");
-    static_assert(RowCapacity >= 16 && RowCapacity <= 64 && RowCapacity % 16 == 0, "ND Pscale rows must align Q16");
-    constexpr uint32_t ROW_COUNT = 64;
+    static_assert(RowCapacity >= 16 && RowCapacity <= StorageRows && RowCapacity % 16 == 0,
+                  "ND Pscale rows must align Q16 and fit in task storage");
     constexpr uint32_t GROUPS_PER_TASK = TaskN / 32;
-    constexpr uint32_t TASK_EXPONENT_ELEMENTS = ROW_COUNT * GROUPS_PER_TASK;
-    constexpr uint32_t TASK_SCALE_BYTES = ROW_COUNT / 16 * (TaskN / 64 + 1) * 32;
+    constexpr uint32_t TASK_EXPONENT_ELEMENTS = StorageRows * GROUPS_PER_TASK;
+    constexpr uint32_t TASK_SCALE_BYTES = StorageRows / 16 * (TaskN / 64 + 1) * 32;
     constexpr uint32_t REGISTER_ELEMENTS = 64;
     constexpr uint32_t ROWS_PER_REGISTER = REGISTER_ELEMENTS / GROUPS_PER_TASK;
     constexpr uint32_t ROW_BLOCK_BYTES = (TaskN / 64 + 1) * 32;
@@ -749,39 +751,40 @@ __aicore__ inline void UpdatePScaleDn(const LocalTensor<uint8_t>& encodedScale,
 }
 
 // ND 包装：接收 UB LocalTensor，跨流水同步仍由调用方负责。
-template <uint32_t TaskN, QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT>
+template <uint32_t TaskN, QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT, uint32_t StorageRows = 64>
 __aicore__ inline void UpdatePScaleNd(const LocalTensor<uint8_t>& encodedScale,
     const LocalTensor<float>& firstTaskExponent, const LocalTensor<float>& secondTaskExponent,
     const LocalTensor<float>& groupReference, const LocalTensor<float>& previousReference,
     const LocalTensor<float>& historyMultiplier, uint16_t firstTaskCount, uint16_t secondTaskCount, bool firstGroup, uint32_t rowCapacity = 64)
 {
     if (rowCapacity == 16) {
-        UpdatePScaleNdVf<TaskN, QUANT_SCHEMA, 16>(
+        UpdatePScaleNdVf<TaskN, QUANT_SCHEMA, 16, StorageRows>(
         (__ubuf__ uint8_t*)encodedScale.GetPhyAddr(), (__ubuf__ float*)firstTaskExponent.GetPhyAddr(),
         (__ubuf__ float*)secondTaskExponent.GetPhyAddr(), (__ubuf__ float*)groupReference.GetPhyAddr(),
         (__ubuf__ float*)previousReference.GetPhyAddr(), (__ubuf__ float*)historyMultiplier.GetPhyAddr(),
         firstTaskCount, secondTaskCount, firstGroup);
     }
     else if (rowCapacity == 32) {
-        UpdatePScaleNdVf<TaskN, QUANT_SCHEMA, 32>(
+        UpdatePScaleNdVf<TaskN, QUANT_SCHEMA, 32, StorageRows>(
         (__ubuf__ uint8_t*)encodedScale.GetPhyAddr(), (__ubuf__ float*)firstTaskExponent.GetPhyAddr(),
         (__ubuf__ float*)secondTaskExponent.GetPhyAddr(), (__ubuf__ float*)groupReference.GetPhyAddr(),
         (__ubuf__ float*)previousReference.GetPhyAddr(), (__ubuf__ float*)historyMultiplier.GetPhyAddr(),
         firstTaskCount, secondTaskCount, firstGroup);
     }
-    else if (rowCapacity == 48) {
-        UpdatePScaleNdVf<TaskN, QUANT_SCHEMA, 48>(
-        (__ubuf__ uint8_t*)encodedScale.GetPhyAddr(), (__ubuf__ float*)firstTaskExponent.GetPhyAddr(),
-        (__ubuf__ float*)secondTaskExponent.GetPhyAddr(), (__ubuf__ float*)groupReference.GetPhyAddr(),
-        (__ubuf__ float*)previousReference.GetPhyAddr(), (__ubuf__ float*)historyMultiplier.GetPhyAddr(),
-        firstTaskCount, secondTaskCount, firstGroup);
-    }
-    else {
-        UpdatePScaleNdVf<TaskN, QUANT_SCHEMA, 64>(
-        (__ubuf__ uint8_t*)encodedScale.GetPhyAddr(), (__ubuf__ float*)firstTaskExponent.GetPhyAddr(),
-        (__ubuf__ float*)secondTaskExponent.GetPhyAddr(), (__ubuf__ float*)groupReference.GetPhyAddr(),
-        (__ubuf__ float*)previousReference.GetPhyAddr(), (__ubuf__ float*)historyMultiplier.GetPhyAddr(),
-        firstTaskCount, secondTaskCount, firstGroup);
+    else if constexpr (StorageRows == 64) {
+        if (rowCapacity == 48) {
+            UpdatePScaleNdVf<TaskN, QUANT_SCHEMA, 48>(
+                (__ubuf__ uint8_t*)encodedScale.GetPhyAddr(), (__ubuf__ float*)firstTaskExponent.GetPhyAddr(),
+                (__ubuf__ float*)secondTaskExponent.GetPhyAddr(), (__ubuf__ float*)groupReference.GetPhyAddr(),
+                (__ubuf__ float*)previousReference.GetPhyAddr(), (__ubuf__ float*)historyMultiplier.GetPhyAddr(),
+                firstTaskCount, secondTaskCount, firstGroup);
+        } else {
+            UpdatePScaleNdVf<TaskN, QUANT_SCHEMA, 64>(
+                (__ubuf__ uint8_t*)encodedScale.GetPhyAddr(), (__ubuf__ float*)firstTaskExponent.GetPhyAddr(),
+                (__ubuf__ float*)secondTaskExponent.GetPhyAddr(), (__ubuf__ float*)groupReference.GetPhyAddr(),
+                (__ubuf__ float*)previousReference.GetPhyAddr(), (__ubuf__ float*)historyMultiplier.GetPhyAddr(),
+                firstTaskCount, secondTaskCount, firstGroup);
+        }
     }
 }
 

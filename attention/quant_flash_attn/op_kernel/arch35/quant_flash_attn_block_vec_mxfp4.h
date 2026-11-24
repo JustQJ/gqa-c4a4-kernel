@@ -42,13 +42,17 @@ public:
     // Retire C2/V2 before issuing V1: at most one live group per in-flight task.
     static constexpr uint32_t GROUP_MAX_SLOTS = PRELOAD_N;
     static constexpr uint32_t VEC_ROWS = 64;
-    static constexpr uint32_t s2SplitSize = 128U;
+    static constexpr bool SMALL_ND = !useDn && mBaseSize == 64 && dBaseSize == 256 && s2BaseSize == 256;
+    // The reference/alpha VFs still use Q64 registers. Store row matrices and
+    // per-task data at the actual AIV tile width.
+    static constexpr uint32_t STORAGE_ROWS = SMALL_ND ? mBaseSize / CV_RATIO : VEC_ROWS;
+    static constexpr uint32_t s2SplitSize = SMALL_ND ? 256U : 128U;
     static constexpr uint32_t P_SLOT_COUNT = 2;
-    static constexpr uint32_t P_PACK_BYTES = VEC_ROWS * s2BaseSize / 2;
-    static constexpr uint32_t TASK_GROUP_MAX_ELEMENTS = VEC_ROWS * s2BaseSize / 32;
-    static constexpr uint32_t LOCAL_PSCALE_BYTES = VEC_ROWS / 16 * (s2BaseSize / 64 + 1) * 32;
+    static constexpr uint32_t P_PACK_BYTES = STORAGE_ROWS * s2BaseSize / 2;
+    static constexpr uint32_t TASK_GROUP_MAX_ELEMENTS = STORAGE_ROWS * s2BaseSize / 32;
+    static constexpr uint32_t LOCAL_PSCALE_BYTES = STORAGE_ROWS / 16 * (s2BaseSize / 64 + 1) * 32;
     static constexpr bool REUSE_PV_OUTPUT = dBaseSize == 256;
-    static constexpr uint32_t OUTPUT_SCRATCH_BYTES = 64 * 256 * sizeof(bfloat16_t);
+    static constexpr uint32_t OUTPUT_SCRATCH_BYTES = STORAGE_ROWS * 256 * sizeof(bfloat16_t);
     static constexpr uint32_t STATISTICS_BYTES = VEC_ROWS * 8 * sizeof(float);
     static constexpr bool HAS_MASK = hasAtten;
     static constexpr bool FLASH_DECODE = isFd;
@@ -58,9 +62,9 @@ public:
                   QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT, "Unsupported MXFP4 P quantization schema");
     static constexpr bool ENABLE_QF322F32_PRE = enableQf322F32Pre;
     static constexpr ActualSeqLensMode Q_MODE = GetQActSeqMode<layout>();
-    static_assert(mBaseSize == 128 && dBaseSize == dVBaseSize &&
-        ((dBaseSize == 128 && s2BaseSize == 256) || (dBaseSize == 256 && s2BaseSize == 128)),
-        "MXFP4 Vector 只支持 M128/D128/N256 和 M128/D256/N128");
+    static_assert(dBaseSize == dVBaseSize && (SMALL_ND || (mBaseSize == 128 &&
+        ((dBaseSize == 128 && s2BaseSize == 256) || (dBaseSize == 256 && s2BaseSize == 128)))),
+        "Unsupported MXFP4 vector tile");
     static_assert(layout == LayOutTypeEnum::LAYOUT_TND, "MXFP4 首版只支持 TND Q");
     static_assert(outLayout == LayOutTypeEnum::LAYOUT_TND || outLayout == LayOutTypeEnum::LAYOUT_NTD,
         "MXFP4 输出布局必须为 TND 或 NTD");
@@ -137,7 +141,7 @@ public:
         crossBuffers_.InitBuffers(l1BufferManager_, ubBufferManager_);
         // Layout contract for FD reuse: score[2], PV reception, then contiguous history O.
         // FD must never touch score: AIC may issue the next section's C1 during FD.
-        tPipe_->InitBuffer(historyOBuf_, VEC_ROWS * dVBaseSize * sizeof(float));
+        tPipe_->InitBuffer(historyOBuf_, STORAGE_ROWS * dVBaseSize * sizeof(float));
         tPipe_->InitBuffer(globalRowSum_, VEC_ROWS * sizeof(float));
         tPipe_->InitBuffer(taskGroupMax_, TASK_GROUP_MAX_ELEMENTS * PRELOAD_N * sizeof(float));
         tPipe_->InitBuffer(globalCurrentMax_, GROUP_MAX_SLOTS * VEC_ROWS * sizeof(float));
@@ -159,7 +163,7 @@ public:
 
     static __aicore__ inline constexpr uint32_t GetPersistUbSize()
     {
-        return VEC_ROWS * dVBaseSize * sizeof(float) + 2 * VEC_ROWS * sizeof(float) +
+        return STORAGE_ROWS * dVBaseSize * sizeof(float) + 2 * VEC_ROWS * sizeof(float) +
             TASK_GROUP_MAX_ELEMENTS * PRELOAD_N * sizeof(float) +
             2 * GROUP_MAX_SLOTS * VEC_ROWS * sizeof(float) + 512 + P_SLOT_COUNT * P_PACK_BYTES;
     }
@@ -171,14 +175,19 @@ public:
 
     static __aicore__ inline constexpr uint32_t GetFdReuseUbSize()
     {
-        return CrossBufferType::ubBmm2BufferBytes_ + VEC_ROWS * dVBaseSize * sizeof(float);
+        return CrossBufferType::ubBmm2BufferBytes_ + STORAGE_ROWS * dVBaseSize * sizeof(float);
     }
 
     static __aicore__ inline constexpr uint32_t GetTransientUbSize()
     {
         // P 使用独立双槽；D256 输出复用已消费的 PV，独立临时区只保留 Pscale。
         // FD 另行复用已退休的 PV/history O，不占用此临时区。
-        return (REUSE_PV_OUTPUT ? 0U : OUTPUT_SCRATCH_BYTES) + 3 * STATISTICS_BYTES;
+        constexpr uint32_t statisticsBytes = 3 * STATISTICS_BYTES;
+        constexpr uint32_t pScaleBytes = TASKS_PER_GROUP * LOCAL_PSCALE_BYTES;
+        if constexpr (SMALL_ND) {
+            return pScaleBytes;
+        }
+        return (REUSE_PV_OUTPUT ? 0U : OUTPUT_SCRATCH_BYTES) + statisticsBytes;
     }
     static_assert(GetFdReuseUbOffset() % 32 == 0 && GetFdReuseUbSize() % 32 == 0,
         "MXFP4 FD reusable UB region must be 32-byte aligned");
@@ -258,10 +267,10 @@ public:
                     }
                 } else {
                     if (ENABLE_QF322F32_PRE && CrossBufferType::CanScaleInFixpipe(params.scoreScale)) {
-                        Mxfp4Api::SoftmaxNdChunkFp32<s2SplitSize, s2BaseSize, HAS_MASK, QUANT_SCHEMA, true>(
+                        Mxfp4Api::SoftmaxNdChunkFp32<s2SplitSize, s2BaseSize, HAS_MASK, QUANT_SCHEMA, true, STORAGE_ROWS>(
                             packedQuantP, taskExponent, groupMaximum, score, byteIndices, halfwordIndices, params);
                     } else {
-                        Mxfp4Api::SoftmaxNdChunkFp32<s2SplitSize, s2BaseSize, HAS_MASK, QUANT_SCHEMA, false>(
+                        Mxfp4Api::SoftmaxNdChunkFp32<s2SplitSize, s2BaseSize, HAS_MASK, QUANT_SCHEMA, false, STORAGE_ROWS>(
                             packedQuantP, taskExponent, groupMaximum, score, byteIndices, halfwordIndices, params);
                     }
                 }
@@ -298,7 +307,7 @@ public:
                 firstTaskExponent, secondTaskExponent, reference, previousReference, multiplier,
                 firstTaskCount, secondTaskCount, owner.firstGroup);
         } else {
-            Mxfp4Api::UpdatePScaleNd<s2BaseSize, QUANT_SCHEMA>(encodedScale,
+            Mxfp4Api::UpdatePScaleNd<s2BaseSize, QUANT_SCHEMA, STORAGE_ROWS>(encodedScale,
                 firstTaskExponent, secondTaskExponent, reference, previousReference, multiplier,
                 firstTaskCount, secondTaskCount, owner.firstGroup, GetAivRowCapacity(runInfo));
         }
@@ -344,10 +353,10 @@ public:
             }
         } else {
             if (owner.firstGroup) {
-                Mxfp4Api::processUpdateNd<false, dVBaseSize>(historyOutput, groupResult, multiplier,
+                Mxfp4Api::processUpdateNd<false, dVBaseSize, STORAGE_ROWS>(historyOutput, groupResult, multiplier,
                     historySum, GetValidQueryRows(runInfo));
             } else {
-                Mxfp4Api::processUpdateNd<true, dVBaseSize>(historyOutput, groupResult, multiplier,
+                Mxfp4Api::processUpdateNd<true, dVBaseSize, STORAGE_ROWS>(historyOutput, groupResult, multiplier,
                     historySum, GetValidQueryRows(runInfo));
             }
         }
@@ -476,7 +485,7 @@ private:
         } else {
             DataCopy(destination[firstRow * 32], source,
                 {static_cast<uint16_t>(s2BaseSize / 64), static_cast<uint16_t>(GetAivRowCapacity(runInfo)),
-                 static_cast<uint16_t>(VEC_ROWS - GetAivRowCapacity(runInfo)),
+                 static_cast<uint16_t>(STORAGE_ROWS - GetAivRowCapacity(runInfo)),
                  static_cast<uint16_t>(mBaseSize - GetAivRowCapacity(runInfo))});
         }
     }

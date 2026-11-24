@@ -33,7 +33,9 @@ def decode_sections(metadata, params):
     if len(meta) < 16:
         raise ValueError('C4 metadata header is missing')
     sections, is_fd, m_base, task_n, cores = meta[:5]
-    if sections < 1 or cores < 1 or m_base != 128 or task_n != (128 if p['D'] == 256 else 256):
+    legacy_tile = (128, 128 if p['D'] == 256 else 256)
+    small_decode = p['D'] == 256 and p['q_scale_layout'] == 'N2TGD' and (m_base, task_n) == (64, 256)
+    if sections < 1 or cores < 1 or ((m_base, task_n) != legacy_tile and not small_decode):
         raise ValueError(f'Unsupported C4 metadata header: {meta[:5]}')
     if len(meta) < 16 + sections*cores*16:
         raise ValueError('C4 metadata FA records are truncated')
