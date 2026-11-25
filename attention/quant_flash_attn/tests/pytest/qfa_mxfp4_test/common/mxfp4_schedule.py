@@ -37,8 +37,10 @@ def decode_sections(metadata, params):
     real_group = p['N_q']//p['N_kv']
     # 同页双 KV head 块对角合并：header 的 task_n 是 score 宽度（= 每 head token 块 * N_kv），
     # 调度上 kvHeadNum=1、group=N_q；M 为 64，每 head token 块 = task_n//N_kv。
+    # gSize 必须是 >=4 的 2 的幂，与 host tiling / AICPU metadata 的派发条件一致。
     merge = (p['q_scale_layout'] == 'N2TGD' and p['kv_cache_layout'] == 'PA_BBND'
-             and p['D'] == 256 and p['N_kv'] == 2 and real_group % 4 == 0
+             and p['D'] == 256 and p['N_kv'] == 2
+             and real_group >= 4 and (real_group & (real_group - 1)) == 0
              and m_base == 64 and task_n == 256)
     if merge:
         head_num, group, group_tasks = 1, p['N_q'], 16

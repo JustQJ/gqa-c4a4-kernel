@@ -1,0 +1,7 @@
+SHARD qwen38_27b_TP2_ dev3 seconds=1125 540 passed in 1124.22s (0:18:44)
+SHARD qwen3_30b_TP2_ dev3 seconds=984 540 passed in 983.22s (0:16:23)
+SHARD qwen36_35b_TP1_ dev2 seconds=2229 540 passed in 2228.77s (0:37:08)
+SHARD qwen36_35b_TP2_ dev3 seconds=725 540 passed in 725.02s (0:12:05)
+SHARD qwen38_27b_TP4_ dev2 seconds=618 1 failed, 539 passed in 617.23s (0:10:17)
+SHARD qwen36_35b_TP4_ dev3 seconds=431 540 passed in 430.97s (0:07:10)
+SHARD qwen3_30b_TP4_ dev2 seconds=580 540 passed in 580.19s (0:09:40)

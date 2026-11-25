@@ -1,0 +1,205 @@
+{
+  "metrics": "Default",
+  "reports": [
+    {
+      "directory": "OPPROF_20261125064739_WDAEBLMLPFIIYTFV/QuantFlashAttn_e5a61b92b2c210e175653ef9f7f65b6b_126616834_mix_aic/0",
+      "basic_csv": "OPPROF_20261125064739_WDAEBLMLPFIIYTFV/QuantFlashAttn_e5a61b92b2c210e175653ef9f7f65b6b_126616834_mix_aic/0/OpBasicInfo_20261125064810578.csv",
+      "target_rows": 1,
+      "task_duration_us": [
+        1233.949951
+      ],
+      "metric_rows": {
+        "ArithmeticUtilization": 84,
+        "L2Cache": 84,
+        "Memory": 84,
+        "MemoryL0": 84,
+        "MemoryUB": 84,
+        "PipeUtilization": 84,
+        "ResourceConflictRatio": 84
+      }
+    },
+    {
+      "directory": "OPPROF_20261125064739_WDAEBLMLPFIIYTFV/QuantFlashAttn_e5a61b92b2c210e175653ef9f7f65b6b_126616834_mix_aic/1",
+      "basic_csv": "OPPROF_20261125064739_WDAEBLMLPFIIYTFV/QuantFlashAttn_e5a61b92b2c210e175653ef9f7f65b6b_126616834_mix_aic/1/OpBasicInfo_20261125064810817.csv",
+      "target_rows": 1,
+      "task_duration_us": [
+        1234.940063
+      ],
+      "metric_rows": {
+        "ArithmeticUtilization": 84,
+        "L2Cache": 84,
+        "Memory": 84,
+        "MemoryL0": 84,
+        "MemoryUB": 84,
+        "PipeUtilization": 84,
+        "ResourceConflictRatio": 84
+      }
+    },
+    {
+      "directory": "OPPROF_20261125064739_WDAEBLMLPFIIYTFV/QuantFlashAttn_e5a61b92b2c210e175653ef9f7f65b6b_126616834_mix_aic/2",
+      "basic_csv": "OPPROF_20261125064739_WDAEBLMLPFIIYTFV/QuantFlashAttn_e5a61b92b2c210e175653ef9f7f65b6b_126616834_mix_aic/2/OpBasicInfo_20261125064811030.csv",
+      "target_rows": 1,
+      "task_duration_us": [
+        1236.761963
+      ],
+      "metric_rows": {
+        "ArithmeticUtilization": 84,
+        "L2Cache": 84,
+        "Memory": 84,
+        "MemoryL0": 84,
+        "MemoryUB": 84,
+        "PipeUtilization": 84,
+        "ResourceConflictRatio": 84
+      }
+    },
+    {
+      "directory": "OPPROF_20261125064739_WDAEBLMLPFIIYTFV/QuantFlashAttn_e5a61b92b2c210e175653ef9f7f65b6b_126616834_mix_aic/3",
+      "basic_csv": "OPPROF_20261125064739_WDAEBLMLPFIIYTFV/QuantFlashAttn_e5a61b92b2c210e175653ef9f7f65b6b_126616834_mix_aic/3/OpBasicInfo_20261125064811239.csv",
+      "target_rows": 1,
+      "task_duration_us": [
+        1234.687012
+      ],
+      "metric_rows": {
+        "ArithmeticUtilization": 84,
+        "L2Cache": 84,
+        "Memory": 84,
+        "MemoryL0": 84,
+        "MemoryUB": 84,
+        "PipeUtilization": 84,
+        "ResourceConflictRatio": 84
+      }
+    },
+    {
+      "directory": "OPPROF_20261125064739_WDAEBLMLPFIIYTFV/QuantFlashAttn_e5a61b92b2c210e175653ef9f7f65b6b_126616834_mix_aic/4",
+      "basic_csv": "OPPROF_20261125064739_WDAEBLMLPFIIYTFV/QuantFlashAttn_e5a61b92b2c210e175653ef9f7f65b6b_126616834_mix_aic/4/OpBasicInfo_20261125064811451.csv",
+      "target_rows": 1,
+      "task_duration_us": [
+        1233.713013
+      ],
+      "metric_rows": {
+        "ArithmeticUtilization": 84,
+        "L2Cache": 84,
+        "Memory": 84,
+        "MemoryL0": 84,
+        "MemoryUB": 84,
+        "PipeUtilization": 84,
+        "ResourceConflictRatio": 84
+      }
+    }
+  ],
+  "data_loss_warnings": [],
+  "collection_status": "validated",
+  "capture_scope": "mstx_range",
+  "profiler": "op",
+  "backend": "c4",
+  "quant_mode": 5,
+  "p_scale": null,
+  "mstx_range": "C4A4_PROFILE",
+  "case": {
+    "name": "bench16k_dual_prefill_1",
+    "case_set": "bench16k",
+    "model": "bench16k",
+    "tp": null,
+    "kind": "prefill",
+    "B": 2,
+    "Q": 4096,
+    "KV": 12056,
+    "D": 256,
+    "N_q": 16,
+    "N_kv": 2,
+    "page": 128,
+    "layout_kv": "PA_NZ",
+    "mask_mode": 3,
+    "q_scale_layout": "TND",
+    "enable_lse": false,
+    "seed": 421,
+    "quant_schema": 2,
+    "c8_p_scale": 448.0,
+    "softmax_scale": 0.0625,
+    "cu_seqlens_q": [
+      0,
+      4096,
+      8084
+    ],
+    "seqused_q": [
+      4096,
+      3988
+    ],
+    "seqused_kv": [
+      4096,
+      12056
+    ],
+    "max_seqlen_q": 4096,
+    "max_seqlen_kv": 12056,
+    "kv_cache_num_blocks": 31374,
+    "logical_kv_cache_shape": [
+      31374,
+      128,
+      512
+    ]
+  },
+  "case_fingerprint": "95a667de14dce6221d81fc6efa1f542730abccd1511951614d4fb617c7281e55",
+  "input_sha256": "e5a8df17c46e6f5a3663274a182cbbaa0821f8c504594a9b4db7ace9dd5bb048",
+  "input_shapes": {
+    "q": [
+      8084,
+      16,
+      128
+    ],
+    "k": [
+      31374,
+      2,
+      4,
+      128,
+      32
+    ],
+    "v": [
+      31374,
+      2,
+      4,
+      128,
+      32
+    ],
+    "table": [
+      2,
+      95
+    ],
+    "cu": [
+      3
+    ],
+    "used_kv": [
+      2
+    ],
+    "used_q": [
+      2
+    ],
+    "mask": [
+      2048,
+      2048
+    ],
+    "qs": [
+      8084,
+      16,
+      4,
+      2
+    ],
+    "ks": [
+      31374,
+      2,
+      8,
+      4,
+      16,
+      2
+    ],
+    "vs": [
+      31374,
+      2,
+      16,
+      2,
+      16,
+      2
+    ]
+  },
+  "input_policy": "paired_performance_generator",
+  "allocated_after_release_bytes": 0
+}

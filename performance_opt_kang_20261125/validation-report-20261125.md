@@ -1,0 +1,504 @@
+# MXFP4 同页双 KV head 合并优化 · 完整验证报告
+
+验证日期：2026-11-25
+验收依据：[kernel-optimized.md](../attention/quant_flash_attn/docs/kernel-optimized.md) 开头「优化遵守标准」及其最近两节（`8e0989914`、`2e4ad3565`）的实际执行口径。
+
+---
+
+## 1. 结论摘要
+
+| 项目 | 结果 |
+| --- | --- |
+| 精度 · document small × 3 布局 | **612/612 通过** |
+| 精度 · bench16k × 3 布局 | **36/36 通过** |
+| 精度 · Qwen3-8B 页长 128 × 3 布局 | **48/48 通过** |
+| 精度 · Qwen3-8B 页长 256 × 3 布局 | **48/48 通过** |
+| 精度 · 744 例矩阵合计 | **744/744 通过** |
+| 精度 · document full（4860 例，PA_BBND） | **4860/4860 通过** |
+| 性能 · bench16k 12 例 × 3 布局 × C4/C8 | **36/36 完成，72 路计时**；候选 C8/C4 几何均值 1.1941，C4 更快 31/36 |
+| 性能 · PA_BBND decode C8/C4 | 基线 1.0875 → **1.3918** |
+| 性能 · PA_BBND C4 耗时（对同轮基线） | **-8.02%** |
+| 采集 · dual_prefill_1 双工具 × C4/C8 × 3 布局 | **12/12 validated，无 data loss** |
+| **本轮发现并修复的缺陷** | **合并派发条件过宽：gSize 不是 ≥4 的 2 的幂时结果错误。已修复并复验（72/72）** |
+
+本轮验证最重要的产出不是性能数字，而是**发现了一个此前所有测试集都覆盖不到的正确性缺陷**：合并路径的派发条件没有约束 GQA 分组大小，`N_q/N_kv` 不是 ≥4 的 2 的幂时算子输出错误。744 例矩阵里只有 4 个用例真正走到合并路径，因此历次全绿都没暴露它；只有 document full 的 270 个 `qwen38_27b_TP2` 用例能命中。详见第 4 章。
+
+**性能结论**：收益完全集中在 PA_BBND 的 decode（decode_1 -35.13%、decode_2 -42.90%、decode_3 -14.25%），PA_BNBD / PA_NZ 基本不变，验证了改动的布局隔离性。decode_4 是唯一回退项。**PA_BBND decode 几何均值 1.3918，未达 1.4 目标，差 0.008。**
+
+---
+
+## 2. 验证对象
+
+### 2.1 代码状态
+
+| 项 | 值 |
+| --- | --- |
+| 分支 | `pref` |
+| 优化提交 | `f1d13043b` perf(qfa): merge same-page KV heads for MXFP4 PA_BBND decode |
+| 文档提交 | `35f85ba24` docs(qfa): record three-layout comparison and the failed merge tiering |
+| 本轮修复 | 合并派发条件收紧（host tiling + AICPU metadata + golden schedule 三处同步） |
+| 验证包 | `val2`（全新 build 目录，`BUILD_STATUS=0` / `INSTALL_STATUS=0`） |
+| 同轮基线包 | `merge8`（合并前版本，metadata header `[1,*,128,128,28]`） |
+
+构建前对容器 `candidate-src` 与本地工作区做了逐文件归一化 md5 比对（忽略 CRLF 差异），311 个源文件全部一致。
+
+### 2.2 本轮修复内容
+
+三处派发条件同步加入「gSize 为 ≥4 的 2 的幂」判据：
+
+- [quant_flash_attn_tiling_mxfp4.cpp](../attention/quant_flash_attn/op_host/arch35/quant_flash_attn_tiling_mxfp4.cpp)
+- [quant_flash_attn_metadata_aicpu.cpp](../attention/quant_flash_attn_metadata/op_kernel_aicpu/quant_flash_attn_metadata_aicpu.cpp)
+- [mxfp4_schedule.py](../attention/quant_flash_attn/tests/pytest/qfa_mxfp4_test/common/mxfp4_schedule.py)
+
+```cpp
+const int64_t mergeGroupSize = qfaInfo_->n2Size > 0 ? qfaInfo_->n1Size / qfaInfo_->n2Size : 0;
+const bool mergeGroupAligned = mergeGroupSize >= 4 && (mergeGroupSize & (mergeGroupSize - 1)) == 0;
+```
+
+不满足判据的 shape 回退基线路径，与合并前行为一致。
+
+### 2.3 环境
+
+| 项 | 值 |
+| --- | --- |
+| 宿主机 / 容器 | `ascend-950pr-223-2-2` / `k831` |
+| CANN | 9.2.1 |
+| Python / torch / torch_npu | 3.12.16 / 2.10.0+cpu / 2.10.0.post7 |
+| 芯片 | Ascend950PR_9579（28 cube core / 56 vector core，L2 128 MB，HBM 126112 MB） |
+| 设备 | 性能与采集独占 NPU 7；精度并行使用 NPU 7 / 0 / 4，document full 改用 NPU 7 / 0 / 2 / 3（NPU4 运行期失效，见 5.3） |
+| 算子包 | `cann_ops_transformer_qfa_bbnd_copy` |
+| 量化 schema | 2（CX Delta） |
+
+---
+
+## 3. 验收范围与执行方法
+
+### 3.1 精度矩阵
+
+按 kernel-optimized.md 最近两节的实际口径，每布局 248 例、三布局合计 744 例：
+
+| 测试集 | 每布局 | 三布局合计 |
+| --- | ---: | ---: |
+| document small | 204 | 612 |
+| bench16k | 12 | 36 |
+| Qwen3-8B，页长 128 | 16 | 48 |
+| Qwen3-8B，页长 256 | 16 | 48 |
+| 合计 | 248 | 744 |
+
+另按「多次大的改动要进行一次 document full」执行 **document full 4860 例**（PA_BBND）。
+
+参考口径：三布局均用 `--golden-mode all`，各自生成输入、CPU 参考与 NPU 输出。参考侧 `kv_cache_layout` 恒为 `PA_BBND`（布局转换在算子入口内完成），输入由同一 seed 生成，因此三布局比较的是同一套参考逻辑与同一份输入。Attention 与 LSE 都比对。
+
+最初 BNBD/NZ 计划用 `--golden-mode npu,compare` 复用 BBND 的缓存，实测发现 Qwen3-8B 单例输入 9.13 GB，从磁盘 `torch.load` 极慢（跑 33 分钟未过半），改为 `all` 在内存重生成后同一集合只需约 7 分钟。每布局使用独立 cache 目录避免并发写冲突。
+
+### 3.2 性能口径
+
+```
+test_quant_flash_attn_perf_rdv.py --perf-case-set bench16k --run-perf \
+  --perf-backends c4,c8 --perf-mode graph --perf-warmup 3 --perf-rounds 5 --perf-repeats 20
+```
+
+12 个用例 × 3 布局，C4 与 C8 同用例、同输入、同设备。Graph 回放 + Event 计时，预热 3 次、测量 5 轮、每轮 20 次调用取中位数。输入准备、metadata 与布局转换在计时外。同轮另测基线包 `merge8` 作 A/B 对照。
+
+### 3.3 采集口径
+
+`prof_quant_flash_attn.py --case dual_prefill_1 --profiler both --backend both`，
+普通 msprof 取 `PipeUtilization`，msprof op 取 `Default`；eager 模式，应用预热 20 次，工具预热 10 次、采 5 次。三布局 × C4/C8 共 12 组。
+
+### 3.4 并行化
+
+document full 的耗时 84% 以上在**单线程 CPU 参考**（`cpu_mxfp4_golden_kernel` 是 batch × head × m_tile × task × kv_head 的 Python 嵌套循环），NPU 占比不足 1%，因此多卡收益极小，真正的杠杆是跨用例的 CPU 并行。
+
+实测拟合的成本模型：`t ≈ 1.34e-8 × QK工作量 + 3.0e-8 × 反量化元素数`（秒）。据此 document full 串行约 **12.68 小时**。
+
+执行方案：按 model×TP 切 9 片，每片 540 例，每槽 16 个 `pytest-xdist` worker，按预估成本降序贪心填槽，**每片跑完立即删除该片缓存**，磁盘峰值约 610 GB 而非 909 GB。原计划 NPU 7 / 0 / 4 三槽（48 worker），NPU4 运行期失效后改为 NPU 2 / 3 两槽重跑受影响分片，实际用到 7 / 0 / 2 / 3 四张卡。
+
+并行度受**单卡 HBM** 约束，必须按测试集的最大单例显存选择 worker 数：
+
+| 测试集 | 最大单例输入 | 每卡 worker 数 |
+| --- | ---: | ---: |
+| document small | 0.57 GB | 16 |
+| document full | 2.28 GB | 16 |
+| bench16k | 2.18 GB | 16 |
+| Qwen3-8B（两种页长） | **9.13 GB** | **6** |
+
+首次用 16 worker 跑 Qwen3-8B 时有 4 例 `torch.OutOfMemoryError`（123.16 GiB 容量被 16×9.13 GB 占满），降到 6 worker 后重跑。该失败是并行资源配置问题，不是算子精度问题。
+
+---
+
+## 4. 本轮发现的缺陷：合并派发条件过宽
+
+### 4.1 发现过程
+
+对 document full 做 41 例系统抽样（每 121 例取 1）时出现 3 例失败，全部是 `qwen38_27b_TP2` + `N2TGD`（`N_q=12, N_kv=2, D=256, PA_BBND`）：
+
+| 用例 | 候选（修复前） | 基线 `merge8` |
+| --- | --- | --- |
+| `qwen38_27b_TP2_short11_N2TGD_M0_LSE1` | 失败 | 通过 |
+| `qwen38_27b_TP2_mtp2_kv32768_b16_N2TGD_M3_LSE1` | 失败 | 通过 |
+| `qwen38_27b_TP2_mtp8_kv65536_b1_N2TGD_M0_LSE1` | 失败 | 通过 |
+
+- kernel 参考侧报 `ValueError: C4 metadata traversal exceeded its domain`
+- 换成与 metadata 无关的 `--reference-backend global` 后**仍然失败**：`AssertionError: LSE empty-row (+inf) positions do not match the CPU reference`
+- 基线包在两种参考下都通过
+
+即：这是**算子本身的正确性回归**，不是参考模型的描述能力问题。
+
+### 4.2 支持域实测
+
+用与 metadata 无关的全局 CPU 参考（`--reference-backend global`）对 `N_kv=2, D=256, PA_BBND, N2TGD` 扫描 `N_q`。每个 `N_q` 测 6 组：mask ∈ {0,3} × (q, kv) ∈ {(1,1024), (4,1024), (17,4096)}，共 72 组。修复前后用**同一套 shape**分别在 `val1`（修复前二进制）与 `val2` 上各跑一遍：
+
+| N_q | gSize | 修复前通过 | 修复后通过 |
+| ---: | ---: | ---: | ---: |
+| 2 | 1 | 2/6 | 6/6 |
+| 4 | 2 | 0/6 | 6/6 |
+| 6 | 3 | 0/6 | 6/6 |
+| **8** | **4** | **6/6** | 6/6 |
+| 10 | 5 | 0/6 | 6/6 |
+| 12 | 6 | 0/6 | 6/6 |
+| **16** | **8** | **6/6** | 6/6 |
+| 20 | 10 | 0/6 | 6/6 |
+| 24 | 12 | 2/6 | 6/6 |
+| **32** | **16** | **6/6** | 6/6 |
+| 48 | 24 | 0/6 | 6/6 |
+| **64** | **32** | **6/6** | 6/6 |
+| 合计 | | **34/72** | **72/72** |
+
+结论：**合并语义只在 gSize 为 ≥4 的 2 的幂时成立**。原先 golden 侧的 `real_group % 4 == 0` 也不正确——它会误放行 gSize=12。
+
+注意 `N_q=2` 与 `N_q=24` 各有 2 组「通过」，都落在 `q=1, kv=1024` 的单 token decode 上；`q=4` 或 `q=17` 立刻失败。这解释了缺陷为何是**潜伏**的：只测单 token decode 的用例集可能完全看不到它。
+
+机理：合并模式把 M64 tile 按 `mergePartRows = mBaseSize/2 = 32` 拆成两个 KV head part，head 边界落在每 `gSize/2` 行；只有 gSize 为 ≥4 的 2 的幂时该边界才与 Q 装载粒度和 VF 的行分组对齐。
+
+### 4.3 覆盖盲区
+
+修复前各测试集对合并路径的覆盖：
+
+| 测试集 | 例数 | 命中合并派发 | 其中 gSize 不合法 |
+| --- | ---: | ---: | ---: |
+| document small | 204 | **0** | 0 |
+| bench16k | 12 | 4 | 0 |
+| Qwen3-8B 页长 128 | 16 | **0** | 0 |
+| Qwen3-8B 页长 256 | 16 | **0** | 0 |
+| document full | 4860 | 540 | **270** |
+
+744 例矩阵里真正走到合并路径的只有 4 个用例（bench16k 的 4 个 decode，且只有 PA_BBND 实际合并）。**这解释了为什么此前多轮 744 例全绿却没有发现该缺陷**，也说明 document full 不可省略。
+
+### 4.4 修复复验
+
+在 `val2` 上复验，全部通过：
+
+| 复验项 | 参考 | 结果 |
+| --- | --- | --- |
+| 原 3 个失败用例 | `--reference-backend global` | **3 passed**（68.40s） |
+| 原 3 个失败用例 | kernel 参考（默认） | **3 passed**（24.39s） |
+| gSize 扫描：N_q ∈ {2,4,6,8,10,12,16,20,24,32,48,64} × mask{0,3} × (q,kv){(1,1024),(4,1024),(17,4096)} | global | **72/72 PASS** |
+
+修复前，4.2 表中所有非 2 的幂或小于 4 的 gSize 均失败；修复后同一扫描 72/72 通过：合法 gSize 仍走合并路径，非法 gSize 回退基线路径。
+
+---
+
+## 5. 精度结果
+
+### 5.1 744 例矩阵
+
+三布局合计 **744/744 通过**，Attention 与 LSE 均比对。
+
+| 测试集 | 每布局 | PA_BBND | PA_BNBD | PA_NZ | 三布局合计 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| document small | 204 | 204 | 204 | 204 | 612 |
+| bench16k | 12 | 12 | 12 | 12 | 36 |
+| Qwen3-8B，页长 128 | 16 | 16 | 16 | 16 | 48 |
+| Qwen3-8B，页长 256 | 16 | 16 | 16 | 16 | 48 |
+| 合计 | 248 | **248** | **248** | **248** | **744** |
+
+PA_NZ 的 Qwen3-8B 页长 256 首轮有 1 例驱动瞬时错误，单卡复跑 16/16 通过（见 5.2、5.4），表中计入复跑结果。
+
+逐集合耗时（含并行度）：
+
+| 测试集 | 布局 | 卡 | worker | 结果 | 耗时 |
+| --- | --- | --- | ---: | --- | ---: |
+| bench16k | PA_BBND | 7 | 16 | 12 passed | 51.85s |
+| Qwen3-8B 页长128 | PA_BBND | 7 | 6 | 16 passed | 433.11s |
+| Qwen3-8B 页长256 | PA_BBND | 7 | 6 | 16 passed | 702.28s |
+| document small | PA_BBND | 7 | 16 | 204 passed | 599.27s |
+| bench16k | PA_BNBD | 7 | 16 | 12 passed | 80.60s |
+| Qwen3-8B 页长128 | PA_BNBD | 7 | 6 | 16 passed | 1670.24s |
+| Qwen3-8B 页长256 | PA_BNBD | 7 | 6 | 16 passed | 1957.76s |
+| document small | PA_BNBD | 4 | 16 | 204 passed | 596.56s |
+| bench16k | PA_NZ | 4 | 16 | 12 passed | 101.54s |
+| Qwen3-8B 页长128 | PA_NZ | 0 | 6 | 16 passed | 293.09s |
+| Qwen3-8B 页长256 | PA_NZ | 0 | 6 | 15 passed + 1 驱动错误 | 433.35s |
+| document small | PA_NZ | 4 | 16 | 204 passed | 618.27s |
+
+### 5.2 两次非精度性失败的处置
+
+本轮出现过两次失败，都不是算子精度问题，已定位并重跑：
+
+1. **NPU OOM（并行配置问题）**：首次用 16 worker 跑 Qwen3-8B PA_BBND，4 例 `torch.OutOfMemoryError`。该测试集单例输入 9.13 GB，16×9.13 GB 超出单卡 123.16 GiB。降到 6 worker 后 16/16 通过。
+2. **驱动瞬时错误**：Qwen3-8B 页长256 PA_NZ 的 `prefill_4` 报
+   `RuntimeError: copy_between_host_and_device_opapi ... aclrtMemcpy, error code is 507899` /
+   `ERR00100 PTA call acl api failed` / `rtMemcpy execution failed, reason=driver error:internal error`。
+   这是三卡并发下的 host-device 拷贝驱动故障，不是数值比对失败。已在 NPU7 上以 4 worker 单独复跑该集合。
+
+复跑结果见 5.4。
+
+### 5.3 document full（4860 例）
+
+**4860/4860 通过**（PA_BBND，schema 2，Attention + LSE）。按 model×TP 切 9 片，每片 540 例。
+
+| 分片 | 例数 | 卡 | worker | 结果 | 耗时 |
+| --- | ---: | --- | ---: | --- | ---: |
+| qwen38_27b_TP1 | 540 | 7 | 16 | 540 passed | 2181.70s |
+| qwen3_30b_TP1 | 540 | 0 | 16 | 540 passed | 2073.32s |
+| qwen36_35b_TP1 | 540 | 2 | 16 | 540 passed | 2228.77s |
+| **qwen38_27b_TP2** | **540** | **3** | **16** | **540 passed** | **1124.22s** |
+| qwen3_30b_TP2 | 540 | 3 | 16 | 540 passed | 983.22s |
+| qwen36_35b_TP2 | 540 | 3 | 16 | 540 passed | 725.02s |
+| qwen38_27b_TP4 | 540 | 7 | 16 | 540 passed（复验） | 578.67s |
+| qwen36_35b_TP4 | 540 | 3 | 16 | 540 passed | 430.97s |
+| qwen3_30b_TP4 | 540 | 2 | 16 | 540 passed | 580.19s |
+| 合计 | **4860** | | | **4860 passed** | |
+
+**关键分片是 `qwen38_27b_TP2`**：它包含全部 270 个 gSize=6 的用例，也就是修复前必然失败的那一批。修复后 540/540 通过。
+
+执行过程中遇到两次环境故障，均已定位并重跑：
+
+1. **NPU4 运行期变为不可 retain**：首轮有 7 个分片被调度到 NPU4，全部报
+   `TsdOpen failed. devId=4` / `rtSetDevice execution failed, reason=device retain error` /
+   `Check param failed, dev can not be NULL!`。该卡在任务开始前的探测是可用的，运行期被其他用户占用后失效。
+   改用当时可 retain 的 NPU2 / NPU3 重跑这 7 片，全部通过。
+2. **NPU2 上一次驱动瞬时故障**：`qwen38_27b_TP4_mtp1_kv32768_b8_TND_M0_LSE1` 报
+   `halMemAlloc failed, drvRetCode=7, ErrCode=507899, desc=[driver error:internal error]`，
+   随后同样退化为 device retain 失败。在 NPU7 上整片复验 540/540 通过。
+
+**耗时**：串行估算 12.68 小时；实际墙钟约 80 分钟（含上述卡失效导致的 7 片重跑与 1 片复验）。成功分片累计运行 10905s，在 2–4 张卡 × 16 worker 下并行完成。
+
+### 5.4 复跑结果
+
+| 集合 | 布局 | 卡 | worker | 结果 | 耗时 |
+| --- | --- | --- | ---: | --- | ---: |
+| Qwen3-8B 页长256 | PA_NZ | 7 | 4 | **16 passed** | 253.33s |
+
+驱动瞬时错误确认为环境性质：同一集合在单卡低并行度下 16/16 通过。计入复跑后，**三布局 744/744 全部通过**。
+
+---
+
+## 6. bench16k Graph 性能
+
+D256、页长 128、schema 2。12 用例 × 3 布局，C4/C8 同用例同输入同设备（NPU7）。预热 3 次、5 轮 × 20 次 Graph replay，取每轮单次 attention 调用耗时的中位数，单位 µs。输入准备、metadata 与布局转换在计时外。
+
+同轮另测基线包 `merge8`（合并前）。**36 组逐例核对 `input_sha256` 与 `case_fingerprint`，全部一致**。
+
+### 6.1 PA_BBND（本次优化的目标布局）
+
+| 用例 | 基线 C4 | 候选 C4 | C4 变化 | 基线 C8 | 候选 C8 | 基线 C8/C4 耗时比 | 候选 C8/C4 耗时比 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| single_prefill_1 | 251.201 | 250.304 | -0.36% | 242.228 | 241.911 | 0.9643 | 0.9665 |
+| single_prefill_2 | 949.817 | 951.536 | +0.18% | 1069.201 | 1067.931 | 1.1257 | 1.1223 |
+| single_prefill_3 | 1299.668 | 1301.738 | +0.16% | 1556.789 | 1552.984 | 1.1978 | 1.1930 |
+| dual_prefill_1 | 1232.046 | 1235.575 | +0.29% | 1297.472 | 1319.137 | 1.0531 | 1.0676 |
+| dual_prefill_2 | 1274.119 | 1271.801 | -0.18% | 1508.539 | 1497.003 | 1.1840 | 1.1771 |
+| dual_prefill_3 | 2298.008 | 2301.913 | +0.17% | 2659.333 | 2689.060 | 1.1572 | 1.1682 |
+| **decode_1** | **281.911** | **182.877** | **-35.13%** | 312.320 | 310.867 | 1.1079 | **1.6999** |
+| **decode_2** | **790.869** | **451.556** | **-42.90%** | 793.276 | 793.626 | 1.0030 | **1.7575** |
+| **decode_3** | **34.384** | **29.484** | **-14.25%** | 41.582 | 41.465 | 1.2093 | **1.4064** |
+| **decode_4** | **46.386** | **54.138** | **+16.71%** | 48.271 | 48.353 | 1.0406 | **0.8931** |
+| mixed_1 | 1335.973 | 1331.674 | -0.32% | 1347.941 | 1351.709 | 1.0090 | 1.0150 |
+| mixed_2 | 3789.183 | 3753.304 | -0.95% | 3611.222 | 3574.779 | 0.9530 | 0.9524 |
+
+### 6.2 PA_BNBD
+
+| 用例 | 基线 C4 | 候选 C4 | C4 变化 | 基线 C8 | 候选 C8 | 基线 C8/C4 耗时比 | 候选 C8/C4 耗时比 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| single_prefill_1 | 249.093 | 247.585 | -0.61% | 241.994 | 243.717 | 0.9715 | 0.9844 |
+| single_prefill_2 | 949.120 | 948.522 | -0.06% | 1068.686 | 1069.244 | 1.1260 | 1.1273 |
+| single_prefill_3 | 1298.206 | 1297.832 | -0.03% | 1569.249 | 1537.494 | 1.2088 | 1.1847 |
+| dual_prefill_1 | 1227.151 | 1230.456 | +0.27% | 1316.128 | 1312.542 | 1.0725 | 1.0667 |
+| dual_prefill_2 | 1267.286 | 1271.622 | +0.34% | 1498.091 | 1549.267 | 1.1821 | 1.2183 |
+| dual_prefill_3 | 2178.506 | 2189.665 | +0.51% | 2664.394 | 2689.397 | 1.2230 | 1.2282 |
+| decode_1 | 189.464 | 190.756 | +0.68% | 313.523 | 314.978 | 1.6548 | 1.6512 |
+| decode_2 | 476.589 | 479.239 | +0.56% | 808.767 | 806.845 | 1.6970 | 1.6836 |
+| decode_3 | 33.790 | 34.351 | +1.66% | 42.984 | 42.807 | 1.2721 | 1.2462 |
+| decode_4 | 46.509 | 49.117 | +5.61% | 50.529 | 50.222 | 1.0864 | 1.0225 |
+| mixed_1 | 1162.528 | 1164.027 | +0.13% | 1322.450 | 1321.433 | 1.1376 | 1.1352 |
+| mixed_2 | 3117.068 | 3129.139 | +0.39% | 3461.479 | 3427.410 | 1.1105 | 1.0953 |
+
+### 6.3 PA_NZ
+
+| 用例 | 基线 C4 | 候选 C4 | C4 变化 | 基线 C8 | 候选 C8 | 基线 C8/C4 耗时比 | 候选 C8/C4 耗时比 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| single_prefill_1 | 248.246 | 247.833 | -0.17% | 242.408 | 242.385 | 0.9765 | 0.9780 |
+| single_prefill_2 | 951.431 | 949.869 | -0.16% | 1067.996 | 1067.983 | 1.1225 | 1.1243 |
+| single_prefill_3 | 1299.339 | 1298.644 | -0.05% | 1585.096 | 1539.197 | 1.2199 | 1.1852 |
+| dual_prefill_1 | 1228.980 | 1228.135 | -0.07% | 1290.594 | 1314.559 | 1.0501 | 1.0704 |
+| dual_prefill_2 | 1269.994 | 1268.678 | -0.10% | 1480.983 | 1534.636 | 1.1661 | 1.2096 |
+| dual_prefill_3 | 2203.214 | 2185.858 | -0.79% | 2656.881 | 2673.865 | 1.2059 | 1.2233 |
+| decode_1 | 175.583 | 176.383 | +0.46% | 303.275 | 304.147 | 1.7272 | 1.7243 |
+| decode_2 | 452.657 | 454.054 | +0.31% | 777.304 | 778.435 | 1.7172 | 1.7144 |
+| decode_3 | 33.383 | 32.961 | -1.26% | 41.048 | 41.070 | 1.2296 | 1.2460 |
+| decode_4 | 45.322 | 48.293 | +6.55% | 49.540 | 49.216 | 1.0931 | 1.0191 |
+| mixed_1 | 1154.694 | 1152.010 | -0.23% | 1269.162 | 1270.686 | 1.0991 | 1.1030 |
+| mixed_2 | 3109.658 | 3082.336 | -0.88% | 3381.580 | 3355.785 | 1.0874 | 1.0887 |
+
+### 6.4 分组几何平均（按用例等权）
+
+C8/C4 大于 1 表示 C4 更快。
+
+| 布局 | 范围 | 基线 C8/C4 耗时比 | 候选 C8/C4 耗时比 | 候选 C4 更快 |
+| --- | --- | ---: | ---: | ---: |
+| PA_BBND | all（12） | 1.0802 | **1.1745** | 9/12 |
+| PA_BBND | prefill（6） | 1.1106 | 1.1129 | |
+| PA_BBND | **decode（4）** | **1.0875** | **1.3918** | |
+| PA_BBND | mixed（2） | 0.9806 | 0.9832 | |
+| PA_BNBD | all（12） | 1.2121 | 1.2036 | 11/12 |
+| PA_BNBD | prefill（6） | 1.1271 | 1.1315 | |
+| PA_BNBD | decode（4） | 1.4036 | 1.3719 | |
+| PA_BNBD | mixed（2） | 1.1239 | 1.1151 | |
+| PA_NZ | all（12） | 1.2054 | 1.2043 | 11/12 |
+| PA_NZ | prefill（6） | 1.1201 | 1.1284 | |
+| PA_NZ | decode（4） | 1.4130 | 1.3919 | |
+| PA_NZ | mixed（2） | 1.0933 | 1.0958 | |
+| 全部 36 组 | all | | **1.1941** | **31/36** |
+
+候选 C4 相对同轮基线 C4 的耗时比几何平均：
+
+| 布局 | C4 耗时比（基线/候选） | C4 耗时变化 |
+| --- | ---: | ---: |
+| **PA_BBND** | **1.0871** | **-8.02%** |
+| PA_BNBD | 0.9923 | +0.78% |
+| PA_NZ | 0.9972 | +0.28% |
+
+### 6.5 解读
+
+1. **收益完全集中在 PA_BBND 的 decode**：decode C8/C4 从 1.0875 提升到 1.3918，decode_1 耗时降 35.13%、decode_2 降 42.90%、decode_3 降 14.25%。这与设计一致——派发条件只覆盖 `N2TGD + PA_BBND + N_kv=2 + D256` 的 ND decode。
+2. **PA_BNBD / PA_NZ 基本不变**（C4 耗时比 0.9923 / 0.9972），验证了改动的布局隔离性。这两个布局 decode 的高比值（1.37 / 1.39）**来自布局本身**，基线已经是 1.4036 / 1.4130，与本次优化无关。metadata header 也印证了派发隔离：`decode_1` 在 PA_BBND 上是 `[1,1,64,256,28,...]`（合并 Config 6），在 PA_BNBD / PA_NZ 上是 `[1,1,128,128,28,...]`（基线）。
+3. **decode_4 是唯一回退项**：PA_BBND +16.71%，PA_BNBD +5.61%，PA_NZ +6.55%。BBND 上的回退源于每核约 24 个 task 刚跨过 `PRELOAD_N=20`，且 `kvHeadNum 2→1` 让负载均衡变粗；BNBD/NZ 上的小幅回退来自共享改动（`MXFP4_TASK_GROUP_N` 由 20 统一为 16、softmax VF 进位改写）。
+4. **prefill / mixed 未受影响**（PA_BBND 上逐项变化都在 ±1% 内）。
+5. **未达 1.4 目标**：PA_BBND decode 几何均值 1.3918，距 1.4 差 0.008。此前记录的 1.3939 与本轮 1.3918 属同一水平，差异在测量波动内。
+6. 五轮极差超过组内中位数 5% 的有：PA_BBND 的 `single_prefill_3`（C4 12.92% / C8 11.36%）、`dual_prefill_1`（C8 13.78%）、`dual_prefill_2`（C4 9.96% / C8 11.93%）、`dual_prefill_3`（C4 7.59%）、`mixed_1`（C4 5.84% / C8 11.82%）、`mixed_2`（C4 5.40%）；BNBD/NZ 的长 prefill 也有类似抖动。decode 四例的极差都在 4% 以内，收益结论稳定。
+
+---
+
+## 7. dual_prefill_1 采集
+
+本例 C4 为 D256 DN、B=2，Q 长度 [4096, 3988]，KV 长度 [4096, 12056]。采集与 Graph 使用相同用例指纹与输入 SHA256。eager 模式，应用预热 20 次；普通 msprof 取最后 3 次目标调用各列中位数（共捕获 25 次调用）；msprof op 用 `--aic-metrics=Default`，工具预热 10 次、采 5 次，每次先对有效核取均值再对 5 次取中位数。时间单位 µs，各流水可重叠。
+
+**12 组采集（3 布局 × C4/C8 × 2 工具）全部 `collection_status=validated`，无 data loss。**
+
+### 7.1 普通 msprof · PipeUtilization
+
+| 布局 | 后端 | 整算子 | AIC MAC | AIC Scalar | AIC MTE1 | AIC MTE2 | AIC Fixpipe | AIV Vector | AIV Scalar | 最长流水 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| PA_BBND | C4 | 1233.888 | 814.624 | 752.289 | 489.503 | **1042.154** | 701.878 | 992.407 | 584.942 | AIC MTE2 |
+| PA_BBND | C8 | 1287.435 | 1169.731 | **1195.270** | 774.739 | 1096.076 | 877.971 | 1086.045 | 814.434 | AIC Scalar |
+| PA_BNBD | C4 | 1229.083 | 811.855 | 725.242 | 466.581 | 703.895 | 697.380 | **992.422** | 585.971 | AIV Vector |
+| PA_BNBD | C8 | 1288.080 | 1170.322 | **1192.092** | 773.541 | 1140.930 | 878.378 | 1086.232 | 810.271 | AIC Scalar |
+| PA_NZ | C4 | 1231.050 | 814.265 | 748.098 | 518.247 | 596.622 | 698.363 | **992.465** | 588.785 | AIV Vector |
+| PA_NZ | C8 | 1287.291 | 1169.715 | **1181.994** | 776.196 | 1017.670 | 877.909 | 1086.049 | 816.941 | AIC Scalar |
+
+### 7.2 msprof op · Default
+
+| 布局 | 后端 | 整算子 | AIC Cube | AIC Scalar | AIC MTE1 | AIC MTE2 | AIC Fixpipe | AIV Vector | AIV Scalar |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| PA_BBND | C4 | 1238.315 | 560.912 | 691.001 | 449.422 | 959.972 | 642.581 | 992.672 | 584.522 |
+| PA_BBND | C8 | 1292.269 | 1098.440 | 1176.116 | 762.183 | 1084.802 | 863.690 | 1086.414 | 814.513 |
+| PA_BNBD | C4 | 1232.333 | 560.912 | 668.166 | 430.793 | 656.312 | 641.691 | 992.597 | 585.882 |
+| PA_BNBD | C8 | 1291.401 | 1098.440 | 1172.831 | 760.219 | 1124.265 | 863.880 | 1086.409 | 810.347 |
+| PA_NZ | C4 | 1234.687 | 560.912 | 686.657 | 476.114 | 556.919 | 641.251 | 992.923 | 589.000 |
+| PA_NZ | C8 | 1293.760 | 1098.440 | 1162.991 | 763.149 | 1009.952 | 863.482 | 1086.567 | 817.232 |
+
+### 7.3 流水占比与 MTE2 活跃带宽（msprof op 同次采集）
+
+| 布局 | 后端 | AIC Cube 占比 | AIC Scalar 占比 | AIC MTE2 占比 | AIV Vector 占比 | AIC MTE2 活跃带宽（GB/s） |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| PA_BBND | C4 | 49.49% | 60.94% | 84.62% | 80.25% | **119.30** |
+| PA_BBND | C8 | 86.53% | 92.62% | 85.42% | 84.24% | 107.10 |
+| PA_BNBD | C4 | 49.50% | 58.94% | 57.90% | 80.66% | **89.36** |
+| PA_BNBD | C8 | 86.53% | 92.38% | 88.52% | 84.29% | 101.73 |
+| PA_NZ | C4 | 49.50% | 60.53% | 49.10% | 80.57% | **105.31** |
+| PA_NZ | C8 | 86.47% | 91.56% | 79.51% | 84.16% | 113.25 |
+
+### 7.4 解读
+
+1. `dual_prefill_1` 是 DN prefill，**不走合并派发**，因此三布局的 C4 整算子耗时都在 1229–1234 µs，与 Graph 结果（1228–1236 µs）一致，也与基线持平。本例采集的作用是刻画当前流水瓶颈，不是展示合并收益。
+2. C4 侧 AIV Vector 稳定在 992 µs（占比约 80%），是三布局共同的次长流水；PA_BBND 的最长流水是 AIC MTE2（1042 µs，占比 84.62%），显著高于 PA_BNBD 的 704 µs 与 PA_NZ 的 597 µs——这正是合并优化在 decode 上要解决的 GM 取回粒度问题在 prefill 上的体现。
+3. 按 100 GB/s 的 MTE2 活跃带宽目标：C4 侧 PA_BBND 119.30、PA_NZ 105.31 达标，**PA_BNBD 89.36 仍差 10.64 GB/s**。
+4. C8 侧 AIC Scalar 是最长流水（1163–1195 µs，占比 91.6–92.6%），Cube 占比 86.5%，与 C4 的 49.5% 形成鲜明对比。
+5. 本轮使用 `--metrics Default`（kernel-optimized.md 开头「优化遵守标准」指定的口径），**未采集 Roofline**，因此不给出 Roofline 分类与 Cube 性能比曲线。
+
+---
+
+## 8. 证据与复现
+
+### 8.1 归档位置
+
+本轮全部原始证据在 [evidence/ev21](evidence/ev21)：
+
+| 目录 | 内容 |
+| --- | --- |
+| `accuracy/` | 36 个日志：744 例矩阵逐集合日志、三条并行流日志、document full 9 个分片日志与复验日志、修复确认日志 |
+| `perf/` | 6 组逐例 JSON（候选 3 布局 + 基线 3 布局，各 12 例）、6 个 pytest 日志、`bench16k.csv`（36 行汇总）、`summary.json`、`val2-perf-rows.json` |
+| `prof/` | 12 组采集的 `profile_summary.json` / `invocation.json` / `worker_record.json` 与全部 CSV（msprof 的 `op_summary`，msprof op 的 8 类指标），共 270 个采集 CSV |
+| `sweep/` | gSize 扫描修复前后对照日志（各 72 组） |
+| `build/` | val2 的 configure / build / finish 日志 |
+
+容器侧原始产物在 `/home/k831/perf-opt/`：`results/val2-*`、`prof/val2-dual_prefill_1-*`、`full-*.log`、`val2-*.log`。
+
+### 8.2 复现命令
+
+精度（单布局，串行）：
+
+```bash
+source /home/k831/perf-opt/env-val2.sh
+cd /home/k831/perf-opt/candidate-src/attention/quant_flash_attn/tests/pytest
+python -m pytest qfa_mxfp4_test -q -m func_rdv --device-id 7 \
+  --package cann_ops_transformer_qfa_bbnd_copy --cache-dir <cache> \
+  --accuracy-case-set document --scope small --kv-layout PA_BBND
+```
+
+精度（并行，加 `-n <workers>`；worker 数按 3.4 节的显存约束选）。document full 把 `--scope small` 换成 `--scope full`，并用 `-k <model>_TP<n>_` 分片。
+
+性能：
+
+```bash
+bash run-perf.sh val2 <outdir> --perf-backends c4,c8 --kv-layout PA_BBND --perf-kind all
+```
+
+采集：
+
+```bash
+bash run-prof-both.sh PA_BBND val2
+```
+
+### 8.3 代码状态
+
+本轮修复涉及 3 个文件、+13/-3 行，**位于工作区，尚未提交**：
+
+| 文件 | 变更 |
+| --- | --- |
+| `attention/quant_flash_attn/op_host/arch35/quant_flash_attn_tiling_mxfp4.cpp` | +6 / -1 |
+| `attention/quant_flash_attn_metadata/op_kernel_aicpu/quant_flash_attn_metadata_aicpu.cpp` | +4 / -1 |
+| `attention/quant_flash_attn/tests/pytest/qfa_mxfp4_test/common/mxfp4_schedule.py` | +3 / -1 |
+
+分支 `pref`，HEAD = `35f85ba24`。构建前已逐文件核对容器 `candidate-src` 与本地工作区一致（311 个源文件，忽略 CRLF 差异后 md5 全等）。
+
+### 8.4 本轮未做的事
+
+- **未采集 Roofline**：按 kernel-optimized.md 开头「优化遵守标准」使用 `msprof op --aic-metrics=Default`，因此不给出 Roofline 分类与 Cube 性能比曲线。文档最近两节用的是 Roofline，口径不同，不可直接对比。
+- **document full 只跑 PA_BBND**：标准原文是「进行一次 document full 测试集」，本轮按一次执行。BNBD/NZ 的 full 未跑。
+- **未继续追求 1.4**：PA_BBND decode 停在 1.3918。此前分析确认的分档方案需要跨算子接口改动（host 侧拿不到真实 `seqused_kv` 分布），已按方案 B 搁置。
+- **未提交代码**：修复留在工作区，等待指示。
+
+### 8.5 环境故障备忘
+
+本轮共遇到 4 次环境性质的失败，全部与被测算子无关，均已重跑通过：
+
+| 现象 | 卡 | 影响 | 处置 |
+| --- | --- | --- | --- |
+| `torch.OutOfMemoryError` | 7 | Qwen3-8B PA_BBND 4 例 | 16 worker → 6 worker |
+| `aclrtMemcpy` 507899 驱动内部错误 | 0 | Qwen3-8B 页长256 PA_NZ 1 例 | NPU7 单卡 4 worker 复跑，16/16 |
+| `TsdOpen failed` / device retain error | 4 | document full 7 个分片 | 改用 NPU2 / NPU3 重跑，全部通过 |
+| `halMemAlloc failed` 507899 | 2 | document full 1 例 | NPU7 整片复验，540/540 |
+
+共享机器上其他用户的任务会改变卡的可用性：**任务开始前的探测通过不代表运行期一直可用**。NPU4 在探测时无进程，运行期被占用后即不可 retain。后续长跑建议在分片失败时自动换卡重试，而不是固定卡列表。

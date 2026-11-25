@@ -155,9 +155,14 @@ void QuantFlashAttnTilingMxfp4Impl::SplitPolicy()
     // 粒度，一半字节被丢弃。一个 task 覆盖同页两个 KV head 的同一批 token 后行连续、粒度
     // 填满，DRAM 流量减半。kvTokenBlock=128 与基线每 head 的 token 块一致，故 task 数减半、
     // V2/Pscale 总行数不变；用专用 Config 6 让 kernel 编译期区分合并语义。
+    // M 轴按 mergePartRows=mBaseSize/2 拆成两个 KV head part，head 边界落在每 gSize/2 行，
+    // 只有 gSize 为 >=4 的 2 的幂时该边界才与 Q 装载和 VF 的行分组对齐。实测 N_q=8/16/32/64
+    // (N_kv=2) 通过，N_q=2/4/6/10/12/20/24/48 与全局 CPU 参考不符，故派发处收紧。
+    const int64_t mergeGroupSize = qfaInfo_->n2Size > 0 ? qfaInfo_->n1Size / qfaInfo_->n2Size : 0;
+    const bool mergeGroupAligned = mergeGroupSize >= 4 && (mergeGroupSize & (mergeGroupSize - 1)) == 0;
     mergeKvHeads_ = decodeS1GMerge_ && qfaInfo_->pageAttentionFlag &&
                     qfaInfo_->kvLayout == QfaLayout::PA_BBND && qfaInfo_->n2Size == 2 &&
-                    qfaInfo_->qkHeadDim == DSIZE_256 && qfaInfo_->vHeadDim == DSIZE_256;
+                    qfaInfo_->qkHeadDim == DSIZE_256 && qfaInfo_->vHeadDim == DSIZE_256 && mergeGroupAligned;
     if (mergeKvHeads_) {
         sOuterFactor_ = 32;  // cvRatio=2 后 mBaseSize=64，M 轴展开全部 N_q 个 Q head
         sInnerFactor_ = 256; // score 宽度 = kvTokenBlock(128) * n2Size

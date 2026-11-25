@@ -1,0 +1,6 @@
+== qwen3_8b PA_NZ dev0
+16 passed in 293.09s (0:04:53)
+PYTEST_EXIT=0
+== qwen3_8b_page256 PA_NZ dev0
+1 failed, 15 passed in 433.35s (0:07:13)
+PYTEST_EXIT=1

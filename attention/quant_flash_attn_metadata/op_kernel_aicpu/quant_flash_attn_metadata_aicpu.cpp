@@ -316,8 +316,11 @@ bool QuantFlashAttnMetadataCpuKernel::ParamsInit()
     }
     // 与 arch35 tiling 一致的同页双 KV head 块对角合并派发条件：KV head 不再是独立任务轴，
     // kernel 侧 mBaseSize=64、s2BaseSize=256，kvTokenBlock = s2BaseSize/2 = 128。
+    // gSize 必须是 >=4 的 2 的幂，否则 head 边界与 Q 装载/VF 行分组不对齐，见 arch35 tiling 注释。
+    const int32_t mergeGroupSize = numHeadsKv_ > 0 ? numHeadsQ_ / numHeadsKv_ : 0;
+    const bool mergeGroupAligned = mergeGroupSize >= 4 && (mergeGroupSize & (mergeGroupSize - 1)) == 0;
     const bool mergeKvHeads = isMxfp4Decode && quantMode_ == 5 && layoutKv_ == "PA_BBND" &&
-                              numHeadsKv_ == 2 && headDim_ == 256 && headDimV_ == 256 &&
+                              numHeadsKv_ == 2 && headDim_ == 256 && headDimV_ == 256 && mergeGroupAligned &&
                               socVersion_.find("Ascend960") == std::string::npos;
     if (mergeKvHeads) {
         sOuterFactor = 32;  // CV_RATIO=2 后 mBaseSize_ = 64

@@ -1,0 +1,218 @@
+{
+  "case": {
+    "name": "bench16k_dual_prefill_1",
+    "case_set": "bench16k",
+    "model": "bench16k",
+    "tp": null,
+    "kind": "prefill",
+    "B": 2,
+    "Q": 4096,
+    "KV": 12056,
+    "D": 256,
+    "N_q": 16,
+    "N_kv": 2,
+    "page": 128,
+    "layout_kv": "PA_NZ",
+    "mask_mode": 3,
+    "q_scale_layout": "TND",
+    "enable_lse": false,
+    "seed": 421,
+    "quant_schema": 2,
+    "c8_p_scale": 448.0,
+    "softmax_scale": 0.0625,
+    "cu_seqlens_q": [
+      0,
+      4096,
+      8084
+    ],
+    "seqused_q": [
+      4096,
+      3988
+    ],
+    "seqused_kv": [
+      4096,
+      12056
+    ],
+    "max_seqlen_q": 4096,
+    "max_seqlen_kv": 12056,
+    "kv_cache_num_blocks": 31374,
+    "logical_kv_cache_shape": [
+      31374,
+      128,
+      512
+    ]
+  },
+  "input_sha256": "e5a8df17c46e6f5a3663274a182cbbaa0821f8c504594a9b4db7ace9dd5bb048",
+  "input_shapes": {
+    "q": [
+      8084,
+      16,
+      128
+    ],
+    "k": [
+      31374,
+      2,
+      4,
+      128,
+      32
+    ],
+    "v": [
+      31374,
+      2,
+      4,
+      128,
+      32
+    ],
+    "table": [
+      2,
+      95
+    ],
+    "cu": [
+      3
+    ],
+    "used_kv": [
+      2
+    ],
+    "used_q": [
+      2
+    ],
+    "mask": [
+      2048,
+      2048
+    ],
+    "qs": [
+      8084,
+      16,
+      4,
+      2
+    ],
+    "ks": [
+      31374,
+      2,
+      8,
+      4,
+      16,
+      2
+    ],
+    "vs": [
+      31374,
+      2,
+      16,
+      2,
+      16,
+      2
+    ]
+  },
+  "payload_dtypes": [
+    "torch.float4_e2m1fn_x2",
+    "torch.float4_e2m1fn_x2",
+    "torch.float4_e2m1fn_x2"
+  ],
+  "input_policy": "paired_performance_generator",
+  "case_fingerprint": "95a667de14dce6221d81fc6efa1f542730abccd1511951614d4fb617c7281e55",
+  "metadata_header": [
+    1,
+    1,
+    128,
+    128,
+    28,
+    56,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "finite": true,
+  "output_shape": [
+    8084,
+    16,
+    256
+  ],
+  "warmup": 20,
+  "repeat": 5,
+  "profile_invocations": 25,
+  "device": 7,
+  "profiler": "op",
+  "backend": "c4",
+  "allocated_before_bytes": 0,
+  "allocated_after_release_bytes": 0,
+  "environment": {
+    "hostname": "ascend-950pr-223-2-2",
+    "python": "3.12.16",
+    "torch": "2.10.0+cpu",
+    "torch_npu": "2.10.0.post7",
+    "package": "cann_ops_transformer_qfa_bbnd_copy",
+    "package_file": "/home/k831/perf-opt/bbnd-python/cann_ops_transformer_qfa_bbnd_copy/__init__.py",
+    "cann": "/usr/local/Ascend/cann-9.2.1",
+    "custom_opp": "/home/k831/perf-opt/val2-install/vendors/qfa_bbnd_copy_transformer:",
+    "opapi": [
+      {
+        "path": "/home/k831/perf-opt/val2-install/vendors/qfa_bbnd_copy_transformer/op_api/lib/libcust_opapi.so",
+        "sha256": "baad6e03097656c3f5547db4e1a598498169b54d14171e62ec55fbb3beaa6de1"
+      }
+    ],
+    "versions": {
+      "triton": null,
+      "triton-ascend": null,
+      "pytest": "8.4.2"
+    },
+    "test_source_sha256": {
+      "__init__.py": "28e3ea7318d65f3b5322579ab4e488de4518973d25bf750c089a957ac2dbb7b1",
+      "common/__init__.py": "defa63dc39d2f0bd162b42945ea4bd14510dd79111fee307b1610d70f08963fd",
+      "common/bench16k_contract_test.py": "120ddeda6f58c781c24dfc8306ebf1558db21e33496816aacb2bfafd5b03a1e9",
+      "common/cpu_mxfp4_golden_fp64.py": "a29e143aa118232baabeafda09f050b311305d153b115e844ef271a6efef159f",
+      "common/cpu_mxfp4_golden_kernel.py": "e8e8a3a05a1417888e918aaa0bc49f9bc45484a3b815287200271da344a44f08",
+      "common/golden_cache/bench16k_decode_1_comparison.json": "bfc87b344769714e273e01dc2ba121bf3f56ee3eec135e1f783d9e3123341a94",
+      "common/golden_cache/bench16k_decode_2_comparison.json": "50b5246c8fe87ef14c0eee0f44191278dcda46a9238ba38849a7e1160c0d5c31",
+      "common/golden_cache/bench16k_decode_3_comparison.json": "7c7854c3bb8832b1eedf44ff8db923090ae43bfaca6774ee0dddbb219f7c7267",
+      "common/golden_cache/bench16k_decode_4_comparison.json": "81f7bfa1b3a63089fe3b6c9874ef7e6e8de2f826147f9443c54bd661c569a88e",
+      "common/golden_cache/bench16k_dual_prefill_1_comparison.json": "3dd8a825c23c363cb08527d9b4f2124c78c0506a688b07a34d2152d8f45c8088",
+      "common/golden_cache/bench16k_dual_prefill_2_comparison.json": "410c730ec6a82f63d783215d35958401a94b8749e28c70226bc5124e5c880562",
+      "common/golden_cache/bench16k_dual_prefill_3_comparison.json": "70d44ffc0ba87b96f8f598a2de94f99c01c8a2e77c3c0ad6a07eac9f9963ccea",
+      "common/golden_cache/bench16k_mixed_1_comparison.json": "958cc663e0fbb637eab5987568d2216b0659eeeda257c41776d17d79654cd6b3",
+      "common/golden_cache/bench16k_mixed_2_comparison.json": "4d993f2a71e1e7733a47f118d3e012532f5f81b6c1fd8779a28b12aa6607e378",
+      "common/golden_cache/bench16k_single_prefill_1_comparison.json": "d0773ea1e2dfebed032da736da95079598fa1fa007c335a275e5a67d23322f4c",
+      "common/golden_cache/bench16k_single_prefill_2_comparison.json": "19f06186c616b7e0d623da28beae8ab608bae1f81011697dac11e38991a72f1e",
+      "common/golden_cache/bench16k_single_prefill_3_comparison.json": "55e36575c9539d02c528436a615da8f01b56f509fa6d403e298daf97baf67501",
+      "common/golden_cache/qwen36_35b_TP2_short11_N2TGD_M0_LSE1_comparison.json": "53473826bb5fbc02018e7f045162668f3b459f6c15a2d1b0e76e8aa82f4de179",
+      "common/golden_cache/qwen36_35b_TP2_short1_N2TGD_M0_LSE1_comparison.json": "84ac95746bbc044fdc841055f63d4bd27c277dc0400850e499251d23a388c1e0",
+      "common/golden_cache/qwen36_35b_TP2_short3_N2TGD_M0_LSE1_comparison.json": "d417a27b43ecc47c0e123081cf210f5c7600d62ada01433b6d7bae3c3a8c36b2",
+      "common/golden_cache/qwen36_35b_TP2_short4_N2TGD_M0_LSE1_comparison.json": "beccd7b99b4ac67e5f286f0255ccebca033b24502bc1bc02ac6f3b69472c4cca",
+      "common/golden_cache.py": "43709fae86e03f0e1f6a53a384d7f0ec52c2202aa4c66f88628e464263b75372",
+      "common/mxfp4_schedule.py": "2da9e86747745bd066d0f8fd35af6b1e035a7c3d8d43c4eaf97739f14d3cca14",
+      "common/perf_contract_test.py": "f4098cdd34539681ad25581cb463f0ac9e3fdc83fc37fbe66562dc917affe098",
+      "common/perf_convert.py": "d545de6e3afd204db0099f1fc0aac6eccb1cf466aa21623f61a211abeba00e05",
+      "common/perf_device_check.py": "d1c37da27b04aae69e02fd2b49187bd8b28dc5c831a248daefc34da011ea66b5",
+      "common/perf_inputs.py": "327cab8e8fd16bf68427d5d12d9e001c6483f0edd0da64582c52edae0d6b3e50",
+      "common/perf_profiler.py": "cc984364eaaa9c004a6c8f4316c289e21d983ccc648f97f08a307b3d92fd2f3c",
+      "common/perf_report.py": "a3f48d5bcb7d312bbc95a1871f7686415abb1dfcbadee3805c3f02bd808ef28c",
+      "common/perf_runner.py": "99c0610463d9cab7edc7b9e5d94e0208ba4992acc1995e1af881e1a2d3ed451a",
+      "common/prof_contract_test.py": "fc5377624719044d183ed47c3a96c412524c963607fb96110a89e6a2d1c1a348",
+      "common/quant_flash_attn_golden.py": "aac3f7ed6ed59c6aa795ec315deb1014843bfc943ea2242b4618846394ee6d0c",
+      "common/qwen3_8b_contract_test.py": "1f35a95231f7642312fb0fc581905e83614f91b76c1f8133fd31c6f04c270ada",
+      "common/reference_metrics.py": "dd77da0263420eb29a4f48f4f6a83d5f1342ecd94962c991a01af1df6d55e32f",
+      "common/result_compare_method.py": "ff7c2ab92007cd1be417a4b25ab1781bf67aee1974a5e1cfb59e1ffdf3d9e0e4",
+      "common/test_runner.py": "7bdb9d6d9da846c3c582ada1283f9ee67102b1a21cb7eb58bfb82b63007f4579",
+      "common/triton_mxfp4_golden_kernel.py": "a6b583f588762535be7db7c492a234c999b85168648419686f8a827a203f00c1",
+      "conftest.py": "4f03d685017cd86d025383e7e05ab1bac6aaf7d5ab9082e7c976280f2212e990",
+      "perf_cases_mxfp8.json": "919214d0cb86f1b6d3340c553fe471f238290a189b5ade33c211de18b34378ed",
+      "prof_quant_flash_attn.py": "a1bf3392606d4b635be6a912f2a669807058e4e543eb35d63db89810072a70ed",
+      "quant_flash_attn_paramset_bench16k.py": "ada7b035f7f0abfe23b3977cf04306c3854f34900d2f0c4cdc4db5b360def7bf",
+      "quant_flash_attn_paramset_common.py": "ca1aa14848d5179ab773b34b1434e5e036bedba95a3b256e70231369e2ddf3eb",
+      "quant_flash_attn_paramset_debug.py": "14dcd54704ba237f2108ca422ecc34d0f7ab2fb684742555d1cf570142d80e60",
+      "quant_flash_attn_paramset_func_rdv.py": "d0665f943892cb44f5b6bf51440149b50e628f150260b15302c0d4e451314b38",
+      "quant_flash_attn_paramset_perf_rdv.py": "c7d96cde9f74eefca471f600fc34a9bd9c8c8aebeb75be199ac924b663c5a1f2",
+      "quant_flash_attn_paramset_qwen3_8b.py": "6fe816cc8c9c296d086e0cbe0da1e91ad33c9c0cca1514206d5c34b3e090b915",
+      "test_quant_flash_attn_debug.py": "3c0d17ff37fc1667b81dac5cb4ccfcb9beb1e9900181744ab5611d62f3fd0653",
+      "test_quant_flash_attn_func_rdv.py": "a64ffe8a4f8af4b4afaa8209e76de3d9aaa8043dbc5dd4758544da1fcb058f9e",
+      "test_quant_flash_attn_perf_rdv.py": "41faab0da811d764b0049dde0a7043517e70509a68627f439700fda69f8d82d5"
+    }
+  },
+  "status": "passed"
+}

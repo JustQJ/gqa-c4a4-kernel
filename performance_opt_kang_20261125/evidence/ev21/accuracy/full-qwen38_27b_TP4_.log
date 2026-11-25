@@ -1,0 +1,84 @@
+bringing up nodes...
+bringing up nodes...
+
+........F............................................................... [ 13%]
+........................................................................ [ 26%]
+........................................................................ [ 40%]
+........................................................................ [ 53%]
+........................................................................ [ 66%]
+........................................................................ [ 80%]
+........................................................................ [ 93%]
+....................................                                     [100%]
+=================================== FAILURES ===================================
+___ test_quant_flash_attn_mxfp4[qwen38_27b_TP4_mtp1_kv32768_b8_TND_M0_LSE1] ____
+[gw9] linux -- Python 3.12.16 /home/k831/venv/bin/python
+
+    def schedule():
+        nonlocal metadata
+        if metadata is None:
+            try:
+                if 'gen' in mode:
+>                   raise FileNotFoundError('Fresh input generation requires fresh metadata')
+E                   FileNotFoundError: Fresh input generation requires fresh metadata
+
+qfa_mxfp4_test/common/test_runner.py:87: FileNotFoundError
+
+During handling of the above exception, another exception occurred:
+
+params = {'B': 8, 'D': 256, 'N_kv': 1, 'N_q': 6, ...}
+golden_mode = {'compare', 'cpu', 'gen', 'npu'}
+cache_dir = '/home/k831/perf-opt/cache-full-qwen38_27b_TP4_'
+execution_options = {'device_id': 2, 'fp64_reference': False, 'package': 'cann_ops_transformer_qfa_bbnd_copy', 'reference_threads': 1, ...}
+
+    @pytest.mark.func_rdv
+    @pytest.mark.ci
+    def test_quant_flash_attn_mxfp4(params, golden_mode, cache_dir, execution_options):
+        from .common import test_runner
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            result, lse = executor.submit(test_runner.execute_test, params, golden_mode, cache_dir,
+>                                         **execution_options).result()
+                                                               ^^^^^^^^
+
+qfa_mxfp4_test/test_quant_flash_attn_func_rdv.py:25: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/local/python3.12.16/lib/python3.12/concurrent/futures/_base.py:456: in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+/usr/local/python3.12.16/lib/python3.12/concurrent/futures/_base.py:401: in __get_result
+    raise self._exception
+/usr/local/python3.12.16/lib/python3.12/concurrent/futures/thread.py:59: in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+qfa_mxfp4_test/common/test_runner.py:101: in execute_test
+    reference = cpu_mxfp4_golden_kernel(data, reference_params, schedule())
+                                                                ^^^^^^^^^^
+qfa_mxfp4_test/common/test_runner.py:94: in schedule
+    metadata = fetch_metadata(data, reference_params, package, device_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+qfa_mxfp4_test/common/mxfp4_schedule.py:15: in fetch_metadata
+    torch.npu.set_device(device_id)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+device = 2
+
+    def set_device(device):
+        device_id = _get_device_index(device, optional=True)
+        if device_id >= 0:
+>           torch_npu._C._npu_setDevice(device_id)
+E           RuntimeError: ExchangeDevice:../torch_npu/csrc/core/npu/sys_ctrl/npu_sys_ctrl.cpp:318 NPU function error: c10_npu::SetDevice(device), error code is 507033
+E           [ERROR] 2026-11-25-07:43:16 (PID:310621, Device:0, RankID:-1) ERR00100 PTA call acl api failed
+E           [Error]: Failed to start the device. 
+E                   Rectify the fault based on the error information in the ascend log.
+E           [PID: 310621] 2026-11-25-07:43:16.000.233 Invalid_Argument_API_Call_Sequence(EE1018): Context validation failed. Reason: No valid context is bound to the current thread. Call aclrtSetDevice or aclrtSetCurrentContext to bind a valid context to the current thread before calling this API.
+E           TraceBack (most recent call last):
+E                   Call driver api halMemAlloc failed, drvRetCode=7, size=16392(bytes), type=4, moduleId=7, drvFlag=0x700000000900402, drvDevId=2, ErrCode=507899, desc=[driver error:internal error], InnerCode=0x7020010.[FUNC:DevMemAllocManaged][FILE:npu_driver_standard_soc.cc][LINE:1091]
+E                   Check param failed, dev can not be NULL![FUNC:DeviceRetain][FILE:runtime.cc][LINE:3218]
+E                   rtSetDevice execution failed, reason=device retain error[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:76]
+E                   Context validation failed. Reason: No valid context is bound to the current thread. Call aclrtSetDevice or aclrtSetCurrentContext to bind a valid context to the current thread before calling this API.
+E                   The argument is invalid. Reason: rtGetDevMsg execution failed, the context is a null pointer.
+
+/home/k831/work/npu/torch_npu/npu/utils.py:94: RuntimeError
+=========================== short test summary info ============================
+FAILED qfa_mxfp4_test/test_quant_flash_attn_func_rdv.py::test_quant_flash_attn_mxfp4[qwen38_27b_TP4_mtp1_kv32768_b8_TND_M0_LSE1]
+1 failed, 539 passed in 617.23s (0:10:17)
+PYTEST_EXIT=1

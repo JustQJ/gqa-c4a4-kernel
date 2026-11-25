@@ -1,0 +1,380 @@
+{
+  "metrics": "application",
+  "collection_status": "validated",
+  "measurement_scope": "eager_single_case_diagnostic",
+  "target_task_count": 25,
+  "measured_calls": 5,
+  "median_us": 1287.435,
+  "samples_us": [
+    1287.537,
+    1284.906,
+    1287.435,
+    1286.092,
+    1287.71
+  ],
+  "warmup_calls": 20,
+  "csv_sha256": {
+    "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv": "7061d3713355e1ff0a5c9f5752078af5375888a60d3c185d6e760d024eb6fcc6"
+  },
+  "profile_task_rows": [
+    {
+      "duration_us": 1298.669,
+      "start_time_us": 1795588878242486.0,
+      "task_id": "11",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1297.8",
+      "cube_utilization": "98.193",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1287.522,
+      "start_time_us": 1795588878243784.5,
+      "task_id": "12",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1287.13",
+      "cube_utilization": "98.349",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1287.135,
+      "start_time_us": 1795588878245072.2,
+      "task_id": "13",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1286.81",
+      "cube_utilization": "98.303",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1286.441,
+      "start_time_us": 1795588878246359.2,
+      "task_id": "14",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1286.11",
+      "cube_utilization": "98.387",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1286.05,
+      "start_time_us": 1795588878247645.8,
+      "task_id": "15",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1285.68",
+      "cube_utilization": "98.440",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1286.231,
+      "start_time_us": 1795588878248931.8,
+      "task_id": "16",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1285.87",
+      "cube_utilization": "98.404",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1288.579,
+      "start_time_us": 1795588878250218.0,
+      "task_id": "17",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1288.25",
+      "cube_utilization": "98.270",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1285.615,
+      "start_time_us": 1795588878251506.8,
+      "task_id": "18",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1285.29",
+      "cube_utilization": "98.368",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1287.169,
+      "start_time_us": 1795588878252792.2,
+      "task_id": "19",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1286.8",
+      "cube_utilization": "98.372",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1286.55,
+      "start_time_us": 1795588878254079.5,
+      "task_id": "20",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1286.18",
+      "cube_utilization": "98.352",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1286.508,
+      "start_time_us": 1795588878255366.0,
+      "task_id": "21",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1286.17",
+      "cube_utilization": "98.444",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1285.832,
+      "start_time_us": 1795588878256652.8,
+      "task_id": "22",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1285.5",
+      "cube_utilization": "98.427",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1286.487,
+      "start_time_us": 1795588878257938.5,
+      "task_id": "23",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1286.13",
+      "cube_utilization": "98.386",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1286.326,
+      "start_time_us": 1795588878259225.0,
+      "task_id": "24",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1285.97",
+      "cube_utilization": "98.421",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1286.107,
+      "start_time_us": 1795588878260511.2,
+      "task_id": "25",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1285.77",
+      "cube_utilization": "98.412",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1286.751,
+      "start_time_us": 1795588878261797.5,
+      "task_id": "26",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1286.42",
+      "cube_utilization": "98.345",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1287.51,
+      "start_time_us": 1795588878263084.2,
+      "task_id": "27",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1287.01",
+      "cube_utilization": "98.281",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1286.23,
+      "start_time_us": 1795588878264371.8,
+      "task_id": "28",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1285.85",
+      "cube_utilization": "98.398",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1287.202,
+      "start_time_us": 1795588878265658.0,
+      "task_id": "29",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1286.88",
+      "cube_utilization": "98.347",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1286.621,
+      "start_time_us": 1795588878266945.2,
+      "task_id": "30",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1286.3",
+      "cube_utilization": "98.360",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1287.537,
+      "start_time_us": 1795588878268583.0,
+      "task_id": "31",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1287.17",
+      "cube_utilization": "98.341",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1284.906,
+      "start_time_us": 1795588878269870.5,
+      "task_id": "32",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1284.55",
+      "cube_utilization": "98.384",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1287.435,
+      "start_time_us": 1795588878271155.5,
+      "task_id": "33",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1287.12",
+      "cube_utilization": "98.362",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1286.092,
+      "start_time_us": 1795588878272443.0,
+      "task_id": "34",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1285.77",
+      "cube_utilization": "98.363",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    },
+    {
+      "duration_us": 1287.71,
+      "start_time_us": 1795588878273729.0,
+      "task_id": "35",
+      "stream_id": "61",
+      "op_name": "QuantFlashAttn",
+      "aicore_time_us": "1287.34",
+      "cube_utilization": "98.335",
+      "source_csv": "/home/k831/perf-opt/prof/val2-dual_prefill_1-PA_BBND/bench16k_dual_prefill_1/c8/msprof/PROF_000001_20261125064034905_00271744QJRKDREC/mindstudio_profiler_output/op_summary_20261125064122.csv"
+    }
+  ],
+  "data_loss_warnings": [],
+  "profiler": "msprof",
+  "backend": "c8",
+  "quant_mode": 1,
+  "p_scale": 448.0,
+  "mstx_range": "C8A8_PROFILE",
+  "case": {
+    "name": "bench16k_dual_prefill_1",
+    "case_set": "bench16k",
+    "model": "bench16k",
+    "tp": null,
+    "kind": "prefill",
+    "B": 2,
+    "Q": 4096,
+    "KV": 12056,
+    "D": 256,
+    "N_q": 16,
+    "N_kv": 2,
+    "page": 128,
+    "layout_kv": "PA_BBND",
+    "mask_mode": 3,
+    "q_scale_layout": "TND",
+    "enable_lse": false,
+    "seed": 421,
+    "quant_schema": 2,
+    "c8_p_scale": 448.0,
+    "softmax_scale": 0.0625,
+    "cu_seqlens_q": [
+      0,
+      4096,
+      8084
+    ],
+    "seqused_q": [
+      4096,
+      3988
+    ],
+    "seqused_kv": [
+      4096,
+      12056
+    ],
+    "max_seqlen_q": 4096,
+    "max_seqlen_kv": 12056,
+    "kv_cache_num_blocks": 31374,
+    "logical_kv_cache_shape": [
+      31374,
+      128,
+      512
+    ]
+  },
+  "case_fingerprint": "3e755550821c97a66503b6b171701e6116466fc5a6ad2b9c38aa5bd1625dc196",
+  "input_sha256": "e5a8df17c46e6f5a3663274a182cbbaa0821f8c504594a9b4db7ace9dd5bb048",
+  "input_shapes": {
+    "q": [
+      8084,
+      16,
+      256
+    ],
+    "k": [
+      31374,
+      128,
+      2,
+      256
+    ],
+    "v": [
+      31374,
+      128,
+      2,
+      256
+    ],
+    "table": [
+      2,
+      95
+    ],
+    "cu": [
+      3
+    ],
+    "used_kv": [
+      2
+    ],
+    "used_q": [
+      2
+    ],
+    "mask": [
+      2048,
+      2048
+    ],
+    "qs": [
+      8084,
+      16,
+      4,
+      2
+    ],
+    "ks": [
+      31374,
+      128,
+      2,
+      4,
+      2
+    ],
+    "vs": [
+      31374,
+      2,
+      2,
+      256,
+      2
+    ]
+  },
+  "input_policy": "paired_performance_generator",
+  "allocated_after_release_bytes": 0
+}
