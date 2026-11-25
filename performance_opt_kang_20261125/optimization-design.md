@@ -394,7 +394,7 @@ A5.1 轮次 PA_BBND decode 几何均值 1.3918，差 0.008。A9 落地后同口�
 - [ ] page 大小 128/256/512 均可；合并的 token 块固定 128，与 page 解耦；
 - [ ] 不要期望 prefill 或 PA_BNBD/PA_NZ 有收益。
 
-### A7.2 修改代码时的九条红线
+### A7.2 修改代码时的十条红线
 
 1. **host tiling / AICPU metadata / golden 三处派发条件必须逐字一致**，否则立即死锁或算错。
 2. **编译期开关必须同时传给 Cube/Vector 及其 Dummy**，AIV 取的是 Dummy。
@@ -405,6 +405,7 @@ A5.1 轮次 PA_BBND decode 几何均值 1.3918，差 0.008。A9 落地后同口�
 7. **host tiling 不得解引用 `GetData()`**，只能做 null 判断。
 8. **golden 不得写死组大小/派发条件**，必须读实际 schedule。
 9. **VF 行循环内不得出现随迭代变化的标量浮点值**，尤其是标量 `int→float` 转换。编译器直接报 `fatal error: error in backend: ... Unsupported scalar instruction in AIV loop.`。要把行号喂给向量比较，只能 `Duplicate` 成向量再 `Cast`，或者反过来把阈值在块级转成 int32 后用整数比较。详见 B13。
+10. **单个 VF 内同时活跃的 `RegTensor` 不得超过 32 个**。AIV 向量寄存器文件实测就是 **32 个 256B 寄存器**（devkit 未暴露该常量）。`RegTensor<float>` / `<bfloat16_t>` / `<float4_e2m1x2_t>` 在默认 `RegTraitNumOne` 下**各占 1 个**物理寄存器（lane 数分别为 64/128/256）。超限时编译器静默 spill 到栈，性能退化是数倍级。改动 VF 寄存器用量后**必须**用 `bisheng --cce-res-usage` 核对 `VReg number` 与 `Stack size`，`Stack size` 必须为 0。做法见 B14。
 
 ### A7.3 验证要求
 
@@ -426,6 +427,7 @@ A5.1 轮次 PA_BBND decode 几何均值 1.3918，差 0.008。A9 落地后同口�
 - 长 prefill 用例五轮极差常超 5%，解读单例时先看 `spread_pct`；decode 四例极差都在 4% 以内；
 - **并行跑精度时按测试集最大单例显存选 worker 数**：Qwen3-8B 单例 9.13 GB，16 worker 会 OOM，必须降到 6；document/bench16k 可用 16；
 - **共享机器上卡的可用性会变**：任务开始前探测通过不代表运行期一直可用。本轮 NPU4 中途被其他用户占用后不可 retain，导致 7 个分片失败。长跑建议分片失败时自动换卡重试。
+- **精度缓存会吃满磁盘，且失败形态伪装成算子缺陷**：`--cache-dir` 保存参考张量，一个布局的 744 例矩阵可涨到 **320 GB**，三布局并行就是近 1 TB。本轮磁盘被写到 100%（剩 177 MB）后，BNBD/NZ 出现大量失败，报错是 `RuntimeError: basic_ios::clear: iostream error` 与 `[enforce fail at inline_container.cc:668] unexpected pos ...`——**这是 torch 存档被截断，不是精度不符，也不是设备错误**。对策：每个测试集跑完立即 `rm -rf` 该缓存目录（跨集本来就不复用），并在每集开始前检查可用空间。清理后同参数重跑即全绿。
 
 ---
 
@@ -1135,8 +1137,191 @@ BBND 逐例：decode_1 +0.83%、decode_3 +1.41%、decode_4 +1.85%；只有 mixed
 3. 真正受益的只有 mixed 里的 ND prefill 分块，量级 0.2~1.4%，在噪声带内。
 4. 该改动已**回退**，未进入提交。
 
-### B13.5 下一步候选（未实施）
+### B13.5 下一步候选（**已在 B14 实施，但前提被部分证伪**）
 
-DN `SoftmaxDnResidentEightVf` 每 32 个 KV 行的指令构成约为：56 次 `LoadAlign` + 28 次 `Max` + 112 次打包/指数运算 + 7 次标量组指数运算。其中 **24 次 load 是纯重复**——max _pass 读过一遍，block 0~2 又读一遍（只有 block 3 靠寄存器驻留省掉）。把驻留行数从 8 提到 16 可再省 8 次 load（约 4% VF 指令）。
+DN `SoftmaxDnResidentEightVf` 每 32 个 KV 行的指令构成约为：56 次 `LoadAlign` + 28 次 `Max` + 112 次打包/指数运算 + 7 次标量组指数运算。其中 **24 次 load 是纯重复**——max pass 读过一遍，block 0~2 又读一遍（只有 block 3 靠寄存器驻留省掉）。把驻留行数从 8 提到 16 可再省 8 次 load（约 4% VF 指令）。
 
 预期只对 PA_BNBD / PA_NZ 有效（它们的 C4 最长流水是 AIV Vector 992 µs），PA_BBND 的最长流水是 AIC MTE2 1042 µs，不会受益。风险是寄存器溢出——按 B11.2 的经验，VF 内的资源压力一旦越界，退化是数倍级而不是百分比级。
+
+> **修正**：上面这段把 `SoftmaxDnResidentEightVf` 当成了 D256 DN prefill 的执行路径，**这是错的**。该函数被 `TaskN == 256` 门槛挡住，D256（TaskN=128）从未实例化它。详见 B14.1。
+
+---
+
+## B14. 寄存器资源探针与 DN 驻留快路径（2026-11-25）
+
+### B14.1 先证伪：目标函数对 D256 是死代码
+
+B13.5 计划把 `SoftmaxDnResidentEightVf` 的驻留行数 8→16。动手前先建了资源探针（B14.2），结果里**根本没有这个函数**：
+
+```
+=== any Resident in baseline res output? === 0
+=== distinct Softmax VF instantiations ===
+SoftmaxQuantizeDnChunkFp32VfILj128ELj128E
+```
+
+两条硬证据：
+
+1. 派发门槛是 `if constexpr (!HasMask && TaskN == 256)`，而 `TaskN = s2BaseSize`。`quant_flash_attn_block_vec_mxfp4.h` 的 static_assert 限定 MXFP4 的 M128 只有两种形状：`D128+N256` 或 `D256+N128`。**所以驻留路径只在 D=128 存在**，D256 一律走通用函数。
+2. `quant_flash_attn_paramset_bench16k.py` 里 12 个性能用例**全部 `D=256`**。
+
+结论：直接改驻留函数既碰不到 992 µs 的 `dual_prefill_1`，也无法在任何性能用例上被测出来。**与 B13 同一类错误（改错路径），但这次在编译前就查出来了。**
+
+### B14.2 资源探针：2 分钟一轮，直接读寄存器账
+
+devkit 不暴露 AIV 物理寄存器个数，但编译器有现成的诊断开关：
+
+```
+bisheng --cce-res-usage   # Print resource usage
+```
+
+它对每个 VF 打印一行：
+
+```
+[BISHENG] SIMD VF Function properties for <mangled>.vector.thread:
+  Total stack argument size: N bytes, Stack size: N bytes,
+  VReg number: N, MaskReg(PReg) number: N
+```
+
+- **`Stack size` > 0 就是 spill**，这是判定溢出的直接依据；
+- `VReg number` 是该 VF 占用的物理向量寄存器数。
+
+搭建方式（关键是**只编一个 tiling key**，否则一轮十几分钟）：
+
+```bash
+asc_opc <src>/QuantFlashAttn.py --main_func=quant_flash_attn \
+  --input_param=<gen>/QuantFlashAttn_<hash>_param.json --soc_version=Ascend950PR_9599 \
+  --output=<out> --impl_mode=high_performance,optional --simplified_key_mode=0 \
+  --op_mode=dynamic --op_debug_config=dump_cce --tiling_key=25953538,93062402
+```
+
+- `--tiling_key` 把编译量从整个 part 降到 1~2 个 key，**一轮约 2 分钟**；
+- `--op_debug_config=dump_cce` 保留 `kernel_meta/`，里面有 `*_tmp_aiv_*.mk`；
+- 取该 mk 第 5 行（真正的 `bisheng -c` 命令），**去掉换行后追加 ` --cce-res-usage`** 重跑即可。
+
+两个坑：
+
+1. `kernel_meta_<hash>/` 建在**当前工作目录**而非 `--output` 目录。上一次编译被 kill 后会残留 `kernel_meta.lock`，下次直接报 `RuntimeError: Another process is using this dir`。每轮用独立 cwd，并清掉残留锁。
+2. tiling key 的位域：`InOutLayoutType`(bit0-7) | `Config`(bit8-17) | `QuantMode`(bit18-22) | `HasAttenMask`(bit23) | `KvLayoutType`(bit24-25) | `IsFd`(bit26) | `HasVTail`(bit27)。D256 DN prefill = `TND(2) | Config5<<8 | QuantMode3<<18 | HasMask<<23 | KvLayout<<24`，BBND 下 IsFd=0/1 分别是 **25953538 / 93062402**。
+
+### B14.3 实测：向量寄存器文件就是 32 个
+
+`RegTensor<T>` 在默认 `RegTraitNumOne` 下占 1 个 256B 寄存器（`VECTOR_REG_WIDTH = 256`，见 `kernel_utils_constants.h` dav_3510 分支），lane 数 = 256/sizeof(T)：float 64、bfloat16_t 128、float4_e2m1x2_t 256。所以「驻留 N 行」就是「N 个物理寄存器」。
+
+三档实测（同一 tiling key，D256 DN prefill）：
+
+| 方案 | load / 32 行 | VReg number | PReg | **Stack size** | 判定 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 通用路径（每行读两遍） | 64 | 14 | 4 / 7 | 0 | 基线 |
+| 放开门槛 + 驻留 8 | 56 | 15 | 3 | 0 | 安全 |
+| **放开门槛 + 驻留 16** | **48** | **23** | **3** | **0** | **采纳** |
+| 放开门槛 + 驻留 32 | 32 | 32（顶格） | 3 | **2304 B** | **溢出，否决** |
+
+驻留 32 的理论峰值是 `src0..31(32) + maximum0..3(4) + curr/global(2) = 38`，超出 6 个；编译器把 `VReg number` 顶到 32 并 spill 出 **2304 B = 9 × 256B** 的栈槽。
+
+**由此反推出 devkit 未暴露的常量：AIV 向量寄存器文件 = 32 个。** 已写入 A7.2 红线 10。
+
+### B14.4 顺带发现的多余门槛（**已随方案一并还原**）
+
+驻留快路径的输出偏移都是 chunk 局部的（`packedPUb + row*32`、`groupMaxUb + group*64`），调用方传的 `chunkProbability/chunkExponent` 也已按 `s2Offset` 偏移好，**与 `TaskN` 无关**。原门槛里的 `TaskN == 256` 没有语义依据，却把所有 D256 用例挡在「每行读两遍」的通用路径外。
+
+改为 `if constexpr (!HasMask)` 后，D256 第一次享受到驻留优化。等价性核对：
+
+- 满 chunk（`validN == ChunkN`）时 `alignedKv32 == alignedKv64 == ChunkN`，通用路径尾部的 `GROUP_COUNT..GROUP_COUNT_ALIGN_64` 补写循环为空，无遗漏；
+- 无 mask 且列列都是真实 KV token，故每组必有有效值，`group_hasvalid` 恒全真——这正是驻留函数用 `preg_135` 而非 `group_hasvalid` 的前提；
+- `Max<MERGING>` 与plain `Max` 在掩码全真时等价；
+- `globalMaxUb` 由「每组存一次」改为「末尾存一次」，终值相同。
+
+### B14.5 驻留 16 的实现要点
+
+每 32 行一组，拆成两个 16 行半段：
+
+- **前 16 行只求 max**：这些值随后要重读，故**就地归约**（`Max(src0,src0,src1)` 树），不占任何临时寄存器；
+- **后 16 行既求 max 又驻留**：归约必须走 `maximum0..3` 四个临时寄存器，不能破坏 `src`；
+- 打包仍按 **8 行一批**，bf16/fp4 寄存器数不变，所以打包段峰值不超过 max pass；
+- 前 16 行用 `for (block < 2)` 重读并打包——**唯一的一次重复读**。
+
+`Max` 指令总数不变（32/组），load 从 56 降到 48。峰值 `16 + 4 + 2 = 22`，实测 23。
+
+同时删掉了该函数里声明但从未使用的 `group_hasvalid` 掩码，省一个 PReg。
+
+### B14.6 精度全绿，但性能大幅回退——方案已否决
+
+精度：744 例三布局**全通过**（BBND 248 / BNBD 248 / NZ 248）。
+
+性能：同轮同卡 NPU7、Graph、`d4c`（基线）与 `d5a`（候选）交替采集。
+
+**PA_BBND**
+
+| 用例 | d4c C4 | d5a C4 | 变化 |
+| --- | ---: | ---: | ---: |
+| decode_1 | 183.696 | 183.229 | -0.25% |
+| decode_2 | 453.382 | 454.896 | +0.33% |
+| decode_3 | 26.174 | 26.739 | +2.16% |
+| decode_4 | 51.205 | 51.402 | +0.38% |
+| single_prefill_1 | 250.763 | 296.566 | **+18.3%** |
+| single_prefill_2 | 949.623 | 1199.157 | **+26.3%** |
+| single_prefill_3 | 1322.594 | 1650.310 | **+24.8%** |
+| dual_prefill_1 | 1233.460 | 1509.855 | **+22.4%** |
+| dual_prefill_2 | 1271.237 | 1595.229 | **+25.5%** |
+| dual_prefill_3 | 2343.854 | 2756.866 | **+17.6%** |
+| mixed_1 | 1334.518 | 1518.490 | +13.8% |
+| mixed_2 | 3807.185 | 4201.651 | +10.4% |
+
+12 例 C4 耗时几何比 **0.8849（慢 13.01%）**。
+
+**PA_BNBD**（独立确认）
+
+| 用例 | d4c C4 | d5a C4 | 变化 |
+| --- | ---: | ---: | ---: |
+| decode_1..4 | 190.412 / 481.052 / 34.143 / 48.511 | 189.538 / 479.479 / 33.997 / 47.792 | -0.5% ~ +0.4% |
+| single_prefill_1 | 247.293 | 296.601 | **+19.9%** |
+| single_prefill_2 | 949.605 | 1197.873 | **+26.1%** |
+| single_prefill_3 | 1296.804 | 1649.858 | **+27.2%** |
+| dual_prefill_1 | 1228.362 | 1507.386 | **+22.7%** |
+| dual_prefill_2 | 1267.390 | 1595.436 | **+25.9%** |
+| dual_prefill_3 | 2257.977 | 2641.830 | **+17.0%** |
+| mixed_1 | 1159.894 | 1497.101 | **+29.1%** |
+
+C4 耗时几何比 **0.8745（慢 14.35%）**。PA_NZ 未采集（两布局已互证，停止以节省机时）。
+
+**这不是噪声，有内置对照**：decode 四例走 ND 路径、本次完全未改，两个布局上都逐位持平（±0.5%）。若卡上有系统性膨胀，decode 会一起变慢。只有被改动的 DN prefill 路径全线劣化，且两布局幅度一致。
+
+### B14.7 机理与教训
+
+**load 少了 25%，时间多了 22%。原因是丢掉了组间软件流水。**
+
+通用路径的结构是：
+
+```
+for i in 0..GROUP_COUNT-2:
+    for j in 0..3:
+        load 8 行（组 i+1）→ 求 max      ← 两条互相独立的指令流
+        load 8 行（组 i）  → exp → 打包    ← 交错发射，互相掩盖延迟
+    组 i+1 的指数链在此计算，被组 i 的打包掩盖
+```
+
+驻留路径的结构是：
+
+```
+for g in 0..GROUP_COUNT-1:
+    load 32 行 → 归约树(4 层) → 指数链(~7 op) → 打包
+    ↑ 严格串行，每组暴露约 11 个相关操作
+```
+
+组间不再有重叠，归约树与指数链的延迟全部裸露。这说明 **DN prefill 的瓶颈是指令级并行与延迟掩盖，不是 load 条数**。
+
+三条教训：
+
+1. **「少读一遍」不等于「更快」。** B13 是「少 8 条向量指令没用」，B14 是「少 25% 的 load 反而更慢」。两次都指向同一件事：先确认瓶颈是吞吐还是延迟，再决定优化方向。
+2. **寄存器不溢出只是必要条件，不是充分条件。** 驻留 16 的 `Stack size = 0`、VReg 23 < 32，资源上完全干净，性能照样回退 13~14%。资源探针能挡住 spill，挡不住结构性退化。
+3. **归因存在混淆，未完全分离。** D256 此前从未走驻留路径，所以本次 delta 同时包含「通用→驻留（丢流水）」与「驻留 8→16」两个因素。上面的机理解释指向前者，但**没有单独测量「放开门槛 + 驻留 8」**来分离二者。若要判断「驻留思路本身是否可行」，需要补这一轮对照。
+
+**该改动已全部回退**（`vf_softmax_fp32_mxfp4.h` 恢复到 `bfc88b514` 状态），未进入提交。门槛 `TaskN == 256` 也一并还原——虽然它确实缺少语义依据，但在没有收益的前提下不单独改动派发。
+
+### B14.8 仍然成立的产出
+
+即使方案被否，本轮留下三项可复用的结论：
+
+1. **AIV 向量寄存器文件 = 32 个 256B 寄存器**（实测，devkit 未暴露）。已列为 A7.2 红线 10。
+2. **2 分钟一轮的寄存器探针方法**（`--tiling_key` + `dump_cce` + `--cce-res-usage`），见 B14.2。以后任何改 VF 寄存器用量的改动都应先过这一关。
+3. **DN prefill 是延迟/ILP 受限，不是 load 受限。** 后续若想减少重复读，必须**保留组间交叠**——例如在通用路径里把下一组的最后 8 行留在寄存器中供下一轮打包复用（需展开 j 循环以避免向量体内分支），而不是改成逐组串行。该方向未实施。
