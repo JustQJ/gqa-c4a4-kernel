@@ -2,7 +2,7 @@
 
 本文档分两部分：
 
-- **第一部分（A1–A8）是当前生效实现的完整开发说明**：设计思想、优化路径、具体改动、优势、限制、使用注意。以代码现状与 2026-11-25 的完整验证为依据。
+- **第一部分（A1–A9）是当前生效实现的完整开发说明**：设计思想、优化路径、具体改动、优势、限制、使用注意。以代码现状与 2026-11-25 的完整验证为依据。A1–A8 是块对角合并本体，**A9 是在其之上追加的运行时流水节奏下发**。
 - **第二部分（附录 B，原第 1–12 章）保留设计推演与历史实验记录**。其中若干结论已被后续实测推翻（尤其是 B3「Config 6 不派发」、B7「合并方案净退化」、B7.9「Q scale 半 fractal 写入」），**阅读时一律以第一部分为准**。保留它们是为了让后来者不重复已经证伪的路径。
 
 配套文档：[验证报告](validation-report-20261125.md) · [测试报告](test-report.md) · [官方优化记录](../attention/quant_flash_attn/docs/kernel-optimized.md)
@@ -18,7 +18,7 @@
 | 核心场景 | **PA_BBND 布局下的 ND decode**（`layout_q_descale=N2TGD`、`N_kv=2`、`D=Dv=256`） |
 | 度量 | 同用例、同输入、同设备、同 Graph 计时口径下的 C8/C4 耗时比 |
 | 目标 | 1.4～2.0 |
-| 当前达成 | PA_BBND decode 几何均值 **1.3918**（基线 1.0875），整体 C4 耗时 **-8.02%** |
+| 当前达成 | PA_BBND decode 几何均值 **1.4603**（基线 1.0875；合并本体 1.3918 + A9 节奏下发），整体 C4 耗时约 **-9.2%**（两段同轮测量相乘：1.0871 × 1.0134） |
 
 **一句话结论**：PA_BBND 的 decode 瓶颈不是 DRAM 带宽不足，而是**单 head 行宽 128 B 填不满硬件 256 B 的取回粒度**，一半取回的字节被丢弃。把同一 page 的两个 KV head 合进一个 task，让每次 256 B 取回全部有用，DRAM 流量减半，长 KV decode 提速 35%～43%。
 
@@ -306,6 +306,8 @@ static_assert(GROUP_N + DELAY_P_SCALE_N <= PRELOAD_N,
 
 PA_BBND 整体 C4 耗时相对同轮基线 **-8.02%**。
 
+> 本表是**合并本体**（提交 `6b9da048a`）的成绩。A9 的运行时节奏下发在此基础上把 decode_3 再降 11.45%、decode_4 再降 5.35%，decode 几何均值达到 **1.4603**，见 A9.4。
+
 ### A5.2 机理层面的优势
 
 | 项 | 基线 | 合并 |
@@ -347,24 +349,26 @@ M64 tile 按 `mergePartRows = 32` 拆成两个 KV head part，head 边界落在�
 
 **这是一个曾经存在的真实缺陷**：`f1d13043b` 的派发条件不约束 gSize，`6b9da048a` 才收紧。注意 `%4` 判据也是错的（会误放行 gSize=12）。
 
-### A6.3 decode_4 回退约 17%
+### A6.3 decode_4 回退约 17%（**已由 A9 修复**）
 
 单核约 24 个 task，刚越过 `PRELOAD_N=20`，C1/C2 爬坡开销开始显现；同时 `kvHeadNum 2→1` 让负载均衡粒度变粗。PA_BNBD/NZ 上也有 5.6%/6.6% 的小幅回退，来自共享改动（`GROUP_N` 20→16、VF 进位改写）。
 
-### A6.4 未达 1.4 目标
+A9 的运行时节奏下发把该档改为 `groupN=8 / preloadN=11`，decode_4 相对 A5.1 候选再降 **5.35%**（54.138 → 51.243 µs），C8/C4 从 0.8931 回到 0.9606。相对最初基线仍为 +10.5%，尚未完全抹平。
 
-PA_BBND decode 几何均值 1.3918，差 0.008。分档回退可以补上（离线验证二维判据可达 1.4460），但**需要跨算子接口改动**，见 A6.5。
+### A6.4 未达 1.4 目标（**已由 A9 达成**）
 
-### A6.5 分档回退受阻于接口
+A5.1 轮次 PA_BBND decode 几何均值 1.3918，差 0.008。A9 落地后同口径复测为 **1.4603**，越过目标。
 
-分档判据依赖真实 `seqused_kv` 分布，四条通道全堵：
+### A6.5 分档回退受阻于接口（**已由 A9 绕开**）
+
+分档判据依赖真实 `seqused_kv` 分布，四条通道曾全堵：
 
 1. host tiling **不得解引用 `GetData()`**（返回设备地址，解引用会段错误 `PYTEST_EXIT=139`）；
 2. kernel 运行时切换需实例化两套，UB/L1 翻倍；
 3. AICPU metadata 能读真实数据，但决策写在设备内存，host 读不到；
 4. metadata 的 shape 由调用方预分配，不能当传信通道；`block_table` 列数与 `maxKV` 同样被长尾污染。
 
-详见附录 B12。
+详见附录 B12。**A9 找到的第五条路**：metadata header 有 9 个空闲 uint32 槽（索引 6..14），AICPU 把决策写进 header，kernel 在 `Init` 时读回来。缓冲区仍按编译期上界静态分配，运行时只取更小值，因此不需要第二套实例、不改 tiling key、不动跨算子接口。
 
 ### A6.6 Config 7（M32/N128）死锁未修
 
@@ -390,7 +394,7 @@ PA_BBND decode 几何均值 1.3918，差 0.008。分档回退可以补上（离�
 - [ ] page 大小 128/256/512 均可；合并的 token 块固定 128，与 page 解耦；
 - [ ] 不要期望 prefill 或 PA_BNBD/PA_NZ 有收益。
 
-### A7.2 修改代码时的八条红线
+### A7.2 修改代码时的九条红线
 
 1. **host tiling / AICPU metadata / golden 三处派发条件必须逐字一致**，否则立即死锁或算错。
 2. **编译期开关必须同时传给 Cube/Vector 及其 Dummy**，AIV 取的是 Dummy。
@@ -400,6 +404,7 @@ PA_BBND decode 几何均值 1.3918，差 0.008。分档回退可以补上（离�
 6. **MX scale 只能整 16 行 fractal 落地，目的地址 32 B 对齐**，半 fractal 写入触发 AI Core error 80。
 7. **host tiling 不得解引用 `GetData()`**，只能做 null 判断。
 8. **golden 不得写死组大小/派发条件**，必须读实际 schedule。
+9. **VF 行循环内不得出现随迭代变化的标量浮点值**，尤其是标量 `int→float` 转换。编译器直接报 `fatal error: error in backend: ... Unsupported scalar instruction in AIV loop.`。要把行号喂给向量比较，只能 `Duplicate` 成向量再 `Cast`，或者反过来把阈值在块级转成 int32 后用整数比较。详见 B13。
 
 ### A7.3 验证要求
 
@@ -432,9 +437,133 @@ PA_BBND decode 几何均值 1.3918，差 0.008。分档回退可以补上（离�
 | 原始证据（433 文件） | `evidence/ev21/`（accuracy / perf / prof / sweep / build） |
 | 逐例性能 CSV | `evidence/ev21/perf/bench16k.csv` |
 | gSize 扫描修复前后对照 | `evidence/ev21/sweep/` |
-| 优化提交 | `f1d13043b`（合并）、`6b9da048a`（派发收紧） |
+| 优化提交 | `f1d13043b`（合并）、`6b9da048a`（派发收紧）、A9 节奏下发见本次提交 |
+| A9 原始数据 | 容器 `k831:/home/k831/perf-opt/results/{val2,d4a,d4b,d2a}-PA_*`；日志 `d4a-stage2.log`、`d4a-acc-*.log`、`d2a-all.log` |
 
 关键提交链：`98e3d8d1a` → `beb2b64d7` → `00e1713d7` → `bc68af786` → `8e0989914` → `2e4ad3565` → `f1d13043b` → `6b9da048a`。
+
+---
+
+## A9. 运行时流水节奏下发（D4，2026-11-25 追加）
+
+> 本章是在 A1–A8 之上的增量优化，目标是补掉 A6.3/A6.4 两个遗留问题。
+> 它**不改变合并的派发条件、形状与内存预算**，只把两个原本写死的流水常量变成按真实负载下发。
+
+### A9.1 问题：编译期常量对短尾形状过度预取
+
+合并路径把 `kvHeadNum` 从 2 降到 1，单核 task 数随之减半。`GROUP_N=16 / PRELOAD_N=20` 是按长尾形状（decode_1/2，单核 160~330 个 task）标定的：
+
+- 总 tick ≈ task 数 + `PRELOAD_N`，排空段是固定开销；
+- decode_3 单核只有约 12 个 task，20 拍排空占比超过 60%；
+- decode_4 单核约 24.7 个 task，刚跨过 20，爬坡与排空双重损失。
+
+编译期常量无法区分这两种形状，而 host tiling 又读不到真实 `seqused_kv`（A6.5）。
+
+### A9.2 设计思想：用 metadata header 的空闲槽做单向下发
+
+关键观察有两点：
+
+1. **决策所需的数据 AICPU 已经有了**。`section_stream_k` 的 `assignContext.coreCache.block` 早就算出了每个核分到的块数，只是 `ScheduleFa` 用完即弃，没有导出。
+2. **缓冲区不需要跟着变**。`GROUP_N`/`PRELOAD_N` 决定的是任务环与 P scale 环的**槽数上界**。运行时只要取**更小**的值，静态分配的缓冲区就一定够用——于是「运行时可变」和「不扩容」可以同时成立。
+
+因此整条链路是单向的：`section_stream_k → AICPU metadata → header[6]/[7] → kernel Init`。host tiling 不参与决策，也就不需要解引用 `GetData()`；tiling key 不变，跨算子接口不变。
+
+### A9.3 具体改动（9 个文件，+88/-10）
+
+| 文件 | 改动 |
+| --- | --- |
+| `section_stream_k_impl.h` | `SectionStreamKImplResult` 增加 `maxCoreBlock`，`Clear()` 重置；`ScheduleFa` 每次分配后取 `max(result.maxCoreBlock, assignContext.coreCache.block)` |
+| `section_stream_k_def.h` | `SectionStreamKFaResult` 增加 `maxCoreBlock` |
+| `section_stream_k.h` | 把 impl 结果透传到对外结果 |
+| `quant_flash_attn_metadata.h` | 新增 `HEAD_GROUP_N_INDEX = 6`、`HEAD_PRELOAD_N_INDEX = 7` |
+| `quant_flash_attn_metadata_aicpu.h` | 新增成员 `mergeKvHeads_` 与 `SetPipelineRhythm` 声明 |
+| `quant_flash_attn_metadata_aicpu.cpp` | `SetMetadataHead` 末尾调用 `SetPipelineRhythm`，按全部 section 的 `maxCoreBlock` 上界分档写 header |
+| `quant_flash_attn_tiling_data.h` | kernel 侧同名索引常量 |
+| `quant_flash_attn_kernel_mxfp4.h` | 新增 `groupN_ / preloadN_` 成员与 `InitPipelineRhythm`；`DispatchRows` 的组边界改用计数器；排空循环与两处 `ExecuteTick` 全部改用 `preloadN_` |
+| `mxfp4_schedule.py` | 参考侧从 `meta[6]` 读回真实组大小，不再写死 |
+
+**分档规则**（仅合并路径生效，其余一律写 0）：
+
+| `maxCoreBlock` | header 写入 | 实际生效 |
+| --- | --- | --- |
+| `>= 40` 或 `== 0` | 0 / 0 | 编译期默认 16 / 20 |
+| `20 .. 39` | 8 / 11 | 8 / 11 |
+| `< 20` | 4 / 7 | 4 / 7 |
+
+kernel 侧的读回带双重校验，任何非法值都退回默认：
+
+```cpp
+if (g != 0U && g <= GROUP_N) { groupN_ = g; }
+if (p != 0U && p <= PRELOAD_N && p >= groupN_ + DELAY_P_SCALE_N) { preloadN_ = p; }
+```
+
+第二个条件就是 A7.2 红线 3 的运行时版本——**P scale 必须在本组第一个 C2 之前发布**，不满足就宁可不用下发值。
+
+`% PRELOAD_TASK_CACHE_SIZE` 保持编译期常量 22（槽数上界），只有节奏比较改成运行时值。
+
+### A9.4 实测收益（2026-11-25，NPU7，Graph，val2 → d4a 同卡对照）
+
+| 用例 | 单核 task | 下发 g/p | val2 C4 | d4a C4 | C4 变化 | C8/C4 val2 → d4a |
+| --- | ---: | --- | ---: | ---: | ---: | --- |
+| decode_1 | ~163 | 0 / 0 | 182.877 | 181.861 | -0.56% | 1.6999 → 1.7127 |
+| decode_2 | ~330 | 0 / 0 | 451.556 | 452.414 | +0.19% | 1.7575 → 1.7540 |
+| decode_3 | ~12 | **4 / 7** | 29.484 | 26.109 | **-11.45%** | 1.4064 → **1.5760** |
+| decode_4 | ~24.7 | **8 / 11** | 54.138 | 51.243 | **-5.35%** | 0.8931 → **0.9606** |
+
+| 范围 | val2 | d4a |
+| --- | ---: | ---: |
+| PA_BBND decode 几何均值（C8/C4） | 1.3918 | **1.4603** |
+| PA_BBND all（12） | 1.1745 | 1.1954 |
+| PA_BNBD decode | 1.3719 | 1.3823 |
+| PA_NZ decode | 1.3919 | 1.3918 |
+
+三布局 12 例 C4 耗时几何比（val2/d4a）：**PA_BBND 1.0134、PA_BNBD 1.0024、PA_NZ 1.0002**。prefill 六例逐项变化都在 ±0.8% 内；`mixed_2` +2.1%，该例历史极差 5.40%，判为噪声。
+
+### A9.5 分档阈值是怎么定下来的
+
+先扫了三个「全局统一」变体，再看分档：
+
+| 方案 | decode GM | 相对 val2 的 C4 耗时变化 |
+| --- | ---: | ---: |
+| 全部 4/7 | 1.4487 | -3.44% |
+| 全部 8/11 | 1.4544 | — |
+| 全部 2/5 | 1.4620 | — |
+| **按 maxCoreBlock 分档** | 1.4603 | **-4.06%** |
+
+`2/5` 的 GM 最高，但那是 C8 侧抖动带来的——**按 C4 耗时口径分档最优**。这与 A7.4 的口径一致：GM 是比值指标，会被分母噪声放大；决定收益的是 C4 绝对耗时。阈值 40/20 就是在这一轮锁定的。
+
+### A9.6 布局隔离的直接证据
+
+`metadata_header` 的索引 6/7 逐例读出：
+
+| 布局 | decode_1 | decode_2 | decode_3 | decode_4 | prefill / mixed |
+| --- | --- | --- | --- | --- | --- |
+| PA_BBND | 0/0 | 0/0 | **4/7** | **8/11** | 0/0 |
+| PA_BNBD | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 |
+| PA_NZ | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 |
+
+只有 BBND 的两个短尾 decode 拿到非零值，其余全部走默认——与「仅合并路径生效」的设计逐字吻合。
+
+### A9.7 精度验证
+
+744 例矩阵（bench16k 12 + qwen3_8b 16 + qwen3_8b_page256 16 + document small 204，× 三布局）**全通过**。
+
+过程中 PA_NZ 的 document 在 NPU2 上出现 76 例失败，全部是设备侧超时而非比对失败：
+
+```
+error code is 507014 [Error]: The aicore execution times out.
+EE9999: rtDeviceSynchronizeWithTimeout execution failed, reason=aicore timeout
+```
+
+同参数换 NPU0 复跑 **204 passed**。判定为卡侧问题，非代码回退。**教训：失败原因必须逐条看，`76 failed` 不等于 `76 个精度错误`。**
+
+### A9.8 限制
+
+1. **只能调小，不能调大**。缓冲区按编译期上界分配，下发值大于 `GROUP_N`/`PRELOAD_N` 会被忽略。要给长尾形状加长流水，仍需改编译期常量并重新核算内存。
+2. **只在合并路径生效**。DN prefill、PA_BNBD、PA_NZ 一律写 0，行为与 A9 之前逐位一致。
+3. **阈值样本少**。40/20 是在 bench16k 四个 decode 上标定的，`maxCoreBlock` 落在 20~40 之间的真实业务形状尚未覆盖。
+4. **`maxCoreBlock` 取的是全 section 上界**，不是每核独立下发。核间负载不均时，轻载核会跟着重载核用同一档节奏。
+5. decode_4 相对最初基线仍是 +10.5%，A9 只抹掉了其中一部分。
 
 ---
 ---
@@ -948,3 +1077,66 @@ AICPU metadata 可读真实数据，但其决策写在设备内存中，host 读
 3. 由上层框架在调用前完成分档并分别传入 `max_seqlen_kv` 等属性。
 
 三者都属跨算子接口变更，需同步修改 metadata 算子、host tiling、调用方与 pytest golden。
+
+> **后续（A9）**：上述三条方向都不必走。metadata header 本身就有 9 个空闲 uint32 槽，把决策写进 header 再由 kernel 读回即可，前提是**运行时值只减不增**，缓冲区仍按编译期上界分配。
+
+---
+
+## B13. 已证伪：ND causal 判定改整数比较（D2 第一项，2026-11-25）
+
+### B13.1 想法
+
+`SoftmaxQuantizeNdChunkFp32Vf` 的 4 行主循环里，causal 判定原本要先把标量行号铺成向量：
+
+```
+Duplicate(queryIndexN, row + N);            // int32 广播
+Cast<float, int32_t>(queryIndexFloatN, ...); // 转 float
+Compare<float, GE>(visibleN, queryIndexFloatN, causalRows);
+```
+
+每 4 行 12 条向量指令。既然 `causalRows` 是向量、行号是标量，直接用 `Compares`（向量-标量比较）就只剩 4 条。
+
+### B13.2 两次失败与最终形态
+
+**第一次**：`Compares<float, CMPMODE::LE>(visibleN, causalRows, static_cast<float>(row + N), all)` 编译失败：
+
+```
+fatal error: error in backend: ..._kernel.cpp:5637:5: Unsupported scalar instruction in AIV loop.
+```
+
+`static_cast<float>(uint32_t)` 是**随迭代变化的标量浮点转换**，AIV 的 VF 循环体不支持。这解释了原代码为什么要绕道 `Duplicate` + 向量 `Cast`——不是冗余，是硬约束。（已列为 A7.2 红线 9。）
+
+**第二次**：改成块级把阈值转 int32、行内用整数比较，编译通过：
+
+```cpp
+// 块级一次
+Cast<int32_t, float, MXFP4_CAST_ZERO>(causalRowsI, causalRows, all);
+// 行内 4 条
+Compares<int32_t, CMPMODE::LE>(visibleN, causalRowsI, static_cast<int32_t>(row + N), all);
+```
+
+等价性成立：`causalRowStep = qGroupSize`、`causalFirstRow` 都是整数且被 clamp 在 `[-ChunkN*G, 65]`，`causalRows` 恒为精确可表示的整数值。
+
+### B13.3 实测：指令少了，时间没少
+
+同轮同卡（NPU7、Graph、d4a 与 d2a 交替采集）：
+
+| 布局 | 12 例 C4 耗时几何比（d4a/d2a） | decode GM d4a → d2a |
+| --- | ---: | --- |
+| PA_BBND | **0.9953**（慢 0.47%） | 1.4662 → 1.4415 |
+| PA_BNBD | **0.9999**（持平） | 1.3714 → 1.3732 |
+
+BBND 逐例：decode_1 +0.83%、decode_3 +1.41%、decode_4 +1.85%；只有 mixed_1 -0.22%、mixed_2 -1.38% 略好。
+
+### B13.4 结论与教训
+
+1. **decode 不是 VF 吞吐受限**。它的瓶颈是 KV 取回延迟与流水排空，省 8 条向量指令换不出时间。
+2. **改错了路径**。报告里 AIV Vector 992 µs 的 `dual_prefill_1` 是 **DN prefill**，走 `SoftmaxDnResidentEightVf` / `SoftmaxQuantizeDnChunkFp32Vf`；本次改的 `SoftmaxQuantizeNdChunkFp32Vf` 是 **ND** 路径，只在 decode 与 mixed 的 ND 分块上执行。**动手前必须先确认目标 VF 属于哪条数据路径。**
+3. 真正受益的只有 mixed 里的 ND prefill 分块，量级 0.2~1.4%，在噪声带内。
+4. 该改动已**回退**，未进入提交。
+
+### B13.5 下一步候选（未实施）
+
+DN `SoftmaxDnResidentEightVf` 每 32 个 KV 行的指令构成约为：56 次 `LoadAlign` + 28 次 `Max` + 112 次打包/指数运算 + 7 次标量组指数运算。其中 **24 次 load 是纯重复**——max _pass 读过一遍，block 0~2 又读一遍（只有 block 3 靠寄存器驻留省掉）。把驻留行数从 8 提到 16 可再省 8 次 load（约 4% VF 指令）。
+
+预期只对 PA_BNBD / PA_NZ 有效（它们的 C4 最长流水是 AIV Vector 992 µs），PA_BBND 的最长流水是 AIC MTE2 1042 µs，不会受益。风险是寄存器溢出——按 B11.2 的经验，VF 内的资源压力一旦越界，退化是数倍级而不是百分比级。
