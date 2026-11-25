@@ -18,6 +18,8 @@ using namespace AscendC;
 using namespace AscendC::Reg;
 
 constexpr uint32_t VEC1_ROWS = 64;
+// 块对角合并关闭时 mergeHeadIdx 取该哨兵值。
+constexpr uint32_t NO_MERGE_HEAD = 0xFFFFFFFFU;
 constexpr uint32_t QUANT_GROUP_SIZE = 32;
 constexpr float INVALID_GROUP_EXPONENT = -3.402823466e+38F;
 constexpr float MXFP4_LN2 = 0.6931471805599453F;
@@ -50,6 +52,8 @@ struct SoftmaxFp32Mxfp4Params {
     uint64_t kvStart;     // 当前子块在当前 batch 中的 KV 起点。
     int64_t causalOffset; // 右下 causal 偏移：KV 长度减 Q 长度，允许负值。
     float scoreScale;     // attention scale，只应用一次。
+    uint32_t mergeHeadIdx; // 块对角合并时本 chunk 的 KV head；NO_MERGE_HEAD 表示未合并。
+    uint32_t realGroupSize; // 真实 GQA 组大小（合并后 qGroupSize = n2Size * realGroupSize）。
 };
 
 // BF16 索引将偶奇交错恢复为两列 Q64；字节索引将四路 FP4 合并结果恢复为八列 Q64。
@@ -620,12 +624,14 @@ __simd_vf__ inline void SoftmaxQuantizeDnChunkFp32Vf(
 // causal可见条件为 queryRow>=causalFirstRow+kvIndex*causalRowStep（HasMask=true）；kvIndex为chunk内索引。
 // causalRowStep为合轴G，causalFirstRow为第一个KV的最早可见本地Q行，可为负数，允许token的G跨M块。
 template <uint32_t ChunkN, uint32_t TaskN,
-          bool HasMask, QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT, bool ScorePreScaled = false>
+          bool HasMask, QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT, bool ScorePreScaled = false,
+          bool MergeHeads = false>
 __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
     __ubuf__ uint8_t* packedPUb, __ubuf__ float* groupMaxUb, __ubuf__ float* globalMaxUb,
     __ubuf__ float* scoreUb, __ubuf__ uint8_t* ByteIdxUb, __ubuf__ uint16_t* HalfIdxUb,
     float scoreScale, uint32_t validQueryRows, uint32_t validKvTokens, uint32_t chunkKvOffset,
-    float causalFirstRow, float causalRowStep)
+    float causalFirstRow, float causalRowStep, uint32_t mergeHeadIdx = NO_MERGE_HEAD,
+    uint32_t realGroupSize = 1U, uint32_t qRowPhase = 0U, uint32_t mergeHeadCount = 1U)
 {
     static_assert((ChunkN == 64 || ChunkN % 128 == 0) && TaskN % ChunkN == 0,
                   "ND VF requires S64 or complete S128 storage blocks");
@@ -647,6 +653,20 @@ __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
     Mins(pairIndices, storeOffsets, static_cast<uint32_t>(1), all);
     ShiftLefts(pairIndices, pairIndices, static_cast<int16_t>(5), all);
     MaskReg validKv;
+    // 块对角合并：本 chunk 只处理属于 mergeHeadIdx 的行。行归属以 qGroupSize 为周期，
+    // 每周期内连续 realGroupSize 行同属一个 KV head，故用标量边界整段跳过不匹配的行，
+    // 向量体内不保留数据相关分支与额外掩码。跳过的行 P 保持预置 0、指数保持 INVALID，
+    // 与「置 -inf 后照算」等价（该组 Pscale 为 0）。
+    uint32_t rowPeriod = alignedRows == 0 ? 1U : alignedRows;
+    uint32_t rowSpan = alignedRows == 0 ? 1U : alignedRows;
+    uint32_t phaseOffset = 0;
+    if constexpr (MergeHeads) {
+        const uint32_t period = realGroupSize * mergeHeadCount;
+        rowPeriod = period == 0 ? 1U : period;
+        rowSpan = realGroupSize == 0 ? 1U : realGroupSize;
+        // 取模只在每次 VF 调用做一次，块内用比较完成回绕。
+        phaseOffset = qRowPhase % rowPeriod;
+    }
     RegTensor<float> score0, first0, second0, exponent0, packedExponent0, maximum0;
     RegTensor<int32_t> queryIndex0;
     RegTensor<bfloat16_t> bf0, compactBf0;
@@ -678,13 +698,23 @@ __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
         const uint32_t firstGroup = chunkKvOffset / QUANT_GROUP_SIZE + block * 2;
         __ubuf__ uint8_t* packedBlock = packedPUb + (chunkKvOffset / 64 + block) * VEC1_ROWS * 32;
         Adds(chunkIndices, keyIndices, static_cast<int32_t>(firstToken), all);
+        // 合并模式下一个 chunk 恰好是一个 KV head 的全部 kvTokenBlock 个 token。
+        uint32_t rowBegin = 0;
+        if constexpr (MergeHeads) {
+            rowBegin = mergeHeadIdx * realGroupSize + rowPeriod - phaseOffset;
+            rowBegin -= (rowBegin >= rowPeriod ? rowPeriod : 0U);
+        }
         Compares<int32_t, CMPMODE::LT>(validKv, chunkIndices, static_cast<int32_t>(validKvTokens), all);
         if constexpr (HasMask) {
             Cast<float, int32_t, MXFP4_CAST_ZERO>(causalRows, chunkIndices, all);
             Muls(causalRows, causalRows, causalRowStep, all);
             Adds(causalRows, causalRows, causalFirstRow, all);
         }
-        for (uint16_t row = 0; row < alignedRows; row += 4) {
+        // 单层扁平循环：段内步进 4 行，跨段用整除得到 0/1 进位，向量体内无数据相关分支。
+        // 迭代次数与未合并路径一致，避免短内层循环带来的流水建立开销。
+        uint32_t rowBase = rowBegin;
+        uint32_t spanOffset = 0;
+        for (uint32_t row = rowBegin; row < alignedRows; row = rowBase + spanOffset) {
             LoadAlign(score0, scoreUb + (row + 0) * ChunkN + firstToken);
             LoadAlign(score1, scoreUb + (row + 1) * ChunkN + firstToken);
             LoadAlign(score2, scoreUb + (row + 2) * ChunkN + firstToken);
@@ -838,8 +868,19 @@ __simd_vf__ inline void SoftmaxQuantizeNdChunkFp32Vf(
             StoreAlign<int8_t, StoreDist::DIST_PACK4_B32>(
                 reinterpret_cast<__ubuf__ int8_t*>(packedBlock + (row + 3) * 32),
                 reinterpret_cast<RegTensor<int8_t>&>(fp3), firstHalf);
+            spanOffset += 4U;
+            // 段内步进 4 行，跨段进位只用比较得到 0/1。这里不能用整数除法：
+            // 实测每次行迭代一次 32 位除法会让整个 softmax VF 慢约 1.9 倍。
+            const uint32_t carry = spanOffset >= rowSpan ? 1U : 0U;
+            spanOffset -= carry * rowSpan;
+            rowBase += carry * rowPeriod;
         }
         for (uint16_t row = alignedRows; row < validQueryRows; ++row) {
+            if constexpr (MergeHeads) {
+                if (((qRowPhase + row) / realGroupSize) % mergeHeadCount != mergeHeadIdx) {
+                    continue;
+                }
+            }
             LoadAlign(score0, scoreUb + (row + 0) * ChunkN + firstToken);
             if constexpr (HasMask) {
                 Duplicate(queryIndex0, static_cast<int32_t>(row + 0));
@@ -970,7 +1011,7 @@ __aicore__ inline void SoftmaxDnChunkFp32(const LocalTensor<uint8_t>& packedProb
         alignedKv32, alignedKv64);
 }
 
-template <uint32_t ChunkN, uint32_t TaskN, bool HasMask, QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT, bool ScorePreScaled = false>
+template <uint32_t ChunkN, uint32_t TaskN, bool HasMask, QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT, bool ScorePreScaled = false, bool MergeHeads = false>
 __aicore__ inline void SoftmaxNdChunkFp32(const LocalTensor<uint8_t>& packedProbability,
     const LocalTensor<float>& taskGroupExponent, const LocalTensor<float>& runningGroupMaximum,
     const LocalTensor<float>& score, const LocalTensor<uint8_t>& byteIndices,
@@ -981,17 +1022,21 @@ __aicore__ inline void SoftmaxNdChunkFp32(const LocalTensor<uint8_t>& packedProb
         const int64_t firstQuery = static_cast<int64_t>(params.qGs1Start / params.qGroupSize) +
             params.causalOffset;
         if (params.validN != 0 && firstQuery >= lastKey) { // 在第一个query能看到所有的kv时，在causal也不需要mask
-            SoftmaxNdChunkFp32<ChunkN, TaskN, false, QUANT_SCHEMA, ScorePreScaled>(packedProbability,
+            // 块对角 mask 与 causal 无关，必须保留 MergeHeads。
+            SoftmaxNdChunkFp32<ChunkN, TaskN, false, QUANT_SCHEMA, ScorePreScaled, MergeHeads>(packedProbability,
                 taskGroupExponent, runningGroupMaximum, score, byteIndices, halfwordIndices, params);
             return;
         }
     }
-    SoftmaxQuantizeNdChunkFp32Vf<ChunkN, TaskN, HasMask, QUANT_SCHEMA, ScorePreScaled>(
+    SoftmaxQuantizeNdChunkFp32Vf<ChunkN, TaskN, HasMask, QUANT_SCHEMA, ScorePreScaled, MergeHeads>(
         (__ubuf__ uint8_t*)packedProbability.GetPhyAddr(), (__ubuf__ float*)taskGroupExponent.GetPhyAddr(),
         (__ubuf__ float*)runningGroupMaximum.GetPhyAddr(), (__ubuf__ float*)score.GetPhyAddr(),
         (__ubuf__ uint8_t*)byteIndices.GetPhyAddr(), (__ubuf__ uint16_t*)halfwordIndices.GetPhyAddr(),
         params.scoreScale, params.validRows, params.validN, params.s2Offset,
-        GetCausalFirstVisibleRow<ChunkN>(params), static_cast<float>(params.qGroupSize));
+        GetCausalFirstVisibleRow<ChunkN>(params), static_cast<float>(params.qGroupSize),
+        params.mergeHeadIdx, params.realGroupSize,
+        static_cast<uint32_t>(params.qGs1Start % params.qGroupSize),
+        params.realGroupSize == 0U ? 1U : params.qGroupSize / params.realGroupSize);
 }
 } // namespace Mxfp4Api
 #endif

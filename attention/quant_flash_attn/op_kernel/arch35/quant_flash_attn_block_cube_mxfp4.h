@@ -37,7 +37,7 @@ template <typename INPUT_T, typename T, LayOutTypeEnum layout = LayOutTypeEnum::
         S2TemplateType s2TemplateType = S2TemplateType::Aligned128,
         DTemplateType dTemplateType = DTemplateType::Aligned128,
         DTemplateType dVTemplateType = DTemplateType::Aligned128, uint8_t KvLayoutType = 0, bool useDn = false,
-        bool isDAligned = true, bool enableQf322F32Pre = false>
+        bool isDAligned = true, bool enableQf322F32Pre = false, bool mergeKvHeads = false>
 class QuantFlashAttnBlockCubeMxfp4 {
 public:
     // 基本参数
@@ -45,10 +45,25 @@ public:
     static constexpr uint32_t s2BaseSize = (uint32_t)s2TemplateType;
     static constexpr uint32_t dBaseSize = (uint32_t)dTemplateType;
     static constexpr uint32_t dVBaseSize = (uint32_t)dVTemplateType;
+    static constexpr bool M64_CONFIG = mBaseSize == 64 && dBaseSize == 256 && s2BaseSize == 256;
+    static constexpr bool M32_CONFIG = mBaseSize == 32 && dBaseSize == 256 && s2BaseSize == 128;
+    static constexpr bool SMALL_M_CONFIG = M64_CONFIG || M32_CONFIG;
+    static constexpr bool SMALL_M_ND = !useDn && SMALL_M_CONFIG;
+    // 同页双 KV head 块对角合并：一个 task 覆盖 kvTokenBlock 个 token 的全部 KV head，
+    // score 的 N 轴为 [head0 的 kvTokenBlock 列; head1 的 kvTokenBlock 列]，
+    // 每个 KV head 独占一个 score 槽与一次 VF 调用。派发条件保证 n2Size == 2、形状 M64/N256/D256。
+    static constexpr bool MERGE_KV_HEADS = mergeKvHeads && !useDn && KvLayoutType == 1;
+    static constexpr uint8_t KV_LAYOUT_TYPE = KvLayoutType;
+    static constexpr uint32_t kvTokenBlock = MERGE_KV_HEADS ? s2BaseSize / 2U : s2BaseSize;
+    // 合并模式 L1 Q tile 的每个 KV head part 占用的行数（32，16 的整数倍）。
+    static constexpr uint32_t mergePartRows = mBaseSize / 2U;
+    static_assert(!MERGE_KV_HEADS || (mBaseSize == 64 && s2BaseSize == 256 && dBaseSize == 256),
+                  "MXFP4 KV-head merge requires the M64/N256/D256 merge config");
     static_assert(dBaseSize == dVBaseSize, "MXFP4 requires Dv == D");
-    static_assert(mBaseSize == 128 && (dBaseSize == 128 || dBaseSize == 256),
-                  "MXFP4 supports M128 and D128/D256 only");
-    static_assert(s2BaseSize == (dBaseSize == 128 ? 256 : 128), "Unsupported MXFP4 task size");
+    static_assert((mBaseSize == 128 && (dBaseSize == 128 || dBaseSize == 256)) || SMALL_M_CONFIG,
+                  "MXFP4 supports M128, M64/N256/D256 or M32/N128/D256");
+    static_assert((mBaseSize == 128 && s2BaseSize == (dBaseSize == 128 ? 256 : 128)) || SMALL_M_CONFIG,
+                  "Unsupported MXFP4 task size");
     // CheckBlockSizeMxFp4 accepts power-of-two pages starting at 64 tokens.
     // Each task starts at a multiple of s2BaseSize.
     static constexpr uint32_t MIN_KV_PAGE_TOKENS = 64U;
@@ -60,6 +75,11 @@ public:
     static_assert(std::is_same<T, float>::value && std::is_same<INPUT_T, fp4x2_e2m1_t>::value,
                   "MXFP4 requires FP4 E2M1 input and FP32 accumulation");
     static constexpr uint32_t s2SplitSize = 128U;
+    static constexpr uint32_t PV_SPLIT_SIZE = SMALL_M_CONFIG ? s2SplitSize : s2BaseSize;
+    static constexpr uint32_t PV_TASKS_PER_GROUP = MXFP4_TASK_GROUP_N;
+    // D256 的 QK 双槽与 C2 并发会在第 20 个 task 后阻塞，M32 保持 QK 单槽、PV128 双槽。
+    static constexpr uint32_t MM2_RIGHT_DB = 2U;
+    static constexpr uint32_t MM2_LEFT_DB = 2U;
     static constexpr uint32_t MXFP_GROUP_SIZE = 32U;
     static constexpr uint32_t MXFP_DIVISOR_SIZE = 64U;
     // V 槽 D 之后补的常数 1 通道数;紧凑补列模板与 L0 目的分形都按这个宽度组织
@@ -81,7 +101,8 @@ public:
     using SCALE_T = fp8_e8m0_t;
     using MM_T = T;
 
-    using CrossBufferType = CVCrossBuffer<20, useDn, s1TemplateType, s2TemplateType, dTemplateType, dVTemplateType>;
+    static constexpr uint32_t P_SLOT_COUNT = M32_CONFIG ? 40U : 20U;
+    using CrossBufferType = CVCrossBuffer<P_SLOT_COUNT, useDn, s1TemplateType, s2TemplateType, dTemplateType, dVTemplateType>;
     static constexpr uint32_t QK_L0_SLOT_COUNT = dBaseSize == 256 ? 1U : 2U;
 
     static constexpr bool IS_TND_LAYOUT =
@@ -128,25 +149,28 @@ public:
     // L0 buffers
     std::conditional_t<QK_L0_SLOT_COUNT == 1, BuffersPolicySingleBuffer<BufferType::L0A>,
         BuffersPolicyDB<BufferType::L0A>> mm1LeftBuffers_; // 在DN下，装K；在ND下，装Q
-    BuffersPolicyDB<BufferType::L0A> mm2LeftBuffers_; // 在DN下，装V；在ND下，装P
+    std::conditional_t<MM2_LEFT_DB == 1, BuffersPolicySingleBuffer<BufferType::L0A>,
+        BuffersPolicyDB<BufferType::L0A>> mm2LeftBuffers_; // 在DN下，装V；在ND下，装P
     // 每次矩乘的左右槽成对轮转，共用左槽的 MTE1<->M 事件。
     // TPipe 在 C310 已保留 M_MTE1 的 0..2；四个成对槽只再申请 4 个事件。
     std::conditional_t<QK_L0_SLOT_COUNT == 1, BuffersPolicySingleBuffer<BufferType::L0B, SyncType::NO_SYNC>,
         BuffersPolicyDB<BufferType::L0B, SyncType::NO_SYNC>> mm1RightBuffers_; // DN:Q，ND:K
-    BuffersPolicyDB<BufferType::L0B, SyncType::NO_SYNC> mm2RightBuffers_; // DN:P，ND:V
+    std::conditional_t<MM2_RIGHT_DB == 1, BuffersPolicySingleBuffer<BufferType::L0B, SyncType::NO_SYNC>,
+        BuffersPolicyDB<BufferType::L0B, SyncType::NO_SYNC>> mm2RightBuffers_; // DN:P，ND:V
     std::conditional_t<QK_L0_SLOT_COUNT == 1, BuffersPolicySingleBuffer<BufferType::L0C>,
         BuffersPolicyDB<BufferType::L0C>> mm1ResBuffers_; // 两槽分别用 FIX_M/M_FIX 保护，允许 M 与 FIX 重叠。
     BuffersPolicySingleBuffer<BufferType::L0C> mm2ResBuffers_; // pv的结果使用单槽累积
 
 
-    static constexpr uint32_t P_SLOT_COUNT = 20;
     uint64_t scoreSequence_ = 0;
     uint32_t pvGroupTasks_ = 0;
     uint64_t pvGroupSequence_ = 0; // Matches Vector nextGroupId_ across sections.
     bool qCached_ = false;
     uint32_t queryL0ReadyCount_ = 0; // Initial QK issues populate the dimension-specific dedicated L0 slots.
     uint32_t pageShift_ = 0;
-    // PV alternates two dedicated V slots. MX padding depends on the aligned K length in each slot.
+    uint32_t kvPayloadBytes_ = 0U;
+    uint32_t kvScaleBytes_ = 0U;
+    // PV 槽按配置单槽或双槽轮转，MX padding 记录各槽最近使用的对齐长度。
     uint32_t previousPvLength_ = 0;
     uint32_t olderPvLength_ = 0;
     const ConstInfo_t& constInfo_;
@@ -194,11 +218,15 @@ public:
         // 紧凑补列模板:仅保留 16 个补列通道,按 64 token 一块连续组织
         constexpr uint32_t mmVPaddngSize = s2BaseSize * PADDING_CHANNEL_COUNT / 2;
         constexpr uint32_t mmVPaddngScaleSize = s2BaseSize * PADDING_CHANNEL_COUNT / MXFP_GROUP_SIZE;
+        // 合并模式下一个 L1 KV 槽恰好容纳一个 kvTokenBlock 的全部 head：
+        // mmKVSize = s2BaseSize*D/2 = kvTokenBlock*D/2*n2Size，无需额外扩容。
+        kvPayloadBytes_ = mmKVSize;
+        kvScaleBytes_ = mmKVScaleSize;
         static_assert(P_SLOT_COUNT * (CrossBufferType::l1PBufferBytes_ + CrossBufferType::l1PScaleBufferBytes_) +
                       mm1QSize + mm1QScaleSize + KV_SLOT_COUNT * (mmKVSize + mmKVScaleSize) +
                       mmVPaddngSize + mmVPaddngScaleSize <= 512 * 1024, "MXFP4 L1 capacity exceeded");
         l1QBuffers_.Init(l1BufferManager_, mm1QSize + mm1QScaleSize);
-        l1KVBuffers_.Init(l1BufferManager_, mmKVSize + mmKVScaleSize);
+        l1KVBuffers_.Init(l1BufferManager_, kvPayloadBytes_ + kvScaleBytes_);
         l1VPaddingBuffers_.Init(l1BufferManager_, mmVPaddngSize + mmVPaddngScaleSize);
 
         // L0A B C 当前写死
@@ -209,12 +237,12 @@ public:
         // L0上的buffer
         constexpr uint32_t mm1leftSize = USE_DN? s2SplitSize * dBaseSize / 2 : mBaseSize * dBaseSize / 2;
         constexpr uint32_t mm1RightSize = USE_DN? mBaseSize * dBaseSize / 2 : s2SplitSize * dBaseSize / 2;
-        constexpr uint32_t mm2LeftSize = USE_DN? s2BaseSize * (dBaseSize + 16) / 2 : mBaseSize * s2BaseSize / 2;
-        constexpr uint32_t mm2RightSize = USE_DN? mBaseSize * s2BaseSize / 2 : s2BaseSize * (dBaseSize + 16) / 2;
+        constexpr uint32_t mm2LeftSize = USE_DN ? PV_SPLIT_SIZE * (dBaseSize + 16) / 2 : mBaseSize * PV_SPLIT_SIZE / 2;
+        constexpr uint32_t mm2RightSize = USE_DN ? mBaseSize * PV_SPLIT_SIZE / 2 : PV_SPLIT_SIZE * (dBaseSize + 16) / 2;
         constexpr uint32_t mm1ResSize = mBaseSize * s2SplitSize * sizeof(float);
         constexpr uint32_t mm2ResSize = mBaseSize * (dBaseSize + 16) * sizeof(float);
-        static_assert(QK_L0_SLOT_COUNT * mm1leftSize + 2 * mm2LeftSize <= 64 * 1024, "MXFP4 L0A capacity exceeded");
-        static_assert(QK_L0_SLOT_COUNT * mm1RightSize + 2 * mm2RightSize <= 64 * 1024, "MXFP4 L0B capacity exceeded");
+        static_assert(QK_L0_SLOT_COUNT * mm1leftSize + MM2_LEFT_DB * mm2LeftSize <= 64 * 1024, "MXFP4 L0A capacity exceeded");
+        static_assert(QK_L0_SLOT_COUNT * mm1RightSize + MM2_RIGHT_DB * mm2RightSize <= 64 * 1024, "MXFP4 L0B capacity exceeded");
         static_assert(QK_L0_SLOT_COUNT * mm1ResSize + mm2ResSize <= 256 * 1024, "MXFP4 L0C capacity exceeded");
         mm1LeftBuffers_.Init(l0aBufferManager_, mm1leftSize);
         mm1RightBuffers_.Init(l0bBufferManager_, mm1RightSize);
@@ -257,7 +285,8 @@ public:
     // 用 asc_copy_l12l0a_mx/asc_copy_l12l0b_mx 独立指定到补列的 scale 分形。
     __aicore__ inline void InitPaddingL0(const LocalTensor<KV_T>& valueL0Tensor, uint32_t alignedKvTokenCount)
     {
-        const uint32_t slotLength = olderPvLength_;
+        constexpr uint32_t valueSlots = USE_DN ? MM2_LEFT_DB : MM2_RIGHT_DB;
+        const uint32_t slotLength = valueSlots == 1 ? previousPvLength_ : olderPvLength_;
         olderPvLength_ = previousPvLength_;
         previousPvLength_ = alignedKvTokenCount;
         if (slotLength == alignedKvTokenCount) {
@@ -282,6 +311,31 @@ public:
                 (__cbuf__ fp8_e8m0_t*)valuePaddingL1Bytes[payloadBytes].GetPhyAddr(), 0, 0, 1, kvBlocks, 1, 1);
         }
         PipeBarrier<PIPE_MTE1>();
+    }
+
+    // 合并模式下 L1 KV 槽由整块连续搬运填充：payload 的 head h 占 k-block [h*D/64, ...)，
+    // 字节偏移 h*(kvTokenBlock*D/2)。非合并模式恒为 0。
+    __aicore__ inline uint32_t KvChunkPayloadOffset(uint32_t headIdx) const
+    {
+        return MERGE_KV_HEADS ? headIdx * (kvTokenBlock * dBaseSize / 2) : 0U;
+    }
+
+    // K scale 槽内布局 [kvTokenBlock/16][(D/64)*n2Size][32B]，head 按 32B 单元交织；
+    // V scale 槽内布局 [(D/16)*n2Size][kvTokenBlock/64][32B]，head 数据连续。
+    template <bool IsKey>
+    __aicore__ inline uint32_t KvChunkScaleOffset(uint32_t headIdx) const
+    {
+        if constexpr (!MERGE_KV_HEADS) {
+            return 0U;
+        } else {
+            const uint32_t unitsPerHead = IsKey ? (dBaseSize / 64) : (dVBaseSize / 16) * (kvTokenBlock / 64);
+            return headIdx * unitsPerHead * 32U;
+        }
+    }
+
+    __aicore__ inline uint32_t KScaleSrcStride() const
+    {
+        return MERGE_KV_HEADS ? (dBaseSize / 64) * 2U : (dBaseSize / 64);
     }
 
     __aicore__ inline void ComputeBmm1(Mxfp4CubeTask& runInfo, uint32_t slot)
@@ -316,17 +370,23 @@ public:
             qCached_ = true;
         }
         Buffer<BufferType::L1>& keyL1Buffer = l1KVBuffers_.Get(slot);
-        LocalTensor<KV_T> keyL1Tensor = keyL1Buffer.template GetTensor<KV_T>();
-        LocalTensor<SCALE_T> keyScaleL1Tensor = keyL1Buffer.template GetTensor<uint8_t>(s2BaseSize * dBaseSize / 2)
-                          .template ReinterpretCast<SCALE_T>();
+        LocalTensor<uint8_t> keyL1Bytes = keyL1Buffer.template GetTensor<uint8_t>();
         keyL1Buffer.template Wait<HardEvent::MTE2_MTE1>();
         const uint32_t rows = FullCached ? mBaseSize : runInfo.actMSize;
         const uint32_t alignedRows = FullCached ? mBaseSize : runInfo.actMSizeAlign32;
-        const uint32_t tokens = FullCached ? s2BaseSize : runInfo.actSingleLoopS2Size;
-        for (uint32_t subBlockS2Offset = 0; subBlockS2Offset < tokens;
-            subBlockS2Offset += s2SplitSize) {
-            const uint32_t validKvTokenCount = AttentionCommon::Min(s2SplitSize,
-                tokens - subBlockS2Offset);
+        const uint32_t tokens = FullCached ? kvTokenBlock : runInfo.actSingleLoopS2Size;
+        // 合并模式：两个 chunk 分别是同一批 token 的两个 KV head，token 偏移恒为 0。
+        const uint32_t chunkCount = MERGE_KV_HEADS ? 2U : (tokens + s2SplitSize - 1U) / s2SplitSize;
+        for (uint32_t chunk = 0; chunk < chunkCount; ++chunk) {
+            const uint32_t slotOffset = chunk * s2SplitSize;
+            const uint32_t tokenOffset = MERGE_KV_HEADS ? 0U : slotOffset;
+            const uint32_t headIdx = MERGE_KV_HEADS ? chunk : 0U;
+            const uint32_t validKvTokenCount = MERGE_KV_HEADS ? tokens :
+                AttentionCommon::Min(s2SplitSize, tokens - slotOffset);
+            LocalTensor<KV_T> keyL1Tensor =
+                keyL1Bytes[KvChunkPayloadOffset(headIdx)].template ReinterpretCast<KV_T>();
+            LocalTensor<SCALE_T> keyScaleL1Tensor =
+                keyL1Bytes[kvPayloadBytes_ + KvChunkScaleOffset<true>(headIdx)].template ReinterpretCast<SCALE_T>();
             // 三组 Get 同步轮转；只等待本槽的 FIX 完成，不排空另一槽。
             // 因而下一槽的 Mmad 可与本槽的 L0C -> UB Fixpipe 重叠。
             Buffer<BufferType::L0A>& qkLeftL0ABuffer = mm1LeftBuffers_.Get();
@@ -339,16 +399,20 @@ public:
                               .template ReinterpretCast<SCALE_T>();
             if constexpr (USE_DN) {
                 LoadK2L0(qkLeftL0ABuffer.template GetTensor<KV_T>(), keyL1Tensor, keyScaleL1Tensor,
-                    subBlockS2Offset, validKvTokenCount);
+                    tokenOffset, validKvTokenCount);
                 if (!FullCached && queryL0ReadyCount_ < QK_L0_SLOT_COUNT) {
                     LoadQ2L0(qkRightL0BBuffer.template GetTensor<Q_T>(), queryL1Tensor, queryScaleL1Tensor, runInfo);
                 }
             } else {
-                if (!FullCached && queryL0ReadyCount_ < QK_L0_SLOT_COUNT) {
+                if constexpr (MERGE_KV_HEADS) {
+                    // 每个 chunk 只算本 KV head 的 Q part，Mmad 规模与基线单 head 任务一致。
+                    LoadQ2L0(qkLeftL0ABuffer.template GetTensor<Q_T>(), queryL1Tensor, queryScaleL1Tensor,
+                             runInfo, headIdx);
+                } else if (!FullCached && queryL0ReadyCount_ < QK_L0_SLOT_COUNT) {
                     LoadQ2L0(qkLeftL0ABuffer.template GetTensor<Q_T>(), queryL1Tensor, queryScaleL1Tensor, runInfo);
                 }
                 LoadK2L0(qkRightL0BBuffer.template GetTensor<KV_T>(), keyL1Tensor, keyScaleL1Tensor,
-                    subBlockS2Offset, validKvTokenCount);
+                    tokenOffset, validKvTokenCount);
             }
             if (!FullCached && queryL0ReadyCount_ < QK_L0_SLOT_COUNT) {
                 ++queryL0ReadyCount_;
@@ -357,14 +421,20 @@ public:
             qkLeftL0ABuffer.template Wait<HardEvent::MTE1_M>();
             qkResultL0CBuffer.template Wait<HardEvent::FIX_M>();
             MatmulQK(qkResultL0CBuffer.template GetTensor<T>(), qkLeftL0ABuffer.template GetTensor<INPUT_T>(),
-                     qkRightL0BBuffer.template GetTensor<INPUT_T>(), validKvTokenCount, rows);
+                     qkRightL0BBuffer.template GetTensor<INPUT_T>(), validKvTokenCount,
+                     MERGE_KV_HEADS ? mergePartRows : rows);
             qkLeftL0ABuffer.template Set<HardEvent::M_MTE1>();
             qkResultL0CBuffer.template Set<HardEvent::M_FIX>();
             qkResultL0CBuffer.template Wait<HardEvent::M_FIX>();
             const uint32_t scoreSlot = scoreSequence_++ % CrossBufferType::SCORE_SLOT_COUNT;
             crossBuffers_.waitBmm1Buffer(scoreSlot);
-            FixpipeMm1(crossBuffers_.GetBmm1Slot(scoreSlot), qkResultL0CBuffer.template GetTensor<T>(), rows, alignedRows,
-                validKvTokenCount);
+            if constexpr (MERGE_KV_HEADS) {
+                FixpipeMm1Merged(crossBuffers_.GetBmm1Slot(scoreSlot), qkResultL0CBuffer.template GetTensor<T>(),
+                                 runInfo, headIdx, validKvTokenCount);
+            } else {
+                FixpipeMm1(crossBuffers_.GetBmm1Slot(scoreSlot), qkResultL0CBuffer.template GetTensor<T>(), rows,
+                           alignedRows, validKvTokenCount);
+            }
             // Even an AIV with no valid query rows receives and acknowledges this event.
             crossBuffers_.setBmm1Buffer(scoreSlot);
             qkResultL0CBuffer.template Set<HardEvent::FIX_M>();
@@ -391,7 +461,7 @@ public:
         if (!FullTile && (runInfo.actMSize == 0 || runInfo.actSingleLoopS2Size == 0)) {
             return;
         }
-        ASSERT(pvGroupTasks_ < 16);
+        ASSERT(pvGroupTasks_ < PV_TASKS_PER_GROUP);
         const bool isGroupFirst = pvGroupTasks_ == 0;
         const bool isGroupLast = runInfo.isGroupLast || runInfo.isLastS2Loop;
         Buffer<BufferType::L0C>& pvResultL0CBuffer = mm2ResBuffers_.Get();
@@ -400,35 +470,51 @@ public:
             pvResultL0CBuffer.template Wait<HardEvent::FIX_M>();
         }
         Buffer<BufferType::L1>& valueL1Buffer = l1KVBuffers_.Get(slot);
-        LocalTensor<KV_T> valueL1Tensor = valueL1Buffer.template GetTensor<KV_T>();
-        LocalTensor<SCALE_T> valueScaleL1Tensor = valueL1Buffer.template GetTensor<uint8_t>(s2BaseSize * dVBaseSize / 2)
-                          .template ReinterpretCast<SCALE_T>();
+        LocalTensor<uint8_t> valueL1Bytes = valueL1Buffer.template GetTensor<uint8_t>();
         valueL1Buffer.template Wait<HardEvent::MTE2_MTE1>();
         const uint32_t alignedRows = FullTile ? mBaseSize : runInfo.actMSizeAlign32;
-        const uint32_t alignedKvTokenCount = FullTile ? s2BaseSize : (runInfo.actSingleLoopS2Size + 63U) / 64U * 64U;
-        Buffer<BufferType::L0A>& pvLeftL0ABuffer = mm2LeftBuffers_.Get();
-        Buffer<BufferType::L0B, SyncType::NO_SYNC>& pvRightL0BBuffer = mm2RightBuffers_.Get();
-        pvLeftL0ABuffer.template Wait<HardEvent::M_MTE1>();
-        if constexpr (USE_DN) {
-            InitPaddingL0(pvLeftL0ABuffer.template GetTensor<KV_T>(), alignedKvTokenCount);
-            LoadV2L0(pvLeftL0ABuffer.template GetTensor<KV_T>(), valueL1Tensor, valueScaleL1Tensor,
-                alignedKvTokenCount);
-            LoadP2L0(pvRightL0BBuffer.template GetTensor<INPUT_T>(), runInfo.loop % P_SLOT_COUNT, alignedKvTokenCount, alignedRows);
-        } else {
-            LoadP2L0(pvLeftL0ABuffer.template GetTensor<INPUT_T>(), runInfo.loop % P_SLOT_COUNT, alignedKvTokenCount, alignedRows);
-            InitPaddingL0(pvRightL0BBuffer.template GetTensor<KV_T>(), alignedKvTokenCount);
-            LoadV2L0(pvRightL0BBuffer.template GetTensor<KV_T>(), valueL1Tensor, valueScaleL1Tensor,
-                alignedKvTokenCount);
+        const uint32_t tokens = FullTile ? kvTokenBlock : runInfo.actSingleLoopS2Size;
+        // 小 M 配置的 PV 按 128 列分段；合并模式下两段对应两个 KV head 的同一批 token。
+        const uint32_t chunkCount = MERGE_KV_HEADS ? 2U : (tokens + PV_SPLIT_SIZE - 1U) / PV_SPLIT_SIZE;
+        for (uint32_t chunk = 0; chunk < chunkCount; ++chunk) {
+            const uint32_t chunkOffset = chunk * (MERGE_KV_HEADS ? kvTokenBlock : PV_SPLIT_SIZE);
+            const uint32_t tokenOffset = MERGE_KV_HEADS ? 0U : chunkOffset;
+            const uint32_t headIdx = MERGE_KV_HEADS ? chunk : 0U;
+            const uint32_t validKvTokenCount = MERGE_KV_HEADS ? tokens :
+                AttentionCommon::Min(PV_SPLIT_SIZE, tokens - chunkOffset);
+            const uint32_t alignedKvTokenCount = FullTile ? PV_SPLIT_SIZE : (validKvTokenCount + 63U) / 64U * 64U;
+            const bool isFirstChunk = chunk == 0;
+            LocalTensor<KV_T> valueL1Tensor =
+                valueL1Bytes[KvChunkPayloadOffset(headIdx)].template ReinterpretCast<KV_T>();
+            LocalTensor<SCALE_T> valueScaleL1Tensor =
+                valueL1Bytes[kvPayloadBytes_ + KvChunkScaleOffset<false>(headIdx)].template ReinterpretCast<SCALE_T>();
+            Buffer<BufferType::L0A>& pvLeftL0ABuffer = mm2LeftBuffers_.Get();
+            Buffer<BufferType::L0B, SyncType::NO_SYNC>& pvRightL0BBuffer = mm2RightBuffers_.Get();
+            pvLeftL0ABuffer.template Wait<HardEvent::M_MTE1>();
+            if constexpr (USE_DN) {
+                InitPaddingL0(pvLeftL0ABuffer.template GetTensor<KV_T>(), alignedKvTokenCount);
+                LoadV2L0(pvLeftL0ABuffer.template GetTensor<KV_T>(), valueL1Tensor, valueScaleL1Tensor,
+                    alignedKvTokenCount, tokenOffset);
+                LoadP2L0(pvRightL0BBuffer.template GetTensor<INPUT_T>(), runInfo.loop % P_SLOT_COUNT,
+                    alignedKvTokenCount, alignedRows, chunkOffset);
+            } else {
+                LoadP2L0(pvLeftL0ABuffer.template GetTensor<INPUT_T>(), runInfo.loop % P_SLOT_COUNT,
+                    alignedKvTokenCount, alignedRows, chunkOffset);
+                InitPaddingL0(pvRightL0BBuffer.template GetTensor<KV_T>(), alignedKvTokenCount);
+                LoadV2L0(pvRightL0BBuffer.template GetTensor<KV_T>(), valueL1Tensor, valueScaleL1Tensor,
+                    alignedKvTokenCount, tokenOffset);
+            }
+            pvLeftL0ABuffer.template Set<HardEvent::MTE1_M>();
+            pvLeftL0ABuffer.template Wait<HardEvent::MTE1_M>();
+            if (!isGroupFirst || !isFirstChunk) {
+                PipeBarrier<PIPE_M>(); // Accumulation reuses the same L0C matrix.
+            }
+            MatmulPV(pvResultL0CBuffer.template GetTensor<T>(), pvLeftL0ABuffer.template GetTensor<INPUT_T>(),
+                     pvRightL0BBuffer.template GetTensor<INPUT_T>(), alignedKvTokenCount,
+                     isGroupFirst && isFirstChunk, alignedRows);
+            pvLeftL0ABuffer.template Set<HardEvent::M_MTE1>();
         }
         valueL1Buffer.template Set<HardEvent::MTE1_MTE2>();
-        pvLeftL0ABuffer.template Set<HardEvent::MTE1_M>();
-        pvLeftL0ABuffer.template Wait<HardEvent::MTE1_M>();
-        if (!isGroupFirst) {
-            PipeBarrier<PIPE_M>(); // Accumulation reuses the same L0C matrix.
-        }
-        MatmulPV(pvResultL0CBuffer.template GetTensor<T>(), pvLeftL0ABuffer.template GetTensor<INPUT_T>(),
-                 pvRightL0BBuffer.template GetTensor<INPUT_T>(), alignedKvTokenCount, isGroupFirst, runInfo.actMSizeAlign32);
-        pvLeftL0ABuffer.template Set<HardEvent::M_MTE1>();
         ++pvGroupTasks_;
         if (isGroupLast) {
             pvResultL0CBuffer.template Set<HardEvent::M_FIX>();
@@ -467,8 +553,10 @@ public:
         kvL1Buffer.template Wait<HardEvent::MTE1_MTE2>();
         LocalTensor<KV_T> kvL1Tensor = kvL1Buffer.template GetTensor<KV_T>();
         LocalTensor<SCALE_T> kvScaleL1Tensor =
-            kvL1Buffer.template GetTensor<uint8_t>(s2BaseSize * dBaseSize / 2).template ReinterpretCast<SCALE_T>();
-        if (CanCopyFullKvPage() && runInfo.actSingleLoopS2Size == s2BaseSize) {
+            kvL1Buffer.template GetTensor<uint8_t>(kvPayloadBytes_).template ReinterpretCast<SCALE_T>();
+        if constexpr (MERGE_KV_HEADS) {
+            CopyMergedKvBlock<IsKey>(kvL1Tensor, kvScaleL1Tensor, runInfo);
+        } else if (CanCopyFullKvPage() && runInfo.actSingleLoopS2Size == s2BaseSize) {
             CopyFullKvPage<IsKey>(kvL1Tensor, kvScaleL1Tensor, runInfo);
         } else if constexpr (IsKey) {
             CopyKGm2L1(kvL1Tensor, runInfo);
@@ -491,13 +579,13 @@ public:
     // fractals of the head are contiguous in GM and in the destination slot.
     template <typename Strides>
     __aicore__ inline uint64_t FullPageHeadOffset(const Strides& strides, uint32_t unitsPerHead, uint32_t interleavedHeadStride,
-                                                   const Mxfp4CubeTask& runInfo)
+                                                   const Mxfp4CubeTask& runInfo, uint32_t headIdx)
     {
         const uint64_t pageStride = strides.bnStride == 0 ?
             static_cast<uint64_t>(constInfo_.n2Size) * unitsPerHead : strides.bnStride / 2;
         const uint64_t headStride = KvLayoutType == 1 ? interleavedHeadStride :
             (strides.n2Stride == 0 ? unitsPerHead : strides.n2Stride / 2);
-        return static_cast<uint64_t>(runInfo.kvPageIdx[0]) * pageStride + runInfo.n2Idx * headStride;
+        return static_cast<uint64_t>(runInfo.kvPageIdx[0]) * pageStride + headIdx * headStride;
     }
 
     template <bool IsKey>
@@ -507,10 +595,13 @@ public:
         constexpr uint32_t rowBytes = dBaseSize / 2;
         constexpr uint32_t payloadBytes = s2BaseSize * rowBytes;
         constexpr uint32_t scalePairs = s2BaseSize * dBaseSize / 64;
+        // 全 head 搬运从 head 0 起读，行宽覆盖全部 head，使 GM 侧源行连续（srcDValue == dValue）。
+        const uint32_t copyHeads = 1U;
+        const uint32_t firstHead = runInfo.n2Idx;
         const auto& payloadStrides = IsKey ? constInfo_.keyStrides : constInfo_.valueStrides;
         const auto& scaleStrides = IsKey ? constInfo_.kDescaleStrides : constInfo_.vDescaleStrides;
-        auto src = (IsKey ? keyGm_ : valueGm_)[FullPageHeadOffset(payloadStrides, payloadBytes, rowBytes, runInfo)];
-        auto scaleSrc = (IsKey ? keyScaleGm_ : valueScaleGm_)[FullPageHeadOffset(scaleStrides, scalePairs, IsKey ? dBaseSize / 64 : dVBaseSize, runInfo)];
+        auto src = (IsKey ? keyGm_ : valueGm_)[FullPageHeadOffset(payloadStrides, payloadBytes, rowBytes, runInfo, firstHead)];
+        auto scaleSrc = (IsKey ? keyScaleGm_ : valueScaleGm_)[FullPageHeadOffset(scaleStrides, scalePairs, IsKey ? dBaseSize / 64 : dVBaseSize, runInfo, firstHead)];
         auto dst = payload.template ReinterpretCast<uint8_t>();
         auto scaleDst = scale.template ReinterpretCast<uint16_t>();
         if constexpr (KvLayoutType == 3) {
@@ -518,12 +609,12 @@ public:
             DataCopy(scaleDst, scaleSrc, scalePairs);
         } else {
             const uint32_t headCount = KvLayoutType == 1 ? constInfo_.n2Size : 1U;
-            CopyFp4RowsGm2L1(dst, src, s2BaseSize, rowBytes, rowBytes * headCount, s2BaseSize);
+            CopyFp4RowsGm2L1(dst, src, s2BaseSize, rowBytes * copyHeads, rowBytes * headCount, s2BaseSize);
             if constexpr (IsKey) {
                 Dn2NzParams params {};
                 params.dnNum = 1;
                 params.dValue = s2BaseSize;
-                params.nValue = params.dstNzC0Stride = dBaseSize / 64;
+                params.nValue = params.dstNzC0Stride = (dBaseSize / 64) * copyHeads;
                 params.srcDValue = (dBaseSize / 64) * headCount;
                 params.dstNzNStride = 1;
                 DataCopy(scaleDst, scaleSrc, params);
@@ -531,10 +622,100 @@ public:
                 Nd2NzParams params {};
                 params.ndNum = 1;
                 params.nValue = params.dstNzC0Stride = s2BaseSize / 64;
-                params.dValue = dBaseSize;
+                params.dValue = dBaseSize * copyHeads;
                 params.srcDValue = dBaseSize * headCount;
                 params.dstNzNStride = 1;
                 DataCopy(scaleDst, scaleSrc, params);
+            }
+        }
+    }
+
+    // 合并模式：一个 task 读取 kvTokenBlock 个 token 的全部 KV head。BBND 的 GM 行天然
+    // 按 token 交织各 head，整行读入后 srcDValue == dValue，源行连续；L1 槽内 head 连续分段。
+    // page 不是 kvTokenBlock 的整数倍时按页分段搬运，目的行偏移仍按 token 序累加。
+    template <bool IsKey>
+    __aicore__ inline void CopyMergedKvBlock(LocalTensor<KV_T> payload, LocalTensor<SCALE_T> scale,
+                                             Mxfp4CubeTask& runInfo)
+    {
+        constexpr uint32_t headCount = 2U; // 派发条件保证 n2Size == 2
+        constexpr uint32_t rowBytes = dBaseSize / 2;
+        constexpr uint32_t fullRowBytes = rowBytes * headCount;
+        const uint32_t blockSize = constInfo_.blockSize;
+        const uint32_t tokens = runInfo.actSingleLoopS2Size;
+        const auto& payloadStrides = IsKey ? constInfo_.keyStrides : constInfo_.valueStrides;
+        const uint64_t payloadPageStride = payloadStrides.bnStride == 0 ?
+            static_cast<uint64_t>(headCount) * blockSize * rowBytes : payloadStrides.bnStride / 2;
+        auto dst = payload.template ReinterpretCast<uint8_t>();
+        auto scalePairs = scale.template ReinterpretCast<uint16_t>();
+        uint32_t copied = 0;
+        uint32_t pageChunk = 0;
+        while (copied < tokens) {
+            const uint64_t logicalToken = static_cast<uint64_t>(runInfo.s2Idx) + copied;
+            const uint32_t pageOffset = logicalToken & (blockSize - 1U);
+            const uint32_t count = AttentionCommon::Min(tokens - copied, blockSize - pageOffset);
+            const uint64_t page = runInfo.kvPageIdx[pageChunk++];
+            const uint64_t srcOffset = page * payloadPageStride + pageOffset * fullRowBytes;
+            CopyFp4RowsGm2L1(dst[copied * 32U], (IsKey ? keyGm_ : valueGm_)[srcOffset], count, fullRowBytes,
+                             fullRowBytes, kvTokenBlock);
+            copied += count;
+        }
+        if constexpr (IsKey) {
+            constexpr uint32_t fullPairs = (dBaseSize / 64) * headCount;
+            const uint64_t pagePairStride = constInfo_.kDescaleStrides.bnStride == 0 ?
+                static_cast<uint64_t>(headCount) * blockSize * (dBaseSize / 64) :
+                constInfo_.kDescaleStrides.bnStride / 2;
+            Dn2NzParams params {};
+            params.dnNum = 1;
+            params.nValue = params.dstNzC0Stride = fullPairs;
+            params.srcDValue = fullPairs;
+            params.dstNzNStride = 1;
+            copied = 0;
+            pageChunk = 0;
+            while (copied < tokens) {
+                const uint64_t logicalToken = static_cast<uint64_t>(runInfo.s2Idx) + copied;
+                const uint32_t pageOffset = logicalToken & (blockSize - 1U);
+                const uint32_t count = AttentionCommon::Min(tokens - copied, blockSize - pageOffset);
+                const uint64_t page = runInfo.kvPageIdx[pageChunk++];
+                params.dValue = count;
+                DataCopy<uint16_t>(scalePairs[copied * fullPairs],
+                    keyScaleGm_[page * pagePairStride + pageOffset * fullPairs], params);
+                copied += count;
+            }
+        } else {
+            constexpr uint32_t fullPairs = dVBaseSize * headCount;
+            const uint32_t groupsPerPage = blockSize / MXFP_DIVISOR_SIZE;
+            const uint32_t groupCount = (tokens + 63U) / MXFP_DIVISOR_SIZE;
+            const uint64_t pagePairStride = constInfo_.vDescaleStrides.bnStride == 0 ?
+                static_cast<uint64_t>(headCount) * groupsPerPage * dVBaseSize :
+                constInfo_.vDescaleStrides.bnStride / 2;
+            Nd2NzParams params {};
+            params.ndNum = 1;
+            params.dValue = fullPairs;
+            params.srcDValue = fullPairs;
+            params.dstNzC0Stride = kvTokenBlock / MXFP_DIVISOR_SIZE;
+            params.dstNzNStride = 1;
+            uint32_t copiedGroups = 0;
+            pageChunk = 0;
+            while (copiedGroups < groupCount) {
+                const uint64_t logicalGroup = static_cast<uint64_t>(runInfo.s2Idx) / MXFP_DIVISOR_SIZE + copiedGroups;
+                const uint32_t pageOffset = logicalGroup & (groupsPerPage - 1U);
+                const uint32_t count = AttentionCommon::Min(groupCount - copiedGroups, groupsPerPage - pageOffset);
+                const uint64_t page = runInfo.kvPageIdx[pageChunk++];
+                params.nValue = count;
+                DataCopy<uint16_t>(scalePairs[copiedGroups * 16U],
+                    valueScaleGm_[page * pagePairStride + pageOffset * fullPairs], params);
+                copiedGroups += count;
+            }
+            // PV 归约轴按 64 token 对齐；槽复用时清零两个 head 的无效 V 行。
+            const uint32_t aligned = groupCount * MXFP_DIVISOR_SIZE;
+            if (aligned != tokens) {
+                InitConstValueParams<uint16_t> fillParams(1, static_cast<uint16_t>(aligned - tokens), 0, 0);
+                for (uint32_t head = 0; head < headCount; ++head) {
+                    for (uint32_t channelBlock = 0; channelBlock < dVBaseSize / 64U; ++channelBlock) {
+                        Fill(dst[KvChunkPayloadOffset(head) + (channelBlock * kvTokenBlock + tokens) * 32U]
+                             .template ReinterpretCast<uint16_t>(), fillParams);
+                    }
+                }
             }
         }
     }
@@ -601,6 +782,33 @@ public:
         Mmad(pvResultL0CTensor, pvLeftL0ATensor, pvRightL0BTensor, pvMmadParams);
     }
 
+    // 合并模式：L0C 是本 part 的 [mBaseSize/2, ChunkN]，而 score UB 必须保持自然行序
+    // （token-major、head-minor）。按 token 逐段 Fixpipe，每段 gSize 行，落到对应 AIV 的局部行。
+    __aicore__ inline void FixpipeMm1Merged(const LocalTensor<float>& scoreUbTensor,
+        const LocalTensor<T>& scoreL0CTensor, const Mxfp4CubeTask& runInfo, uint32_t headIdx,
+        uint32_t validKvTokenCount)
+    {
+        const uint32_t gSize = constInfo_.gSize;
+        const uint32_t tokenCount = runInfo.actMSize / constInfo_.realGSize;
+        const uint32_t rowsPerAiv = runInfo.actMSizeAlign32 / CV_RATIO;
+        for (uint32_t token = 0; token < tokenCount; ++token) {
+            const uint32_t naturalRow = token * constInfo_.realGSize + headIdx * gSize;
+            FixpipeParamsC310<CO2Layout::ROW_MAJOR> params {};
+            params.mSize = gSize;
+            params.nSize = (validKvTokenCount + 7U) / 8U * 8U;
+            params.srcStride = mergePartRows;
+            params.dstStride = s2SplitSize;
+            params.dualDstCtl = 0;
+            params.subBlockId = naturalRow / rowsPerAiv;
+            params.quantPre = QuantMode_t::NoQuant;
+            params.params.ndNum = 1;
+            // 每个 KV head 独占一个 score 槽（chunk 与 head 一一对应）。
+            Fixpipe<float, T, FIXPIPE_CONFIG>(
+                scoreUbTensor[(naturalRow % rowsPerAiv) * s2SplitSize],
+                scoreL0CTensor[token * gSize * 16U], params);
+        }
+    }
+
     __aicore__ inline void FixpipeMm1(const LocalTensor<float>& scoreUbTensor, const LocalTensor<T>& scoreL0CTensor,
                                      uint32_t rows, uint32_t alignedRows, uint32_t validKvTokenCount)
     {
@@ -663,16 +871,22 @@ public:
     }
 
     __aicore__ inline void LoadQ2L0(const LocalTensor<Q_T>& queryL0Tensor, const LocalTensor<Q_T>& queryL1Tensor,
-                                   const LocalTensor<SCALE_T>& queryScaleL1Tensor, Mxfp4CubeTask& runInfo)
+                                   const LocalTensor<SCALE_T>& queryScaleL1Tensor, Mxfp4CubeTask& runInfo,
+                                   uint32_t partIdx = 0U)
     {
+        // 合并模式下 L1 Q tile 为 part-major：part p 占 [p*mBaseSize/2, ...) 行，
+        // 每个 part 的 GM scale 是一段连续行，可一次 Dn2Nz 落入对齐的完整 fractal。
+        const uint32_t partRows = MERGE_KV_HEADS ? mergePartRows : runInfo.actMSizeAlign32;
         LoadData2DParamsV2 queryLoadParams {};
-        queryLoadParams.mStep = (!USE_DN && !ENABLE_QF322F32_PRE) ?
-            runInfo.actMSizeAlign32 / 16U : (runInfo.actMSize + 15U) / 16U;
+        queryLoadParams.mStartPosition = MERGE_KV_HEADS ? partIdx * mergePartRows / 16U : 0U;
+        queryLoadParams.mStep = (MERGE_KV_HEADS || (!USE_DN && !ENABLE_QF322F32_PRE)) ?
+            partRows / 16U : (runInfo.actMSize + 15U) / 16U;
         queryLoadParams.kStep = dBaseSize / 64;
         queryLoadParams.srcStride = runInfo.actMSizeAlign32 / 16;
         queryLoadParams.dstStride = queryLoadParams.mStep;
         queryLoadParams.ifTranspose = false;
         LoadData2DMxParams queryScaleLoadParams {};
+        queryScaleLoadParams.xStartPosition = queryLoadParams.mStartPosition;
         queryScaleLoadParams.xStep = queryLoadParams.mStep;
         queryScaleLoadParams.yStep = dBaseSize / 64;
         queryScaleLoadParams.srcStride = queryScaleLoadParams.yStep;
@@ -688,28 +902,30 @@ public:
         keyLoadParams.mStartPosition = subBlockS2Offset / 16;
         keyLoadParams.mStep = (validKvTokenCount + 15U) / 16U;
         keyLoadParams.kStep = dBaseSize / 64;
-        keyLoadParams.srcStride = s2BaseSize / 16;
+        keyLoadParams.srcStride = kvTokenBlock / 16;
         keyLoadParams.dstStride = keyLoadParams.mStep;
         keyLoadParams.ifTranspose = false;
         LoadData2DMxParams keyScaleLoadParams {};
         keyScaleLoadParams.xStartPosition = subBlockS2Offset / 16;
         keyScaleLoadParams.xStep = keyLoadParams.mStep;
         keyScaleLoadParams.yStep = dBaseSize / 64;
-        keyScaleLoadParams.srcStride = keyScaleLoadParams.yStep;
+        keyScaleLoadParams.srcStride = KScaleSrcStride();
         keyScaleLoadParams.dstStride = keyScaleLoadParams.yStep;
         LoadData(keyL0Tensor, keyL1Tensor, keyScaleL1Tensor, keyLoadParams, keyScaleLoadParams);
     }
 
     __aicore__ inline void LoadP2L0(const LocalTensor<INPUT_T>& probabilityL0Tensor, uint32_t probabilitySlot,
-        uint32_t alignedKvTokenCount, uint32_t alignedQueryRows)
+        uint32_t alignedKvTokenCount, uint32_t alignedQueryRows, uint32_t chunkOffset)
     {
         LoadData2DParamsV2 probabilityLoadParams {};
+        probabilityLoadParams.kStartPosition = chunkOffset / 64;
         probabilityLoadParams.mStep = USE_DN ? alignedKvTokenCount / 16 : alignedQueryRows / 16;
         probabilityLoadParams.kStep = USE_DN ? mBaseSize / 64 : alignedKvTokenCount / 64;
         probabilityLoadParams.srcStride = USE_DN ? s2BaseSize / 16 : mBaseSize / 16;
         probabilityLoadParams.dstStride = USE_DN ? mBaseSize / 16 : alignedQueryRows / 16;
         probabilityLoadParams.ifTranspose = USE_DN;
         LoadData2DMxParams probabilityScaleLoadParams {};
+        probabilityScaleLoadParams.yStartPosition = chunkOffset / 64;
         probabilityScaleLoadParams.xStep = USE_DN ? mBaseSize / 16 : alignedQueryRows / 16;
         probabilityScaleLoadParams.yStep = alignedKvTokenCount / 64;
         probabilityScaleLoadParams.srcStride = s2BaseSize / 64 + 1;
@@ -720,18 +936,21 @@ public:
     }
 
     __aicore__ inline void LoadV2L0(const LocalTensor<KV_T>& valueL0Tensor, const LocalTensor<KV_T>& valueL1Tensor,
-                                   const LocalTensor<SCALE_T>& valueScaleL1Tensor, uint32_t alignedKvTokenCount)
+                                   const LocalTensor<SCALE_T>& valueScaleL1Tensor, uint32_t alignedKvTokenCount,
+                                   uint32_t chunkOffset)
     {
         LoadData2DParamsV2 valueLoadParams {};
+        valueLoadParams.mStartPosition = chunkOffset / 16;
         valueLoadParams.mStep = alignedKvTokenCount / 16;
         valueLoadParams.kStep = dVBaseSize / 64;
-        valueLoadParams.srcStride = s2BaseSize / 16;
+        valueLoadParams.srcStride = kvTokenBlock / 16;
         valueLoadParams.dstStride = (dVBaseSize + 16) / 16;
         valueLoadParams.ifTranspose = true;
         LoadData2DMxParams valueScaleLoadParams {};
+        valueScaleLoadParams.yStartPosition = chunkOffset / 64;
         valueScaleLoadParams.xStep = dVBaseSize / 16;
         valueScaleLoadParams.yStep = alignedKvTokenCount / 64;
-        valueScaleLoadParams.srcStride = s2BaseSize / 64;
+        valueScaleLoadParams.srcStride = kvTokenBlock / 64;
         valueScaleLoadParams.dstStride = alignedKvTokenCount / 64;
         LoadData(valueL0Tensor, valueL1Tensor, valueScaleL1Tensor, valueLoadParams, valueScaleLoadParams);
     }
@@ -797,6 +1016,25 @@ public:
         const uint32_t firstGroupHead = runInfo.gS1Idx % groupSize;
         uint64_t queryGmByteOffset = (batchTokenBase + runInfo.gS1Idx / groupSize) * tokenByteStride +
             (static_cast<uint64_t>(runInfo.realN2Idx) * groupSize + firstGroupHead) * queryRowBytes;
+        if constexpr (MERGE_KV_HEADS) {
+            // part-major：part p 的 mBaseSize/2 行是 [token][gSize 个 head]，GM 中每 token 一段连续行。
+            const uint32_t tokenCount = runInfo.actMSize / groupSize;
+            Nd2NzParams mergedParams {};
+            mergedParams.ndNum = tokenCount;
+            mergedParams.nValue = constInfo_.gSize;
+            mergedParams.dValue = queryRowBytes;
+            mergedParams.srcDValue = queryRowBytes;
+            mergedParams.srcNdMatrixStride = static_cast<uint16_t>(tokenByteStride);
+            mergedParams.dstNzC0Stride = runInfo.actMSizeAlign32;
+            mergedParams.dstNzNStride = 1;
+            mergedParams.dstNzMatrixStride = constInfo_.gSize * 32U;
+            for (uint32_t part = 0; part < constInfo_.n2Size; ++part) {
+                const uint64_t partOffset = (batchTokenBase + runInfo.gS1Idx / groupSize) * tokenByteStride +
+                    static_cast<uint64_t>(part) * constInfo_.gSize * queryRowBytes;
+                DataCopy<uint8_t>(queryL1Bytes[part * mergePartRows * 32U], queryGm_[partOffset], mergedParams);
+            }
+            return;
+        }
         uint32_t copiedRows = 0;
         uint32_t remainingQueryRows = runInfo.actMSize;
         // 只有一个 KV head 时，GM 中 T、G 本来就是连续的。
@@ -860,6 +1098,30 @@ public:
 
         LocalTensor<uint16_t> queryScaleL1Pairs = queryScaleL1Tensor.template ReinterpretCast<uint16_t>();
         constexpr uint32_t scalePairsPerQueryRow = dBaseSize / MXFP_DIVISOR_SIZE;
+        if constexpr (MERGE_KV_HEADS) {
+            // GM 仍是 [n2Size, T, gSize, D/64, 2]，而合并后 M 行为 token-major/head-minor：
+            // 一个 token 的 realGSize 行 scale 由 n2Size 段各 gSize 行组成，分别写入 16 lane 的前后半。
+            const uint32_t gSize = constInfo_.gSize;
+            const uint64_t tSize = qSeqParserPtr_->GetTSize();
+            const uint64_t tokenBase = qSeqParserPtr_->GetTBase(runInfo.bIdx) +
+                runInfo.gS1Idx / constInfo_.realGSize;
+            const uint32_t tokenCount = runInfo.actMSize / constInfo_.realGSize;
+            Dn2NzParams mergedParams {};
+            mergedParams.dnNum = 1;
+            mergedParams.dValue = tokenCount * gSize;
+            mergedParams.nValue = mergedParams.dstNzC0Stride = scalePairsPerQueryRow;
+            mergedParams.srcDValue = scalePairsPerQueryRow;
+            mergedParams.dstNzNStride = 1;
+            // part p 的 scale 占 L1 的 [p*mergePartRows/16, ...) 个 16 行 fractal，目的地址 32B 对齐。
+            const uint32_t partScalePairs = (mergePartRows / 16U) * scalePairsPerQueryRow * 16U;
+            for (uint32_t part = 0; part < constInfo_.n2Size; ++part) {
+                const uint64_t gmPairOffset = (static_cast<uint64_t>(part) * tSize + tokenBase) *
+                    gSize * scalePairsPerQueryRow;
+                DataCopy<uint16_t>(queryScaleL1Pairs[part * partScalePairs], queryScaleGm_[gmPairOffset],
+                                   mergedParams);
+            }
+            return;
+        }
         const uint32_t groupSize = constInfo_.realGSize;
         const uint64_t queryHeadCount = static_cast<uint64_t>(constInfo_.realN2Size) * groupSize;
         const uint64_t batchTokenBase = qSeqParserPtr_->GetTBase(runInfo.bIdx);
@@ -913,13 +1175,13 @@ public:
                 payloadCopyParams.blockCount = payloadRowBytes / 32U;
                 payloadCopyParams.blockLen = pageTokenCount;
                 payloadCopyParams.srcStride = blockSize - pageTokenCount;
-                payloadCopyParams.dstStride = s2BaseSize - pageTokenCount;
+                payloadCopyParams.dstStride = kvTokenBlock - pageTokenCount;
                 DataCopy<uint8_t>(kvPayloadL1Tensor[copiedTokenCount * 32U],
                     kvPayloadGmTensor[payloadGmByteOffset + pageTokenOffset * 32U], payloadCopyParams);
             } else {
                 const uint64_t sourceOffset = payloadGmByteOffset + pageTokenOffset * tokenByteStride;
                 CopyFp4RowsGm2L1(kvPayloadL1Tensor[copiedTokenCount * 32U], kvPayloadGmTensor[sourceOffset],
-                    pageTokenCount, payloadRowBytes, tokenByteStride, s2BaseSize);
+                    pageTokenCount, payloadRowBytes, tokenByteStride, kvTokenBlock);
             }
             copiedTokenCount += pageTokenCount;
         }
@@ -993,7 +1255,7 @@ public:
         if (paddingTokenCount != 0) {
             InitConstValueParams<uint16_t> paddingFillParams(1, static_cast<uint16_t>(paddingTokenCount), 0, 0);
             for (uint32_t valueChannelBlock = 0; valueChannelBlock < dVBaseSize / 64U; ++valueChannelBlock) {
-                LocalTensor<uint16_t> valuePaddingL1Tensor = valueL1Bytes[(valueChannelBlock * s2BaseSize +
+                LocalTensor<uint16_t> valuePaddingL1Tensor = valueL1Bytes[(valueChannelBlock * kvTokenBlock +
                     validKvTokenCount) * 32U].template ReinterpretCast<uint16_t>();
                 Fill(valuePaddingL1Tensor, paddingFillParams);
             }
@@ -1018,7 +1280,7 @@ public:
         Nd2NzParams valueScaleCopyParams {};
         valueScaleCopyParams.ndNum = 1;
         valueScaleCopyParams.dValue = dVBaseSize;
-        valueScaleCopyParams.dstNzC0Stride = s2BaseSize / MXFP_DIVISOR_SIZE;
+        valueScaleCopyParams.dstNzC0Stride = kvTokenBlock / MXFP_DIVISOR_SIZE;
         valueScaleCopyParams.dstNzNStride = 1;
         uint32_t copiedScaleGroupCount = 0;
         uint32_t pageChunk = 0; // 页序号：与 runInfo.kvPageIdx 的缓存序一致
@@ -1036,7 +1298,7 @@ public:
                 valueScaleDirectCopyParams.blockCount = dVBaseSize / 16U;
                 valueScaleDirectCopyParams.blockLen = pageScaleGroupCount;
                 valueScaleDirectCopyParams.srcStride = scaleGroupsPerPage - pageScaleGroupCount;
-                valueScaleDirectCopyParams.dstStride = s2BaseSize / MXFP_DIVISOR_SIZE - pageScaleGroupCount;
+                valueScaleDirectCopyParams.dstStride = kvTokenBlock / MXFP_DIVISOR_SIZE - pageScaleGroupCount;
                 DataCopy<uint16_t>(valueScaleL1Pairs[copiedScaleGroupCount * 16U],
                     valueScaleGm_[valueScaleGmPairOffset + pageScaleGroupOffset * 16U], valueScaleDirectCopyParams);
             } else {
@@ -1067,7 +1329,7 @@ template <typename INPUT_T, typename T, LayOutTypeEnum layout = LayOutTypeEnum::
           S2TemplateType s2TemplateType = S2TemplateType::Aligned128,
           DTemplateType dTemplateType = DTemplateType::Aligned128,
           DTemplateType dVTemplateType = DTemplateType::Aligned128, uint8_t KvLayoutType = 0, bool useDn = false,
-          bool enableQf322F32Pre = false>
+          bool enableQf322F32Pre = false, bool mergeKvHeads = false>
 class QuantFlashAttnBlockCubeMxfp4Dummy {
 public:
     static constexpr bool ENABLE_QF322F32_PRE = enableQf322F32Pre;
@@ -1078,6 +1340,9 @@ public:
     static constexpr LayOutTypeEnum LAYOUT = layout;
     static constexpr bool PAGE_ATTENTION = KvLayoutType > 0;
     static constexpr bool USE_DN = useDn;
+    static constexpr bool MERGE_KV_HEADS = mergeKvHeads && !useDn && KvLayoutType == 1;
+    static constexpr uint8_t KV_LAYOUT_TYPE = KvLayoutType;
+    static constexpr uint32_t kvTokenBlock = MERGE_KV_HEADS ? s2BaseSize / 2U : s2BaseSize;
     using Q_T = INPUT_T;
     using KV_T = INPUT_T;
     using MM_T = T;

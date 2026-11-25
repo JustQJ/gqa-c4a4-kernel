@@ -1,0 +1,265 @@
+{
+  "metrics": "Default",
+  "reports": [
+    {
+      "directory": "OPPROF_20261124145513_TVIVBPTJBLDHBLPC/QuantFlashAttn_e5a61b92b2c210e175653ef9f7f65b6b_93324546_mix_aic/0",
+      "basic_csv": "OPPROF_20261124145513_TVIVBPTJBLDHBLPC/QuantFlashAttn_e5a61b92b2c210e175653ef9f7f65b6b_93324546_mix_aic/0/OpBasicInfo_20261124145538194.csv",
+      "target_rows": 1,
+      "task_duration_us": [
+        288.563995
+      ],
+      "metric_rows": {
+        "ArithmeticUtilization": 84,
+        "L2Cache": 84,
+        "Memory": 84,
+        "MemoryL0": 84,
+        "MemoryUB": 84,
+        "PipeUtilization": 84,
+        "ResourceConflictRatio": 84
+      }
+    },
+    {
+      "directory": "OPPROF_20261124145513_TVIVBPTJBLDHBLPC/QuantFlashAttn_e5a61b92b2c210e175653ef9f7f65b6b_93324546_mix_aic/1",
+      "basic_csv": "OPPROF_20261124145513_TVIVBPTJBLDHBLPC/QuantFlashAttn_e5a61b92b2c210e175653ef9f7f65b6b_93324546_mix_aic/1/OpBasicInfo_20261124145538410.csv",
+      "target_rows": 1,
+      "task_duration_us": [
+        287.272003
+      ],
+      "metric_rows": {
+        "ArithmeticUtilization": 84,
+        "L2Cache": 84,
+        "Memory": 84,
+        "MemoryL0": 84,
+        "MemoryUB": 84,
+        "PipeUtilization": 84,
+        "ResourceConflictRatio": 84
+      }
+    },
+    {
+      "directory": "OPPROF_20261124145513_TVIVBPTJBLDHBLPC/QuantFlashAttn_e5a61b92b2c210e175653ef9f7f65b6b_93324546_mix_aic/2",
+      "basic_csv": "OPPROF_20261124145513_TVIVBPTJBLDHBLPC/QuantFlashAttn_e5a61b92b2c210e175653ef9f7f65b6b_93324546_mix_aic/2/OpBasicInfo_20261124145538600.csv",
+      "target_rows": 1,
+      "task_duration_us": [
+        285.588989
+      ],
+      "metric_rows": {
+        "ArithmeticUtilization": 84,
+        "L2Cache": 84,
+        "Memory": 84,
+        "MemoryL0": 84,
+        "MemoryUB": 84,
+        "PipeUtilization": 84,
+        "ResourceConflictRatio": 84
+      }
+    },
+    {
+      "directory": "OPPROF_20261124145513_TVIVBPTJBLDHBLPC/QuantFlashAttn_e5a61b92b2c210e175653ef9f7f65b6b_93324546_mix_aic/3",
+      "basic_csv": "OPPROF_20261124145513_TVIVBPTJBLDHBLPC/QuantFlashAttn_e5a61b92b2c210e175653ef9f7f65b6b_93324546_mix_aic/3/OpBasicInfo_20261124145538786.csv",
+      "target_rows": 1,
+      "task_duration_us": [
+        289.936981
+      ],
+      "metric_rows": {
+        "ArithmeticUtilization": 84,
+        "L2Cache": 84,
+        "Memory": 84,
+        "MemoryL0": 84,
+        "MemoryUB": 84,
+        "PipeUtilization": 84,
+        "ResourceConflictRatio": 84
+      }
+    },
+    {
+      "directory": "OPPROF_20261124145513_TVIVBPTJBLDHBLPC/QuantFlashAttn_e5a61b92b2c210e175653ef9f7f65b6b_93324546_mix_aic/4",
+      "basic_csv": "OPPROF_20261124145513_TVIVBPTJBLDHBLPC/QuantFlashAttn_e5a61b92b2c210e175653ef9f7f65b6b_93324546_mix_aic/4/OpBasicInfo_20261124145538991.csv",
+      "target_rows": 1,
+      "task_duration_us": [
+        288.270996
+      ],
+      "metric_rows": {
+        "ArithmeticUtilization": 84,
+        "L2Cache": 84,
+        "Memory": 84,
+        "MemoryL0": 84,
+        "MemoryUB": 84,
+        "PipeUtilization": 84,
+        "ResourceConflictRatio": 84
+      }
+    }
+  ],
+  "data_loss_warnings": [],
+  "collection_status": "validated",
+  "capture_scope": "mstx_range",
+  "profiler": "op",
+  "backend": "c4",
+  "quant_mode": 5,
+  "p_scale": null,
+  "mstx_range": "C4A4_PROFILE",
+  "case": {
+    "name": "manual",
+    "B": 32,
+    "N_q": 16,
+    "N_kv": 2,
+    "D": 256,
+    "page": 128,
+    "mask_mode": 3,
+    "q_scale_layout": "N2TGD",
+    "cu_seqlens_q": [
+      0,
+      4,
+      8,
+      12,
+      16,
+      20,
+      24,
+      28,
+      32,
+      36,
+      40,
+      44,
+      48,
+      52,
+      56,
+      60,
+      64,
+      68,
+      72,
+      76,
+      80,
+      84,
+      88,
+      92,
+      96,
+      100,
+      104,
+      108,
+      112,
+      116,
+      120,
+      124,
+      128
+    ],
+    "seqused_q": [
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4
+    ],
+    "seqused_kv": [
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288,
+      12288
+    ],
+    "softmax_scale": 0.0625,
+    "enable_lse": false,
+    "quant_schema": 2,
+    "seed": 421,
+    "c8_p_scale": 448.0,
+    "kv_cache_num_blocks": null
+  },
+  "case_fingerprint": "d0d855cef64add4bd4e412d22e084b341bb6ea13e1af13862e73d02edd0862c8",
+  "input_sha256": "48bb9c7025c493dbcd37004f7c67beab2cd6b217213f0455537c903d7753e1a1",
+  "input_shapes": {
+    "q": [
+      128,
+      16,
+      128
+    ],
+    "k": [
+      3075,
+      128,
+      2,
+      128
+    ],
+    "v": [
+      3075,
+      128,
+      2,
+      128
+    ],
+    "qs": [
+      2,
+      128,
+      8,
+      4,
+      2
+    ],
+    "ks": [
+      3075,
+      128,
+      2,
+      4,
+      2
+    ],
+    "vs": [
+      3075,
+      2,
+      2,
+      256,
+      2
+    ],
+    "table": [
+      32,
+      96
+    ]
+  },
+  "input_policy": "manual_accuracy_generator",
+  "allocated_after_release_bytes": 0
+}

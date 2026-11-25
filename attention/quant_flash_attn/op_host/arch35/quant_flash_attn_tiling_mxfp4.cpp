@@ -151,6 +151,17 @@ void QuantFlashAttnTilingMxfp4Impl::SplitPolicy()
                                            qfaInfo_->winRight, static_cast<uint32_t>(qfaInfo_->qLayout),
                                            static_cast<uint32_t>(qfaInfo_->quantMode), sOuterFactor_, sInnerFactor_);
     CalcNumBlocks(platformInfo_.aicNum);
+    // 同页双 KV head 块对角合并：PA_BBND 下 C4 单 head 行只有 128B，填不满 256B 的 GM 取回
+    // 粒度，一半字节被丢弃。一个 task 覆盖同页两个 KV head 的同一批 token 后行连续、粒度
+    // 填满，DRAM 流量减半。kvTokenBlock=128 与基线每 head 的 token 块一致，故 task 数减半、
+    // V2/Pscale 总行数不变；用专用 Config 6 让 kernel 编译期区分合并语义。
+    mergeKvHeads_ = decodeS1GMerge_ && qfaInfo_->pageAttentionFlag &&
+                    qfaInfo_->kvLayout == QfaLayout::PA_BBND && qfaInfo_->n2Size == 2 &&
+                    qfaInfo_->qkHeadDim == DSIZE_256 && qfaInfo_->vHeadDim == DSIZE_256;
+    if (mergeKvHeads_) {
+        sOuterFactor_ = 32;  // cvRatio=2 后 mBaseSize=64，M 轴展开全部 N_q 个 Q head
+        sInnerFactor_ = 256; // score 宽度 = kvTokenBlock(128) * n2Size
+    }
     flashDecodeFlag_ = true;
 }
 
@@ -173,7 +184,10 @@ void QuantFlashAttnTilingMxfp4Impl::UpdateTilingKeyConfig()
         dVsize = DSIZE_256;
     }
 
-    if (sOuter == SOUTER_128 && sInner == SINNER_128 && dSize == DSIZE_256 && dVsize == DSIZE_256) {
+    if (mergeKvHeads_ && sOuter == 64 && sInner == 256 && dSize == DSIZE_256 &&
+        dVsize == DSIZE_256) {
+        tilingKeyInfo_.config = Config_MergeKvHeads_S1Aligned64_S2Aligned256_DAligned256_DVAligned256;
+    } else if (sOuter == SOUTER_128 && sInner == SINNER_128 && dSize == DSIZE_256 && dVsize == DSIZE_256) {
         tilingKeyInfo_.config = Config_S1Aligned128_S2Aligned128_DAligned256_DVAligned256;
     } else {
         tilingKeyInfo_.config = Config_S1Aligned128_S2Aligned256_DAligned128_DVAligned128;

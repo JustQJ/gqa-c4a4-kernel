@@ -33,12 +33,30 @@ def decode_sections(metadata, params):
     if len(meta) < 16:
         raise ValueError('C4 metadata header is missing')
     sections, is_fd, m_base, task_n, cores = meta[:5]
-    if sections < 1 or cores < 1 or m_base != 128 or task_n != (128 if p['D'] == 256 else 256):
+    expected_task_n = 128 if p['D'] == 256 else 256
+    real_group = p['N_q']//p['N_kv']
+    # 同页双 KV head 块对角合并：header 的 task_n 是 score 宽度（= 每 head token 块 * N_kv），
+    # 调度上 kvHeadNum=1、group=N_q；M 为 64，每 head token 块 = task_n//N_kv。
+    merge = (p['q_scale_layout'] == 'N2TGD' and p['kv_cache_layout'] == 'PA_BBND'
+             and p['D'] == 256 and p['N_kv'] == 2 and real_group % 4 == 0
+             and m_base == 64 and task_n == 256)
+    if merge:
+        head_num, group, group_tasks = 1, p['N_q'], 16
+        task_n = task_n // p['N_kv']
+    else:
+        head_num = p['N_kv'] if p['q_scale_layout'] == 'N2TGD' else p['N_q']
+        group = p['N_q']//head_num
+        is_m64 = m_base == 64 and p['D'] == 256 and task_n == 256 and p['q_scale_layout'] == 'N2TGD'
+        is_m32 = (m_base == 32 and p['D'] == 256 and task_n == 128 and p['q_scale_layout'] == 'N2TGD'
+                  and p['max_seqlen_q'] * group <= 32)
+        is_small_m = is_m64 or is_m32
+        group_tasks = 20 if is_m64 else 16
+        if sections < 1 or cores < 1 or not is_small_m and (m_base != 128 or task_n != expected_task_n):
+            raise ValueError(f'Unsupported C4 metadata header: {meta[:5]}')
+    if sections < 1 or cores < 1:
         raise ValueError(f'Unsupported C4 metadata header: {meta[:5]}')
     if len(meta) < 16 + sections*cores*16:
         raise ValueError('C4 metadata FA records are truncated')
-    head_num = p['N_kv'] if p['q_scale_layout'] == 'N2TGD' else p['N_q']
-    group = p['N_q']//head_num
     qs, ks = effective_lengths(p), p['seqused_kv']
     counts = [(q*group+m_base-1)//m_base for q in qs]
     ranges = []
@@ -90,7 +108,7 @@ def decode_sections(metadata, params):
             if current != expected:
                 raise ValueError(f'Incomplete C4 segments: bn={bn}, mi={mi}, {current}!={expected}')
     return dict(m_base=m_base, task_n=task_n, head_num=head_num, group=group,
-                segments=segments, is_fd=bool(is_fd))
+                group_tasks=group_tasks, segments=segments, is_fd=bool(is_fd), merge_kv_heads=merge)
 
 
 def iter_tiles(params, schedule):

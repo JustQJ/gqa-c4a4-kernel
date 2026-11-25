@@ -67,6 +67,7 @@ private:
     bool seqUsedQFlag_ = false;
     bool seqUsedKvFlag_ = false;
     bool decodeS1GMerge_ = false;
+    bool mergeKvHeads_ = false;
     uint64_t tilingKey_ = 0;
     uint64_t workspaceSize_ = 0;
     ScheduleMode scheduleMode_ = ScheduleMode::BATCH_MODE;

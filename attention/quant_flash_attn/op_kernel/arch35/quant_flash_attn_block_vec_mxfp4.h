@@ -30,7 +30,8 @@ template <typename INPUT_T, typename T, typename OUTPUT_T, LayOutTypeEnum layout
           DTemplateType dTemplateType = DTemplateType::Aligned128,
           DTemplateType dVTemplateType = DTemplateType::Aligned128, bool hasAtten = false, uint8_t KvLayoutType = 0,
           bool isFd = false, bool useDn = false, bool isDAligned = true,
-          QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT, bool enableQf322F32Pre = false>
+          QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT, bool enableQf322F32Pre = false,
+          bool mergeKvHeads = false>
 class QuantFlashAttnBlockVecMxfp4 {
 public:
     static constexpr uint32_t mBaseSize = static_cast<uint32_t>(s1TemplateType);
@@ -38,7 +39,16 @@ public:
     static constexpr uint32_t dBaseSize = static_cast<uint32_t>(dTemplateType);
     static constexpr uint32_t dVBaseSize = static_cast<uint32_t>(dVTemplateType);
     static constexpr uint32_t PRELOAD_N = 20;
-    static constexpr uint32_t TASKS_PER_GROUP = 16;
+    static constexpr bool M64_CONFIG = mBaseSize == 64 && dBaseSize == 256 && s2BaseSize == 256;
+    static constexpr bool SMALL_M_CONFIG =
+        M64_CONFIG || (mBaseSize == 32 && dBaseSize == 256 && s2BaseSize == 128);
+    static constexpr bool SMALL_M_ND = !useDn && SMALL_M_CONFIG;
+    // 与 Cube 完全一致的块对角合并开关；派发条件保证 n2Size == 2、形状 M128/N128/D256。
+    static constexpr bool MERGE_KV_HEADS = mergeKvHeads && !useDn && KvLayoutType == 1;
+    static constexpr uint32_t kvTokenBlock = MERGE_KV_HEADS ? s2BaseSize / 2U : s2BaseSize;
+    static constexpr uint32_t TASKS_PER_GROUP = MXFP4_TASK_GROUP_N;
+    // M32 的 C2/V2 退休更慢，L1 P 与每 task 统计槽扩到两倍 C1/C2 延迟窗口，避免第 20 个 task 复用未退休槽。
+    static constexpr uint32_t TASK_GROUP_SLOTS = (mBaseSize == 32 && dBaseSize == 256 && s2BaseSize == 128) ? 40U : PRELOAD_N;
     // Retire C2/V2 before issuing V1: at most one live group per in-flight task.
     static constexpr uint32_t GROUP_MAX_SLOTS = PRELOAD_N;
     static constexpr uint32_t VEC_ROWS = 64;
@@ -47,7 +57,7 @@ public:
     static constexpr uint32_t P_PACK_BYTES = VEC_ROWS * s2BaseSize / 2;
     static constexpr uint32_t TASK_GROUP_MAX_ELEMENTS = VEC_ROWS * s2BaseSize / 32;
     static constexpr uint32_t LOCAL_PSCALE_BYTES = VEC_ROWS / 16 * (s2BaseSize / 64 + 1) * 32;
-    static constexpr bool REUSE_PV_OUTPUT = dBaseSize == 256;
+    static constexpr bool REUSE_PV_OUTPUT = dBaseSize == 256 && !SMALL_M_CONFIG;
     static constexpr uint32_t OUTPUT_SCRATCH_BYTES = 64 * 256 * sizeof(bfloat16_t);
     static constexpr uint32_t STATISTICS_BYTES = VEC_ROWS * 8 * sizeof(float);
     static constexpr bool HAS_MASK = hasAtten;
@@ -58,9 +68,9 @@ public:
                   QUANT_SCHEMA == QuantSchema::CX_DELTA_QUANT, "Unsupported MXFP4 P quantization schema");
     static constexpr bool ENABLE_QF322F32_PRE = enableQf322F32Pre;
     static constexpr ActualSeqLensMode Q_MODE = GetQActSeqMode<layout>();
-    static_assert(mBaseSize == 128 && dBaseSize == dVBaseSize &&
-        ((dBaseSize == 128 && s2BaseSize == 256) || (dBaseSize == 256 && s2BaseSize == 128)),
-        "MXFP4 Vector 只支持 M128/D128/N256 和 M128/D256/N128");
+    static_assert((mBaseSize == 128 && dBaseSize == dVBaseSize &&
+        ((dBaseSize == 128 && s2BaseSize == 256) || (dBaseSize == 256 && s2BaseSize == 128))) || SMALL_M_CONFIG,
+        "MXFP4 Vector 只支持 M128、M64/N256/D256 或 M32/N128/D256");
     static_assert(layout == LayOutTypeEnum::LAYOUT_TND, "MXFP4 首版只支持 TND Q");
     static_assert(outLayout == LayOutTypeEnum::LAYOUT_TND || outLayout == LayOutTypeEnum::LAYOUT_NTD,
         "MXFP4 输出布局必须为 TND 或 NTD");
@@ -71,7 +81,7 @@ public:
     using MM2_OUT_T = T;
     using ConstInfoX = ConstInfo_t;
     using QSeqParserType = ActualSeqLensParser<Q_MODE, int32_t, true>;
-    using CrossBufferType = CVCrossBuffer<PRELOAD_N, USE_DN, s1TemplateType, s2TemplateType,
+    using CrossBufferType = CVCrossBuffer<TASK_GROUP_SLOTS, USE_DN, s1TemplateType, s2TemplateType,
                                         dTemplateType, dVTemplateType>;
     GlobalTensor<OUTPUT_T> attentionOutGm_;
     GlobalTensor<float> softmaxLseGm_;
@@ -139,7 +149,7 @@ public:
         // FD must never touch score: AIC may issue the next section's C1 during FD.
         tPipe_->InitBuffer(historyOBuf_, VEC_ROWS * dVBaseSize * sizeof(float));
         tPipe_->InitBuffer(globalRowSum_, VEC_ROWS * sizeof(float));
-        tPipe_->InitBuffer(taskGroupMax_, TASK_GROUP_MAX_ELEMENTS * PRELOAD_N * sizeof(float));
+        tPipe_->InitBuffer(taskGroupMax_, TASK_GROUP_MAX_ELEMENTS * TASK_GROUP_SLOTS * sizeof(float));
         tPipe_->InitBuffer(globalCurrentMax_, GROUP_MAX_SLOTS * VEC_ROWS * sizeof(float));
         tPipe_->InitBuffer(globalOldMax_, VEC_ROWS * sizeof(float));
         tPipe_->InitBuffer(alphaUpdate_, GROUP_MAX_SLOTS * VEC_ROWS * sizeof(float));
@@ -160,7 +170,7 @@ public:
     static __aicore__ inline constexpr uint32_t GetPersistUbSize()
     {
         return VEC_ROWS * dVBaseSize * sizeof(float) + 2 * VEC_ROWS * sizeof(float) +
-            TASK_GROUP_MAX_ELEMENTS * PRELOAD_N * sizeof(float) +
+            TASK_GROUP_MAX_ELEMENTS * TASK_GROUP_SLOTS * sizeof(float) +
             2 * GROUP_MAX_SLOTS * VEC_ROWS * sizeof(float) + 512 + P_SLOT_COUNT * P_PACK_BYTES;
     }
 
@@ -220,7 +230,7 @@ public:
         if (runInfo.actMSize == 0 || runInfo.actSingleLoopS2Size == 0) {
             return;
         }
-        const uint32_t taskSlot = runInfo.loop % PRELOAD_N;
+        const uint32_t taskSlot = runInfo.loop % TASK_GROUP_SLOTS;
         const uint32_t probabilitySlot = runInfo.loop % P_SLOT_COUNT;
         const uint32_t firstRow = constInfo_.subBlockIdx * GetAivRowCapacity(runInfo);
         const uint32_t validRows = GetValidQueryRows(runInfo);
@@ -234,19 +244,26 @@ public:
         Duplicate<uint32_t>(packedQuantP.ReinterpretCast<uint32_t>(), 0, P_PACK_BYTES / sizeof(uint32_t));
         Duplicate<float>(taskExponent, Mxfp4Api::INVALID_GROUP_EXPONENT, TASK_GROUP_MAX_ELEMENTS);
         PipeBarrier<PIPE_V>();
-        for (uint32_t chunkOffset = 0; chunkOffset < runInfo.actSingleLoopS2Size; chunkOffset += s2SplitSize) {
+        // 合并模式：两个 chunk 分别是同一批 token 的两个 KV head，KV 起点不随 chunk 前移。
+        const uint32_t chunkCount = MERGE_KV_HEADS ? 2U :
+            (runInfo.actSingleLoopS2Size + s2SplitSize - 1U) / s2SplitSize;
+        for (uint32_t chunk = 0; chunk < chunkCount; ++chunk) {
+            const uint32_t chunkOffset = chunk * s2SplitSize;
             const uint32_t scoreSlot = scoreSequence_++ % CrossBufferType::SCORE_SLOT_COUNT;
             crossBuffers_.waitBmm1Buffer(scoreSlot);
             if (validRows != 0) {
                 Mxfp4Api::SoftmaxFp32Mxfp4Params params {};
                 params.validRows = validRows;
-                params.validN = AttentionCommon::Min(s2SplitSize, runInfo.actSingleLoopS2Size - chunkOffset);
+                params.validN = MERGE_KV_HEADS ? runInfo.actSingleLoopS2Size :
+                    AttentionCommon::Min(s2SplitSize, runInfo.actSingleLoopS2Size - chunkOffset);
                 params.s2Offset = chunkOffset;
                 params.qGs1Start = static_cast<uint64_t>(runInfo.gS1Idx) + firstRow;
                 params.qGroupSize = USE_DN ? 1U : constInfo_.realGSize;
-                params.kvStart = static_cast<uint64_t>(runInfo.s2Idx) + chunkOffset;
+                params.kvStart = static_cast<uint64_t>(runInfo.s2Idx) + (MERGE_KV_HEADS ? 0U : chunkOffset);
                 params.causalOffset = runInfo.causalOffset;
                 params.scoreScale = constInfo_.scaleValue;
+                params.mergeHeadIdx = MERGE_KV_HEADS ? chunk : Mxfp4Api::NO_MERGE_HEAD;
+                params.realGroupSize = constInfo_.gSize;
                 LocalTensor<float> score = crossBuffers_.GetBmm1Slot(scoreSlot);
                 if constexpr (USE_DN) {
                     if (ENABLE_QF322F32_PRE && CrossBufferType::CanScaleInFixpipe(params.scoreScale)) {
@@ -258,10 +275,12 @@ public:
                     }
                 } else {
                     if (ENABLE_QF322F32_PRE && CrossBufferType::CanScaleInFixpipe(params.scoreScale)) {
-                        Mxfp4Api::SoftmaxNdChunkFp32<s2SplitSize, s2BaseSize, HAS_MASK, QUANT_SCHEMA, true>(
+                        Mxfp4Api::SoftmaxNdChunkFp32<s2SplitSize, s2BaseSize, HAS_MASK, QUANT_SCHEMA, true,
+                                                     MERGE_KV_HEADS>(
                             packedQuantP, taskExponent, groupMaximum, score, byteIndices, halfwordIndices, params);
                     } else {
-                        Mxfp4Api::SoftmaxNdChunkFp32<s2SplitSize, s2BaseSize, HAS_MASK, QUANT_SCHEMA, false>(
+                        Mxfp4Api::SoftmaxNdChunkFp32<s2SplitSize, s2BaseSize, HAS_MASK, QUANT_SCHEMA, false,
+                                                     MERGE_KV_HEADS>(
                             packedQuantP, taskExponent, groupMaximum, score, byteIndices, halfwordIndices, params);
                     }
                 }
@@ -285,9 +304,9 @@ public:
         LocalTensor<float> reference = globalCurrentMax_.Get<float>()[groupSlot * VEC_ROWS];
         LocalTensor<float> previousReference = globalOldMax_.Get<float>();
         LocalTensor<float> multiplier = alphaUpdate_.Get<float>()[groupSlot * VEC_ROWS];
-        const uint32_t firstTaskSlot = owner.firstTaskLoop % PRELOAD_N;
+        const uint32_t firstTaskSlot = owner.firstTaskLoop % TASK_GROUP_SLOTS;
         const uint16_t firstTaskCount = static_cast<uint16_t>(
-            owner.taskCount < PRELOAD_N - firstTaskSlot ? owner.taskCount : PRELOAD_N - firstTaskSlot);
+            owner.taskCount < TASK_GROUP_SLOTS - firstTaskSlot ? owner.taskCount : TASK_GROUP_SLOTS - firstTaskSlot);
         const uint16_t secondTaskCount = static_cast<uint16_t>(owner.taskCount - firstTaskCount);
         LocalTensor<float> firstTaskExponent = taskGroupMax_.Get<float>()[
             firstTaskSlot * TASK_GROUP_MAX_ELEMENTS];
@@ -608,9 +627,11 @@ template <typename INPUT_T, typename T, typename OUTPUT_T, LayOutTypeEnum layout
           DTemplateType dTemplateType = DTemplateType::Aligned128,
           DTemplateType dVTemplateType = DTemplateType::Aligned128, bool hasAtten = false, uint8_t KvLayoutType = 0,
           bool isFd = false, bool useDn = false, bool isDAligned = true,
-          QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT, bool enableQf322F32Pre = false>
+          QuantSchema QUANT_SCHEMA = QuantSchema::CX_DELTA_QUANT, bool enableQf322F32Pre = false,
+          bool mergeKvHeads = false>
 class QuantFlashAttnBlockVecMxfp4Dummy {
 public:
+    static constexpr bool MERGE_KV_HEADS = mergeKvHeads && !useDn && KvLayoutType == 1;
     static constexpr QuantSchema QUANT_SCHEMA_VALUE = QUANT_SCHEMA;
     static constexpr bool ENABLE_QF322F32_PRE = enableQf322F32Pre;
     static constexpr bool HAS_MASK = hasAtten;

@@ -314,11 +314,22 @@ bool QuantFlashAttnMetadataCpuKernel::ParamsInit()
             optiling::quant_flash_attn::qfa_tiling_util::LAYOUT_BSND, static_cast<uint32_t>(quantMode_), sOuterFactor,
             sInnerFactor);
     }
+    // 与 arch35 tiling 一致的同页双 KV head 块对角合并派发条件：KV head 不再是独立任务轴，
+    // kernel 侧 mBaseSize=64、s2BaseSize=256，kvTokenBlock = s2BaseSize/2 = 128。
+    const bool mergeKvHeads = isMxfp4Decode && quantMode_ == 5 && layoutKv_ == "PA_BBND" &&
+                              numHeadsKv_ == 2 && headDim_ == 256 && headDimV_ == 256 &&
+                              socVersion_.find("Ascend960") == std::string::npos;
+    if (mergeKvHeads) {
+        sOuterFactor = 32;  // CV_RATIO=2 后 mBaseSize_ = 64
+        sInnerFactor = 128; // 每 head 的 token 块（调度用）
+        baseInfo.kvHeadNum = 1;
+    }
     mBaseSize_ = sOuterFactor;
-    s2BaseSize_ = sInnerFactor;
+    // header 的 s2 字段写 score 宽度，便于下游区分合并（256）与基线（128）。
+    s2BaseSize_ = sInnerFactor * (mergeKvHeads ? 2U : 1U);
     mBaseSize_ = mBaseSize_ * (aivCoreNum_ / aicCoreNum_);
     param.mBaseSize = mBaseSize_;
-    param.s2BaseSize = s2BaseSize_;
+    param.s2BaseSize = sInnerFactor;
     if ((quantMode_ == 1 || quantMode_ == 5) &&
         socVersion_.find("Ascend960") == std::string::npos) { // 仅 MXFP8/MXFP4 在支持 FlashDecode 的平台开启 FD
         param.l2Byte = 96U * 1024U * 1024U;                   // 96: 96MB, 1024: Mb2Kb, 1024:Kb2Mb
