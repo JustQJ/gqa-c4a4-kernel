@@ -1,0 +1,56 @@
+......Fatal Python error: Segmentation fault
+
+Current thread 0x00007830c18fe640 (most recent call first):
+  File "/home/k831/perf-opt/bbnd-python/cann_ops_transformer_qfa_bbnd_copy/utils/arg_check.py", line 524 in wrapper
+  File "/home/k831/perf-opt/bbnd-python/cann_ops_transformer_qfa_bbnd_copy/ops/attention/quant_flash_attn/quant_flash_attn.py", line 625 in quant_flash_attn
+  File "/home/k831/venv/lib/python3.12/site-packages/torch/_ops.py", line 1209 in __call__
+  File "/home/k831/perf-opt/candidate-src/attention/quant_flash_attn/tests/pytest/qfa_mxfp4_test/common/quant_flash_attn_golden.py", line 221 in invoke_operator
+  File "/home/k831/perf-opt/candidate-src/attention/quant_flash_attn/tests/pytest/qfa_mxfp4_test/common/quant_flash_attn_golden.py", line 234 in npu_mxfp4_fa
+  File "/home/k831/perf-opt/candidate-src/attention/quant_flash_attn/tests/pytest/qfa_mxfp4_test/common/test_runner.py", line 107 in execute_test
+  File "/usr/local/python3.12.16/lib/python3.12/concurrent/futures/thread.py", line 59 in run
+  File "/usr/local/python3.12.16/lib/python3.12/concurrent/futures/thread.py", line 93 in _worker
+  File "/usr/local/python3.12.16/lib/python3.12/threading.py", line 1012 in run
+  File "/usr/local/python3.12.16/lib/python3.12/threading.py", line 1075 in _bootstrap_inner
+  File "/usr/local/python3.12.16/lib/python3.12/threading.py", line 1032 in _bootstrap
+
+Thread 0x00007832917c3740 (most recent call first):
+  File "/usr/local/python3.12.16/lib/python3.12/threading.py", line 355 in wait
+  File "/usr/local/python3.12.16/lib/python3.12/concurrent/futures/_base.py", line 451 in result
+  File "/home/k831/perf-opt/candidate-src/attention/quant_flash_attn/tests/pytest/qfa_mxfp4_test/test_quant_flash_attn_func_rdv.py", line 25 in test_quant_flash_attn_mxfp4
+  File "/home/k831/perf-opt/bbnd-python/_pytest/python.py", line 157 in pytest_pyfunc_call
+  File "/home/k831/perf-opt/bbnd-python/pluggy/_execution.py", line 147 in _multicall
+  File "/home/k831/perf-opt/bbnd-python/pluggy/_manager.py", line 183 in _hookexec
+  File "/home/k831/perf-opt/bbnd-python/pluggy/_caller.py", line 197 in __call__
+  File "/home/k831/perf-opt/bbnd-python/_pytest/python.py", line 1671 in runtest
+  File "/home/k831/perf-opt/bbnd-python/_pytest/runner.py", line 178 in pytest_runtest_call
+  File "/home/k831/perf-opt/bbnd-python/pluggy/_execution.py", line 147 in _multicall
+  File "/home/k831/perf-opt/bbnd-python/pluggy/_manager.py", line 183 in _hookexec
+  File "/home/k831/perf-opt/bbnd-python/pluggy/_caller.py", line 197 in __call__
+  File "/home/k831/perf-opt/bbnd-python/_pytest/runner.py", line 246 in <lambda>
+  File "/home/k831/perf-opt/bbnd-python/_pytest/runner.py", line 344 in from_call
+  File "/home/k831/perf-opt/bbnd-python/_pytest/runner.py", line 245 in call_and_report
+  File "/home/k831/perf-opt/bbnd-python/_pytest/runner.py", line 136 in runtestprotocol
+  File "/home/k831/perf-opt/bbnd-python/_pytest/runner.py", line 117 in pytest_runtest_protocol
+  File "/home/k831/perf-opt/bbnd-python/pluggy/_execution.py", line 147 in _multicall
+  File "/home/k831/perf-opt/bbnd-python/pluggy/_manager.py", line 183 in _hookexec
+  File "/home/k831/perf-opt/bbnd-python/pluggy/_caller.py", line 197 in __call__
+  File "/home/k831/perf-opt/bbnd-python/_pytest/main.py", line 367 in pytest_runtestloop
+  File "/home/k831/perf-opt/bbnd-python/pluggy/_execution.py", line 147 in _multicall
+  File "/home/k831/perf-opt/bbnd-python/pluggy/_manager.py", line 183 in _hookexec
+  File "/home/k831/perf-opt/bbnd-python/pluggy/_caller.py", line 197 in __call__
+  File "/home/k831/perf-opt/bbnd-python/_pytest/main.py", line 343 in _main
+  File "/home/k831/perf-opt/bbnd-python/_pytest/main.py", line 289 in wrap_session
+  File "/home/k831/perf-opt/bbnd-python/_pytest/main.py", line 336 in pytest_cmdline_main
+  File "/home/k831/perf-opt/bbnd-python/pluggy/_execution.py", line 147 in _multicall
+  File "/home/k831/perf-opt/bbnd-python/pluggy/_manager.py", line 183 in _hookexec
+  File "/home/k831/perf-opt/bbnd-python/pluggy/_caller.py", line 197 in __call__
+  File "/home/k831/perf-opt/bbnd-python/_pytest/config/__init__.py", line 175 in main
+  File "/home/k831/perf-opt/bbnd-python/_pytest/config/__init__.py", line 201 in console_main
+  File "/home/k831/perf-opt/bbnd-python/pytest/__main__.py", line 9 in <module>
+  File "<frozen runpy>", line 88 in _run_code
+  File "<frozen runpy>", line 198 in _run_module_as_main
+
+Extension modules: numpy.core._multiarray_umath, numpy.core._multiarray_tests, numpy.linalg._umath_linalg, numpy.fft._pocketfft_internal, numpy.random._common, numpy.random.bit_generator, numpy.random._bounded_integers, numpy.random._mt19937, numpy.random.mtrand, numpy.random._philox, numpy.random._pcg64, numpy.random._sfc64, numpy.random._generator, torch._C, torch._C._dynamo.autograd_compiler, torch._C._dynamo.eval_frame, torch._C._dynamo.guards, torch._C._dynamo.utils, torch._C._fft, torch._C._linalg, torch._C._nested, torch._C._nn, torch._C._sparse, torch._C._special, torch_npu._C (total: 25)
+timeout: the monitored command dumped core
+run-acc.sh: line 5: 190704 Segmentation fault      timeout 5400 python -m pytest qfa_mxfp4_test -q -m func_rdv --device-id 7 --package cann_ops_transformer_qfa_bbnd_copy --cache-dir /home/k831/perf-opt/cache-$TAG "$@"
+PYTEST_EXIT=139

@@ -457,3 +457,41 @@ rowBase += carry * rowPeriod;
 decode_1/2/3 的 C8/C4 达到 1.69 / 1.76 / 1.42，绝对耗时相对基线降低 16%～43%；decode 几何均值 1.39（基线 1.11）。三布局精度各 12 例全通过，DN prefill 路径未派发合并、无回归。
 
 遗留：decode_4（单核约 24 task，刚越过 `PRELOAD_N`，且 `kvHeadNum` 减半使均衡粒度变粗）仍退化约 15%。下一步是**按单核 task 数分档回退基线**，但判据依赖真实 `seqused_kv` 分布，只有 AICPU metadata 侧可得，需要先把分档决策统一到 metadata 再驱动 host 选 tiling key。
+
+## 12. 分档设计的两条硬约束（2026-11-25 实测确立）
+
+对应测试报告第 12 章。本节记录做分档前必须满足的两个约束，供后续实现参考。
+
+### 12.1 判据必须是二维的：task 数 + M 行
+
+合并后单核 task 数少并不必然意味着净退化。反例 decode_3：
+
+| 用例 | 合并 task/核 | 基线单 task M 行 | 合并比值 | 基线比值 |
+| --- | ---: | ---: | ---: | ---: |
+| decode_3 | **12.0** | **8** | **1.4211** | 1.1900 |
+| decode_4 | 24.7 | 32 | 0.8945 | 1.0360 |
+
+decode_3 的 task 数比 decode_4 更少却达标：`seqQ=1` 使 M 行仅 8，单 task 计算量极小、纯 DRAM 受限，C1/C2 爬坡的**绝对时间**也短。爬坡开销只在 M 行占满、计算足以与搬运竞争时才吃掉 DRAM 收益。
+
+因此判据为：
+
+```
+派发合并 ⟺ (合并后单核 task 数 >= 2 * PRELOAD_N) 或 (基线单 task M 行 <= 16)
+```
+
+离线用四用例实测比值验证：一维阈值（≥40 或 ≥30）会把 decode_3 一起回退，几何均值反降至 **1.3833**；二维判据达 **1.4460**。
+
+### 12.2 host tiling 不得解引用 GetData()
+
+`gert::Tensor::GetData<T>()` 返回**设备地址**。host 侧只能用它做 null 判断（区分静态/动态编译），**不能读取内容**。违反此约定会在算子调用内段错误（`PYTEST_EXIT=139`），且只在进入该分支的布局上崩溃，容易误判为 kernel 问题。
+
+推论：**分档所需的真实 `seqused_kv` 分布在 host 侧不可得**。而静态可见量（`B`、`max_seqlen_q`、`max_seqlen_kv`）不足以判档——长尾 batch 会把 `maxKV` 拉高（decode_4 均值 2618 而 maxKV 16409，偏斜 6.27），使其 task 数上界 152.0 与 decode_1 的 163.4 无法区分。
+
+AICPU metadata 可读真实数据，但其决策写在设备内存中，host 读不到；metadata 的 shape 由调用方按 `16 + (aicNum+aivNum)*16*batch*numHeadsKv` 预分配，不随分档变化，也不能用作传信通道。而 host 与 metadata 的分块必须完全一致（否则 AIC/AIV 调度不匹配立即死锁）。
+
+**故分档必须先改调度接口**，让 metadata 的分档决策能驱动 host 选 tiling key。可选方向：
+1. 新增 host 可见的分档输入（如把档位作为标量属性传入）；
+2. 约定 metadata 的 shape 编码档位，host 据 shape 反推；
+3. 由上层框架在调用前完成分档并分别传入 `max_seqlen_kv` 等属性。
+
+三者都属跨算子接口变更，需同步修改 metadata 算子、host tiling、调用方与 pytest golden。
