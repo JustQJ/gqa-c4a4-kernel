@@ -34,6 +34,10 @@ constexpr uint32_t HEAD_M_BASE_SIZE_INDEX = 2U;
 constexpr uint32_t HEAD_S2_BASE_SIZE_INDEX = 3U;
 constexpr uint32_t HEAD_AIC_NUM_INDEX = 4U;
 constexpr uint32_t HEAD_AIV_NUM_INDEX = 5U;
+// 流水节奏参数：0 表示让 kernel 用编译期默认值（GROUP_N=16 / PRELOAD_N=20）。
+// 只有 AICPU 能看到真实 seqused_kv 分布，故由它按单核 task 数决定并下发。
+constexpr uint32_t HEAD_GROUP_N_INDEX = 6U;
+constexpr uint32_t HEAD_PRELOAD_N_INDEX = 7U;
 constexpr uint32_t HEAD_NEED_INIT_OUTPUT_INDEX = 15U;
 
 constexpr uint32_t FA_BN_START_INDEX = 0U;

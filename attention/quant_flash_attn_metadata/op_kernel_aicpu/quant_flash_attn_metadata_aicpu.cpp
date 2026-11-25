@@ -322,6 +322,7 @@ bool QuantFlashAttnMetadataCpuKernel::ParamsInit()
     const bool mergeKvHeads = isMxfp4Decode && quantMode_ == 5 && layoutKv_ == "PA_BBND" &&
                               numHeadsKv_ == 2 && headDim_ == 256 && headDimV_ == 256 && mergeGroupAligned &&
                               socVersion_.find("Ascend960") == std::string::npos;
+    mergeKvHeads_ = mergeKvHeads;
     if (mergeKvHeads) {
         sOuterFactor = 32;  // CV_RATIO=2 后 mBaseSize_ = 64
         sInnerFactor = 128; // 每 head 的 token 块（调度用）
@@ -1121,6 +1122,36 @@ void QuantFlashAttnMetadataCpuKernel::SetMetadataHead(const SectionStreamKResult
     faMetadata.SetHeadMedata(optiling::HEAD_AIC_NUM_INDEX, static_cast<uint32_t>(aicCoreNum_));
     faMetadata.SetHeadMedata(optiling::HEAD_AIV_NUM_INDEX, static_cast<uint32_t>(aivCoreNum_));
     faMetadata.SetHeadMedata(optiling::HEAD_NEED_INIT_OUTPUT_INDEX, needInitOutput_ ? 1U : 0U);
+    SetPipelineRhythm(splitRes, faMetadata);
+}
+
+// 按单核 task 数选 C1/C2 流水节奏。总 tick 数约为 task 数 + PRELOAD_N，短尾形状里排空段占比
+// 很高（decode_4 约 24 task/核，PRELOAD_N=20 时排空占 45%），缩小 PRELOAD_N 直接减少总 tick。
+// 约束仍是 GROUP_N + DELAY_P_SCALE_N(3) <= PRELOAD_N，否则组 Pscale 发布晚于 Cube 首个 C2 而互等。
+// 只在合并路径上生效；其余路径写 0，kernel 用编译期默认值，行为与优化前一致。
+void QuantFlashAttnMetadataCpuKernel::SetPipelineRhythm(const SectionStreamKResult& splitRes,
+                                                        optiling::detail::FaMetaData& faMetadata)
+{
+    uint32_t groupN = 0U;
+    uint32_t preloadN = 0U;
+    if (mergeKvHeads_) {
+        uint32_t maxCoreBlock = 0U;
+        for (uint32_t sectionId = 0; sectionId < splitRes.sectionNum; ++sectionId) {
+            maxCoreBlock = std::max(maxCoreBlock, splitRes.sectionFaResult[sectionId].maxCoreBlock);
+        }
+        // 长尾形状保持深流水（已实测最优）；短尾按 task 数缩短排空段。
+        if (maxCoreBlock > 0U && maxCoreBlock < 40U) {
+            if (maxCoreBlock >= 20U) {
+                groupN = 8U;
+                preloadN = 11U;
+            } else {
+                groupN = 4U;
+                preloadN = 7U;
+            }
+        }
+    }
+    faMetadata.SetHeadMedata(optiling::HEAD_GROUP_N_INDEX, groupN);
+    faMetadata.SetHeadMedata(optiling::HEAD_PRELOAD_N_INDEX, preloadN);
 }
 
 void QuantFlashAttnMetadataCpuKernel::SetMetadataFa(const SectionStreamKResult& splitRes,

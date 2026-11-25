@@ -25,6 +25,9 @@ static constexpr uint32_t METADATA_HEADER_OFFSET = METADATA_STRIDE * sizeof(uint
 constexpr uint32_t METADATA_HEADER_SECTION_NUM_INDEX = 0;
 constexpr uint32_t METADATA_HEADER_AIC_NUM_INDEX = 4;
 constexpr uint32_t METADATA_HEADER_AIV_NUM_INDEX = 5;
+// 流水节奏参数，0 表示用编译期默认值；与 AICPU quant_flash_attn_metadata.h 保持一致
+constexpr uint32_t METADATA_HEADER_GROUP_N_INDEX = 6;
+constexpr uint32_t METADATA_HEADER_PRELOAD_N_INDEX = 7;
 
 constexpr uint32_t QFA_BN2_START_INDEX = 0;
 constexpr uint32_t QFA_M_START_INDEX = 1;

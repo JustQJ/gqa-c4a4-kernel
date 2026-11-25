@@ -57,6 +57,10 @@ def decode_sections(metadata, params):
             raise ValueError(f'Unsupported C4 metadata header: {meta[:5]}')
     if sections < 1 or cores < 1:
         raise ValueError(f'Unsupported C4 metadata header: {meta[:5]}')
+    # header[6] 是 AICPU 按真实单核 task 数下发的组大小，0 表示用默认值。
+    # 组边界决定 C2 累积与 V2/Pscale 的分段，参考侧必须跟随，不能写死。
+    if len(meta) > 6 and 0 < meta[6] <= group_tasks:
+        group_tasks = meta[6]
     if len(meta) < 16 + sections*cores*16:
         raise ValueError('C4 metadata FA records are truncated')
     qs, ks = effective_lengths(p), p['seqused_kv']

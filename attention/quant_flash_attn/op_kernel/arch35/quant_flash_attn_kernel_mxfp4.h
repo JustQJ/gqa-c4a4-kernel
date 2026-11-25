@@ -62,7 +62,9 @@ public:
     static_assert(CubeBlockType::ENABLE_QF322F32_PRE == VecFaBlockType::ENABLE_QF322F32_PRE,
                   "MXFP4 Cube and Vector must agree on MM1 Fixpipe scaling");
 
-    static constexpr uint32_t PRELOAD_N = 20; // C2落后C1 20 轮
+    // PRELOAD_N / GROUP_N 是编译期上界，决定缓冲区槽数；实际节奏由 preloadN_ / groupN_
+    // 在 Init 时从 metadata header 读取（AICPU 按真实单核 task 数下发），只会取更小的值。
+    static constexpr uint32_t PRELOAD_N = 20; // C2落后C1 最多 20 轮
     static constexpr bool M64_CONFIG = mBaseSize == 64 && dBaseSize == 256 && s2BaseSize == 256;
     static constexpr bool SMALL_M_CONFIG =
         M64_CONFIG || (mBaseSize == 32 && dBaseSize == 256 && s2BaseSize == 128);
@@ -76,10 +78,11 @@ public:
     // KV lookahead 预取：全部布局（BBND/BNBD/NZ）、DN/ND、D128/D256 生效。创建指针领先
     // 执行 LEAD 个 tick：K 在创建时发射（提前 LEAD 拍），V 在 Bmm2 消费前 LEAD 拍发射；
     // 每流在途 (LEAD+1) 个槽（K 奇数槽、V 偶数槽，槽号 = 2*(taskLoop % (LEAD+1)) (+1 for K)）。
-    // 任务环 live set 为 [t-20, t+LEAD]，大小 PRELOAD_N+1+LEAD。
+    // 任务环 live set 为 [t-preloadN_, t+LEAD]，按上界分配 PRELOAD_N+1+LEAD 个槽。
     static constexpr uint32_t KV_PREFETCH_LEAD = 1U;
     static constexpr uint32_t KV_STREAM_SLOTS = KV_PREFETCH_LEAD + 1U; // 每流槽数
     static constexpr uint32_t PRELOAD_TASK_CACHE_SIZE = PRELOAD_N + 1U + KV_PREFETCH_LEAD;
+    // 编译期上界必须自洽；运行时下发值在 InitPipelineRhythm 里按同一约束校验。
     static_assert(GROUP_N + DELAY_P_SCALE_N <= PRELOAD_N,
                   "Pscale of a group must be published before Cube's first C2 of that group");
 
@@ -134,6 +137,10 @@ public:
     uint32_t sectionNum_; // 总的section数
     uint32_t metadataAicNum_; // metadata 为每个 section 存放的 AIC 记录数，用于定位 FA 记录
     uint32_t metadataAivNum_; // metadata 为每个 section 存放的 AIV 记录数，用于定位 FD 记录
+    // 流水节奏：由 AICPU 按真实单核 task 数下发，0 表示用编译期默认值。
+    // 缓冲区一律按编译期上界（GROUP_N / PRELOAD_N）静态分配，运行时只取更小的值，故不需要扩容。
+    uint32_t groupN_ = GROUP_N;
+    uint32_t preloadN_ = PRELOAD_N;
     // fa metadata，基本块的范围，表示起点和终点
     uint32_t bN2Start_;
     uint32_t bN2End_;
@@ -201,6 +208,7 @@ public:
         sectionNum_ = ((__gm__ uint32_t*)metadata)[METADATA_HEADER_SECTION_NUM_INDEX];
         metadataAicNum_ = ((__gm__ uint32_t*)metadata)[METADATA_HEADER_AIC_NUM_INDEX];
         metadataAivNum_ = ((__gm__ uint32_t*)metadata)[METADATA_HEADER_AIV_NUM_INDEX];
+        InitPipelineRhythm(metadata);
 
         faMetaDataGm_.SetGlobalBuffer((__gm__ uint32_t*)(metadata + METADATA_HEADER_OFFSET),
                                       sectionNum_ * metadataAicNum_ * METADATA_STRIDE);
@@ -388,6 +396,20 @@ public:
         DispatchRows();
     }
 
+    // AICPU 依真实 seqused_kv 分布下发流水节奏；缺省或非法值一律回退编译期默认，
+    // 保证与旧 metadata 兼容。上界仍是编译期常量，缓冲区尺寸不受影响。
+    __aicore__ inline void InitPipelineRhythm(__gm__ uint8_t* metadata)
+    {
+        const uint32_t g = ((__gm__ uint32_t*)metadata)[METADATA_HEADER_GROUP_N_INDEX];
+        const uint32_t p = ((__gm__ uint32_t*)metadata)[METADATA_HEADER_PRELOAD_N_INDEX];
+        if (g != 0U && g <= GROUP_N) {
+            groupN_ = g;
+        }
+        if (p != 0U && p <= PRELOAD_N && p >= groupN_ + DELAY_P_SCALE_N) {
+            preloadN_ = p;
+        }
+    }
+
     // Both cores enumerate the same rows and task numbers. The task type selects the
     // descriptor fields and the pipeline at compile time.
     template <typename Task = CoreTask>
@@ -430,6 +452,8 @@ public:
                 }
             }
 
+            // 组内计数用比较推进，避免在任务创建热循环里出现运行时除数的取模。
+            uint32_t groupTaskCount = 0U;
             for (; s2 < curS2End_; ++s2) {
                 Task& task = tasks[created % PRELOAD_TASK_CACHE_SIZE];
                 task.loop = created;
@@ -442,7 +466,11 @@ public:
                 task.actSingleLoopS2Size = AttentionCommon::Min(static_cast<uint64_t>(kvTokenBlock),
                     actSeqLensKv_ - task.s2Idx);
                 task.isLastS2Loop = s2 + 1U == curS2End_;
-                task.isGroupLast = task.isLastS2Loop || (s2 - curS2Start_ + 1U) % GROUP_N == 0U;
+                ++groupTaskCount;
+                if (groupTaskCount >= groupN_) {
+                    groupTaskCount = 0U;
+                }
+                task.isGroupLast = task.isLastS2Loop || groupTaskCount == 0U;
                 if constexpr (isCube) {
                     task.n2Idx = kvHead;
                     if (rows != 0 && task.actSingleLoopS2Size != 0) {
@@ -466,7 +494,7 @@ public:
             UpdateAxisInfo(TASK_DEAL_MODE::SKIP_REMAINING_S2, head, row, s2);
         }
         if (created != 0) {
-            while (tick < created + PRELOAD_N) {
+            while (tick < created + preloadN_) {
                 ExecuteTick(tick++, created, tasks);
             }
         }
@@ -474,8 +502,8 @@ public:
 
     __aicore__ inline void ExecuteTick(uint64_t tick, uint64_t created, Mxfp4CubeTask* tasks)
     {
-        if (tick + KV_PREFETCH_LEAD >= PRELOAD_N) {
-            const uint64_t v = tick + KV_PREFETCH_LEAD - PRELOAD_N;
+        if (tick + KV_PREFETCH_LEAD >= preloadN_) {
+            const uint64_t v = tick + KV_PREFETCH_LEAD - preloadN_;
             if (v < created) {
                 auto& task = tasks[v % PRELOAD_TASK_CACHE_SIZE];
                 if (task.actMSize != 0 && task.actSingleLoopS2Size != 0) {
@@ -483,8 +511,8 @@ public:
                 }
             }
         }
-        if (tick >= PRELOAD_N) {
-            auto& pv = tasks[(tick - PRELOAD_N) % PRELOAD_TASK_CACHE_SIZE];
+        if (tick >= preloadN_) {
+            auto& pv = tasks[(tick - preloadN_) % PRELOAD_TASK_CACHE_SIZE];
             cubeBlock_.ComputeBmm2(pv, ValueSlotOf(pv.loop));
         }
         if (tick < created) {
@@ -495,8 +523,8 @@ public:
 
     __aicore__ inline void ExecuteTick(uint64_t tick, uint64_t created, Mxfp4VecTask* tasks)
     {
-        if (tick >= PRELOAD_N) {
-            auto& v2 = tasks[(tick - PRELOAD_N) % PRELOAD_TASK_CACHE_SIZE];
+        if (tick >= preloadN_) {
+            auto& v2 = tasks[(tick - preloadN_) % PRELOAD_TASK_CACHE_SIZE];
             if (v2.isGroupLast) {
                 vecFaBlock_.ComputeVec2(v2);
             }

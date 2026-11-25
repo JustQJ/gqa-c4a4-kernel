@@ -39,6 +39,7 @@ struct SectionStreamKFaResult {
     std::vector<uint32_t> mEnd{};                    // 每个核处理数据的M结束点
     std::vector<uint32_t> s2End{};                   // 每个核处理数据的S2结束点
     std::vector<uint32_t> firstFdDataWorkspaceIdx{}; // FD块在workspace中的位置
+    uint32_t maxCoreBlock{0U};                       // 单核最大基本块数，供调用方按规模选流水参数
 
     explicit SectionStreamKFaResult(uint32_t aicNum)
         : bNEnd(aicNum),

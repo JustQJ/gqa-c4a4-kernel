@@ -75,6 +75,7 @@ private:
     bool BalanceSchedule(SectionStreamKResult& splitRes);
     bool GenMetaData(SectionStreamKResult& splitRes);
     void SetMetadataHead(const SectionStreamKResult& splitRes, optiling::detail::FaMetaData& faMetadata);
+    void SetPipelineRhythm(const SectionStreamKResult& splitRes, optiling::detail::FaMetaData& faMetadata);
     void SetMetadataFa(const SectionStreamKResult& splitRes, optiling::detail::FaMetaData& faMetadata);
     void SetMetadataFd(const SectionStreamKResult& splitRes, optiling::detail::FaMetaData& faMetadata);
     bool ParamsInit();
@@ -133,6 +134,7 @@ private:
     int64_t metadataRowSize_ = -1; // 输出 tensor 单行长度(2D 为 dim1, 1D 为 dim0), 同上
 
     uint32_t groupSize_ = 0;
+    bool mergeKvHeads_ = false; // 同页双 KV head 块对角合并是否命中，SetMetadataHead 选流水参数时复用
     uint32_t mBaseSize_ = NUM_64;
     uint32_t s2BaseSize_ = NUM_128;
     bool needInitOutput_ = false;
