@@ -518,7 +518,7 @@ public:
             DataCopy(scaleDst, scaleSrc, scalePairs);
         } else {
             const uint32_t headCount = KvLayoutType == 1 ? constInfo_.n2Size : 1U;
-            CopyFp4RowsGm2L1(dst, src, s2BaseSize, rowBytes, rowBytes * headCount, s2BaseSize);
+            CopyFp4RowsGm2L1<KvLayoutType == 1>(dst, src, s2BaseSize, rowBytes, rowBytes * headCount, s2BaseSize);
             if constexpr (IsKey) {
                 Dn2NzParams params {};
                 params.dnNum = 1;
@@ -736,6 +736,7 @@ public:
         LoadData(valueL0Tensor, valueL1Tensor, valueScaleL1Tensor, valueLoadParams, valueScaleLoadParams);
     }
 
+    template <bool IsBbndKvPayload = false>
     __aicore__ inline void CopyFp4RowsGm2L1(const LocalTensor<uint8_t>& payloadL1Tensor,
                                            const GlobalTensor<uint8_t>& payloadGmTensor, uint32_t rowCount,
                                            uint32_t rowByteCount, uint64_t sourceRowByteStride,
@@ -750,6 +751,20 @@ public:
         payloadCopyParams.dValue = rowByteCount;
         payloadCopyParams.dstNzC0Stride = destinationRowStride;
         payloadCopyParams.dstNzNStride = 1;
+        if constexpr (IsBbndKvPayload) {
+            if (sourceRowByteStride == 256U && rowByteCount < sourceRowByteStride) {
+                // 偶数行和奇数行各跨 512B，避开 ND2NZ 的小步长并包，交错写回同一个 NZ tile。
+                payloadCopyParams.srcDValue = 512U;
+                payloadCopyParams.dstNzNStride = 2U;
+                payloadCopyParams.nValue = (rowCount + 1U) / 2U;
+                DataCopy<uint8_t>(payloadL1Tensor, payloadGmTensor, payloadCopyParams);
+                if (rowCount > 1U) {
+                    payloadCopyParams.nValue = rowCount / 2U;
+                    DataCopy<uint8_t>(payloadL1Tensor[32U], payloadGmTensor[256U], payloadCopyParams);
+                }
+                return;
+            }
+        }
         // ND2NZ 的 srcDValue 只有 16 bit，大 head stride 退化为逐行搬运。
         if (sourceRowByteStride <= 65535U) {
             payloadCopyParams.srcDValue = static_cast<uint16_t>(sourceRowByteStride);
@@ -918,7 +933,8 @@ public:
                     kvPayloadGmTensor[payloadGmByteOffset + pageTokenOffset * 32U], payloadCopyParams);
             } else {
                 const uint64_t sourceOffset = payloadGmByteOffset + pageTokenOffset * tokenByteStride;
-                CopyFp4RowsGm2L1(kvPayloadL1Tensor[copiedTokenCount * 32U], kvPayloadGmTensor[sourceOffset],
+                CopyFp4RowsGm2L1<KvLayoutType == 1>(kvPayloadL1Tensor[copiedTokenCount * 32U],
+                    kvPayloadGmTensor[sourceOffset],
                     pageTokenCount, payloadRowBytes, tokenByteStride, s2BaseSize);
             }
             copiedTokenCount += pageTokenCount;
