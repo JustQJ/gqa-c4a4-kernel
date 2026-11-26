@@ -1,0 +1,75 @@
+bringing up nodes...
+bringing up nodes...
+
+.......F........                                                         [100%]
+=================================== FAILURES ===================================
+___________ test_quant_flash_attn_mxfp4[qwen3_8b_page256_prefill_4] ____________
+[gw1] linux -- Python 3.12.16 /home/k831/venv/bin/python
+
+params = {'B': 2, 'D': 128, 'N_kv': 8, 'N_q': 32, ...}
+golden_mode = {'compare', 'cpu', 'gen', 'npu'}
+cache_dir = '/home/k831/perf-opt/cache-val2-PA_NZ'
+execution_options = {'device_id': 0, 'fp64_reference': False, 'package': 'cann_ops_transformer_qfa_bbnd_copy', 'reference_threads': 1, ...}
+
+    @pytest.mark.func_rdv
+    @pytest.mark.ci
+    def test_quant_flash_attn_mxfp4(params, golden_mode, cache_dir, execution_options):
+        from .common import test_runner
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            result, lse = executor.submit(test_runner.execute_test, params, golden_mode, cache_dir,
+>                                         **execution_options).result()
+                                                               ^^^^^^^^
+
+qfa_mxfp4_test/test_quant_flash_attn_func_rdv.py:25: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/local/python3.12.16/lib/python3.12/concurrent/futures/_base.py:456: in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+/usr/local/python3.12.16/lib/python3.12/concurrent/futures/_base.py:401: in __get_result
+    raise self._exception
+/usr/local/python3.12.16/lib/python3.12/concurrent/futures/thread.py:59: in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+qfa_mxfp4_test/common/test_runner.py:107: in execute_test
+    actual = golden.npu_mxfp4_fa(data, p, package, device_id)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+qfa_mxfp4_test/common/quant_flash_attn_golden.py:233: in npu_mxfp4_fa
+    prepared = prepare_npu_inputs(data, device, params)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+data = {'block_table_torch': tensor([[19352,   757, 31532,  5960,     0,     0,     0,     0,     0,     0,
+             0,  ...
+
+         [[123, 123],
+          [122, 122]],
+
+         [[125, 125],
+          [122, 125]]]], dtype=torch.uint8), ...}
+device = 'npu:0', params = {'B': 2, 'D': 128, 'N_kv': 8, 'N_q': 32, ...}
+
+    def prepare_npu_inputs(data, device, params=None):
+        fp4, e8m0 = getattr(torch, 'float4_e2m1fn_x2', None), getattr(torch, 'float8_e8m0fnu', None)
+        if fp4 is None or e8m0 is None:
+            raise RuntimeError('Installed torch/torch_npu must provide FP4 E2M1 and E8M0 dtypes')
+        layout = normalize_params(params)['kv_cache_layout'] if params is not None else 'PA_BBND'
+        staged = dict(data)
+        for name, kind in (('k_fp4', 'payload'), ('v_fp4', 'payload'),
+                           ('dequant_scale_k', 'k_scale'), ('v_descale', 'v_scale')):
+            staged[name] = convert_bbnd_tensor(staged[name], layout, kind)
+>       converted = {name: tensor.to(device) if tensor is not None else None for name, tensor in staged.items()}
+                           ^^^^^^^^^^^^^^^^^
+E       RuntimeError: copy_between_host_and_device_opapi:../torch_npu/csrc/aten/ops/op_api/CopyKernelOpApi.cpp:92 NPU function error: aclrtMemcpy, error code is 507899
+E       [ERROR] 2026-11-25-05:01:27 (PID:257371, Device:0, RankID:-1) ERR00100 PTA call acl api failed
+E       [Error]: An internal error occurs in the Driver module. 
+E               Rectify the fault based on the error information in the ascend log.
+E       [PID: 257371] 2026-11-25-05:01:27.134.074 Invalid_Argument(EL0003): The argument is invalid.
+E               Solution: Try again with a valid argument.
+E       TraceBack (most recent call last):
+E               rtMemcpy execution failed, reason=driver error:internal error[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:76]
+
+qfa_mxfp4_test/common/quant_flash_attn_golden.py:202: RuntimeError
+=========================== short test summary info ============================
+FAILED qfa_mxfp4_test/test_quant_flash_attn_func_rdv.py::test_quant_flash_attn_mxfp4[qwen3_8b_page256_prefill_4]
+1 failed, 15 passed in 433.35s (0:07:13)
+PYTEST_EXIT=1

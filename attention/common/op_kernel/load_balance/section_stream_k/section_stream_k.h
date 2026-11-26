@@ -52,6 +52,7 @@ inline uint32_t SectionStreamK::Compute(const DeviceInfo& deviceInfo, const IBas
         tmpFa.mEnd = implResult[i].mEnd;
         tmpFa.s2End = implResult[i].s2End;
         tmpFa.firstFdDataWorkspaceIdx = implResult[i].firstFdDataWorkspaceIdx;
+        tmpFa.maxCoreBlock = implResult[i].maxCoreBlock;
         result.sectionFaResult.emplace_back(tmpFa);
 
         SectionStreamKFdResult tmpFd(deviceInfo.aicCoreMaxNum, deviceInfo.aivCoreMaxNum);

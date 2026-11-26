@@ -148,6 +148,13 @@ static constexpr ConfigParams ConfigValue[] = {
      inferDTemplateType::Aligned72},
     {inferS1TemplateType::Aligned128, inferS2TemplateType::Aligned128, inferDTemplateType::Aligned256,
      inferDTemplateType::Aligned256},
+    // Config 6：M64/N256/D256，专用于同页双 KV head 块对角合并。
+    // kvTokenBlock = 256/2 = 128 与基线每 head 的 token 块一致，故 task 数减半，
+    // V2/Pscale 的总行数与基线相同；M 轴展开全部 N_q 个 Q head。
+    {inferS1TemplateType::Aligned64, inferS2TemplateType::Aligned256, inferDTemplateType::Aligned256,
+     inferDTemplateType::Aligned256},
+    {inferS1TemplateType::Aligned32, inferS2TemplateType::Aligned128, inferDTemplateType::Aligned256,
+     inferDTemplateType::Aligned256},
 };
 
 #define Config_S1Aligned128_S2Aligned512_DAligned64_DVAligned64 0
@@ -156,6 +163,8 @@ static constexpr ConfigParams ConfigValue[] = {
 #define Config_S1Aligned128_S2Aligned256_DAligned256_DVAligned256 3
 #define Config_S1Aligned128_S2Aligned512_DAligned72_DVAligned72 4
 #define Config_S1Aligned128_S2Aligned128_DAligned256_DVAligned256 5
+#define Config_MergeKvHeads_S1Aligned64_S2Aligned256_DAligned256_DVAligned256 6
+#define Config_S1Aligned32_S2Aligned128_DAligned256_DVAligned256 7
 
 #define QFA_MXFP8_FP32_PREFILL 1
 #define QFA_MXFP8_FP32_DECODE 2

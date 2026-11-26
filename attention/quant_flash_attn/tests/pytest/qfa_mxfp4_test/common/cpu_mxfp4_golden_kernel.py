@@ -1,4 +1,4 @@
-"""C4 metadata/core chunks, 16-task C2 groups, V2 updates and raw-PV FD merge."""
+"""C4 metadata/core chunks, C2 groups, V2 updates and raw-PV FD merge."""
 import math
 import torch
 from .quant_flash_attn_golden import decode_inputs, quantize_probability, round_bf16_away
@@ -13,6 +13,11 @@ def cpu_mxfp4_golden_kernel(data, params, metadata):
     output = torch.zeros_like(q)
     lse = torch.full(q.shape[:2], float('inf'), dtype=torch.float32)
     task_n, group = schedule['task_n'], schedule['group']
+    group_tasks = schedule['group_tasks']
+    # 块对角合并：一个 task 的 score 列是 [head0 的 task_n 个 token; head1 的 task_n 个 token]，
+    # 行所属 KV head 与列所属 KV head 不同的整块在 softmax 前置 -inf。
+    merge = schedule['merge_kv_heads']
+    kv_heads = p['N_kv'] if merge else 1
     log_x = math.log2(7.25/1.5) if p['p_quant_scheme'] == 'cx_delta' else math.log2(7.25)
     qs, ln2 = effective_lengths(p), math.log(2.)
     ln_delta = math.log(1.5) if p['p_quant_scheme'] == 'cx_delta' else 0.0
@@ -24,23 +29,36 @@ def cpu_mxfp4_golden_kernel(data, params, metadata):
         heads = head*group+rows%group
         kh = head if group > 1 else head//(p['N_q']//p['N_kv'])
         qi = q[p['cu_seqlens_q'][batch]+tokens, heads]
-        key, value, klen = keys[batch][:, kh], values[batch][:, kh], p['seqused_kv'][batch]
+        klen = p['seqused_kv'][batch]
+        if merge:
+            row_head = (rows % group)//(group//kv_heads)
+            key = [keys[batch][:, h] for h in range(kv_heads)]
+            value = [values[batch][:, h] for h in range(kv_heads)]
+        else:
+            row_head = None
+            key = [keys[batch][:, kh]]
+            value = [values[batch][:, kh]]
         splits = []
         for task_start, task_stop in parts:
             pv = torch.zeros((len(rows), p['D']), dtype=torch.float32)
             total = torch.zeros(len(rows), dtype=torch.float32)
             running = torch.full_like(total, -1e30)
-            # All P payloads in a 16-task group are generated before selecting
-            # the common reference. C2 accumulates the tasks before one V2.
-            for first_task in range(task_start, task_stop, 16):
-                stop_task = min(first_task+16, task_stop)
+            # All P payloads in a group are generated before selecting the common
+            # reference. C2 accumulates the tasks before one V2.
+            for first_task in range(task_start, task_stop, group_tasks):
+                stop_task = min(first_task+group_tasks, task_stop)
                 lo, hi = first_task*task_n, min(stop_task*task_n, klen)
-                padded = (hi-lo+31)//32*32
+                per_head = (hi-lo+31)//32*32
+                padded = per_head*kv_heads
                 score = torch.full((len(rows), padded), -float('inf'))
-                score[:, :hi-lo] = (qi @ key[lo:hi].T)*p['softmax_scale']
-                if p['mask_mode'] == 3:
-                    visible = torch.arange(lo, hi)[None, :] <= tokens[:, None]+klen-qs[batch]
-                    score[:, :hi-lo].masked_fill_(~visible, -float('inf'))
+                for h in range(kv_heads):
+                    block = (qi @ key[h][lo:hi].T)*p['softmax_scale']
+                    if p['mask_mode'] == 3:
+                        visible = torch.arange(lo, hi)[None, :] <= tokens[:, None]+klen-qs[batch]
+                        block = block.masked_fill(~visible, -float('inf'))
+                    if merge:
+                        block = block.masked_fill((row_head != h)[:, None], -float('inf'))
+                    score[:, h*per_head:h*per_head+(hi-lo)] = block
                 grouped = score.reshape(len(rows), -1, 32)
                 maxima = grouped.amax(-1)
                 valid = torch.isfinite(maxima)
@@ -54,14 +72,15 @@ def cpu_mxfp4_golden_kernel(data, params, metadata):
                 # its FP32 rounding, instead of replacing it with exp2 here.
                 alpha = torch.where(running > -1e30, torch.exp((running-current)*ln2), 0.)
                 code = (exponent-current[:, None]+scale_bias).clamp(0., 254.)
-                weights = (quant*torch.exp2(code-127.)[..., None]).reshape(len(rows), padded)[:, :hi-lo]
+                weights = (quant*torch.exp2(code-127.)[..., None]).reshape(len(rows), padded)
                 group_pv = torch.zeros_like(pv)
                 group_sum = torch.zeros_like(total)
                 for task in range(first_task, stop_task):
                     a, b = task*task_n-lo, min((task+1)*task_n, hi)-lo
-                    w = weights[:, a:b]
-                    group_pv += w @ value[lo+a:lo+b]
-                    group_sum += w.sum(-1)
+                    for h in range(kv_heads):
+                        w = weights[:, h*per_head+a:h*per_head+b]
+                        group_pv += w @ value[h][lo+a:lo+b]
+                        group_sum += w.sum(-1)
                 pv = pv*alpha[:, None]+group_pv
                 total = total*alpha+group_sum
                 running = current

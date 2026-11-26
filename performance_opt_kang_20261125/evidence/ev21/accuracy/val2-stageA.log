@@ -1,0 +1,31 @@
++ echo BUILD_STATUS=0
+BUILD_STATUS=0
++ echo INSTALL_STATUS=0
+INSTALL_STATUS=0
+=== fix confirmation: three previously failing cases
+3 passed, 6514 deselected in 68.40s (0:01:08)
+PYTEST_EXIT=0
+3 passed, 6514 deselected in 24.39s
+PYTEST_EXIT=0
+=== group sweep on val2
+73
+      1  
+      6 10 PASS
+      6 12 PASS
+      6 16 PASS
+      6 2 PASS
+      6 20 PASS
+      6 24 PASS
+      6 32 PASS
+      6 4 PASS
+      6 48 PASS
+      6 6 PASS
+      6 64 PASS
+      6 8 PASS
+=== 744 matrix: BBND (golden all)
+== bench16k PA_BBND
+12 passed in 51.85s
+PYTEST_EXIT=0
+== qwen3_8b PA_BBND
+4 failed, 12 passed in 443.59s (0:07:23)
+PYTEST_EXIT=1

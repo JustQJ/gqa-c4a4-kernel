@@ -1,0 +1,6 @@
+== qwen3_8b PA_BNBD dev7
+16 passed in 1670.24s (0:27:50)
+PYTEST_EXIT=0
+== qwen3_8b_page256 PA_BNBD dev7
+16 passed in 1957.76s (0:32:37)
+PYTEST_EXIT=0

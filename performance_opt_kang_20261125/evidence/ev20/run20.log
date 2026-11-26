@@ -1,0 +1,30 @@
++ echo BUILD_STATUS=0
+BUILD_STATUS=0
++ echo INSTALL_STATUS=0
+INSTALL_STATUS=0
+bin
+op_api
+op_impl
+op_proto
+version.info
+== acc bbnd
+timeout: the monitored command dumped core
+run-acc.sh: line 5: 190704 Segmentation fault      timeout 5400 python -m pytest qfa_mxfp4_test -q -m func_rdv --device-id 7 --package cann_ops_transformer_qfa_bbnd_copy --cache-dir /home/k831/perf-opt/cache-$TAG "$@"
+PYTEST_EXIT=139
+== perf bbnd
+timeout: the monitored command dumped core
+run-perf.sh: line 8: 190908 Segmentation fault      timeout 3600 python -m pytest -q qfa_mxfp4_test/test_quant_flash_attn_perf_rdv.py --run-perf --perf-case-set bench16k --perf-kind decode --perf-mode graph --perf-warmup 3 --perf-rounds 5 --perf-repeats 20 --perf-output $OUT --device-id 7 --package cann_ops_transformer_qfa_bbnd_copy "$@"
+PYTEST_EXIT=139
+== perf all
+timeout: the monitored command dumped core
+run-perf.sh: line 8: 191094 Segmentation fault      timeout 3600 python -m pytest -q qfa_mxfp4_test/test_quant_flash_attn_perf_rdv.py --run-perf --perf-case-set bench16k --perf-kind decode --perf-mode graph --perf-warmup 3 --perf-rounds 5 --perf-repeats 20 --perf-output $OUT --device-id 7 --package cann_ops_transformer_qfa_bbnd_copy "$@"
+PYTEST_EXIT=139
+== acc bnbd
+............                                                             [100%]
+12 passed, 1657 deselected in 262.87s (0:04:22)
+PYTEST_EXIT=0
+== acc nz
+............                                                             [100%]
+12 passed, 1657 deselected in 293.60s (0:04:53)
+PYTEST_EXIT=0
+ALL_DONE_20

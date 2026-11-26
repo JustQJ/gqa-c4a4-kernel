@@ -1,0 +1,14 @@
+=== BBND (golden all)
+== qwen3_8b PA_BBND
+16 passed in 433.11s (0:07:13)
+PYTEST_EXIT=0
+== qwen3_8b_page256 PA_BBND
+16 passed in 702.28s (0:11:42)
+PYTEST_EXIT=0
+== document PA_BBND
+204 passed in 599.27s (0:09:59)
+PYTEST_EXIT=0
+=== BNBD / NZ (reuse CPU reference)
+== bench16k PA_BNBD
+12 passed in 80.60s (0:01:20)
+PYTEST_EXIT=0

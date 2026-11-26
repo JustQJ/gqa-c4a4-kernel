@@ -1,0 +1,17 @@
+== m19-bnbd done
+....                                                                     [100%]
+4 passed in 140.50s (0:02:20)
+PYTEST_EXIT=0
+== m19-nz done
+....                                                                     [100%]
+4 passed in 165.95s (0:02:45)
+PYTEST_EXIT=0
+== m8-bnbd done
+....                                                                     [100%]
+4 passed in 161.68s (0:02:41)
+PYTEST_EXIT=0
+== m8-nz done
+....                                                                     [100%]
+4 passed in 157.16s (0:02:37)
+PYTEST_EXIT=0
+ALL_DONE

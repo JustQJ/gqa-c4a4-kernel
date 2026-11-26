@@ -1,0 +1,28 @@
+ninja: no work to do.
+PERF bench16k_single_prefill_1 c4 249.318 us released=0
+PERF bench16k_single_prefill_1 c8 243.249 us released=0
+.PERF bench16k_single_prefill_2 c4 950.194 us released=0
+PERF bench16k_single_prefill_2 c8 1069.057 us released=0
+.PERF bench16k_single_prefill_3 c4 1318.330 us released=0
+PERF bench16k_single_prefill_3 c8 1792.523 us released=0
+.PERF bench16k_dual_prefill_1 c4 1232.204 us released=0
+PERF bench16k_dual_prefill_1 c8 1304.024 us released=0
+.PERF bench16k_dual_prefill_2 c4 1331.257 us released=0
+PERF bench16k_dual_prefill_2 c8 1595.088 us released=0
+.PERF bench16k_dual_prefill_3 c4 2313.692 us released=0
+PERF bench16k_dual_prefill_3 c8 2774.936 us released=0
+.PERF bench16k_decode_1 c4 282.411 us released=0
+PERF bench16k_decode_1 c8 313.510 us released=0
+.PERF bench16k_decode_2 c4 790.772 us released=0
+PERF bench16k_decode_2 c8 794.744 us released=0
+.PERF bench16k_decode_3 c4 32.527 us released=0
+PERF bench16k_decode_3 c8 41.181 us released=0
+.PERF bench16k_decode_4 c4 46.262 us released=0
+PERF bench16k_decode_4 c8 49.753 us released=0
+.PERF bench16k_mixed_1 c4 1357.033 us released=0
+PERF bench16k_mixed_1 c8 1381.052 us released=0
+.PERF bench16k_mixed_2 c4 3776.482 us released=0
+PERF bench16k_mixed_2 c8 3618.999 us released=0
+.
+--- generated xml file: /home/k831/perf-opt/results/base/bench16k-junit.xml ----
+12 passed in 428.46s (0:07:08)

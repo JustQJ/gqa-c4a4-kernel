@@ -1,0 +1,262 @@
+-- The C compiler identification is GNU 11.4.0
+-- The CXX compiler identification is GNU 11.4.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Initialization summary: Ccache not found, TARGET_ARCH: x86_64
+-- ASCEND_CANN_PACKAGE_PATH=/usr/local/Ascend/cann-9.2.1
+-- compile project with library
+-- Find opbase source dir: /home/k831/work/deps/opbase
+HEAD is now at 0a83b91 refactor(arch): 将NpuArch常量定义迁移至新增op_const_def.h头文件
+-- Found Python3: /home/k831/venv/bin/python3 (found version "3.12.16") found components: Interpreter 
+-- ENABLE_CCACHE=ON, CUSTOM_CCACHE=
+-- CCACHE_PROGRAM=CCACHE_PROGRAM-NOTFOUND
+-- ASCEND_COMPUTE_UNIT=ascend950
+-- ASCEND_OP_NAME=quant_flash_attn;quant_flash_attn_metadata
+-- TILING_KEY=
+-- TESTS_UT_OPS_TEST=
+-- TESTS_EXAMPLE_OPS_TEST=
+-- CMAKE_BUILD_TYPE=Release
+-- VERSION=
+HEAD is now at 0a83b91 refactor(arch): 将NpuArch常量定义迁移至新增op_const_def.h头文件
+LIBASAN_PATH = 
+In file included from /usr/local/Ascend/cann-9.2.1/include/external/ge_common/api_error_codes.h:16,
+                 from /usr/local/Ascend/cann-9.2.1/include/exe_graph/runtime/continuous_vector.h:20,
+                 from /usr/local/Ascend/cann-9.2.1/include/exe_graph/runtime/runtime_attrs.h:16,
+                 from /usr/local/Ascend/cann-9.2.1/include/exe_graph/runtime/infer_shape_context.h:16,
+                 from /usr/local/Ascend/cann-9.2.1/include/register/op_impl_registry.h:19,
+                 from /usr/local/Ascend/cann-9.2.1/include/register/op_def.h:19,
+                 from /usr/local/Ascend/cann-9.2.1/include/register/op_def_registry.h:14,
+                 from /home/k831/perf-opt/candidate-src/attention/quant_flash_attn/op_host/quant_flash_attn_def.cpp:18:
+/usr/local/Ascend/cann-9.2.1/include/external/ge_common/ge_error_codes.h:15:122: note: '#pragma message: Warning: ge_error_codes.h is deprecated and will be removed after 2027-06. Include "graph/error_codes.h" instead.'
+   15 |     "Warning: ge_error_codes.h is deprecated and will be removed after 2027-06. Include \"graph/error_codes.h\" instead.")
+      |                                                                                                                          ^
+In file included from /usr/local/Ascend/cann-9.2.1/include/external/ge_common/api_error_codes.h:17,
+                 from /usr/local/Ascend/cann-9.2.1/include/exe_graph/runtime/continuous_vector.h:20,
+                 from /usr/local/Ascend/cann-9.2.1/include/exe_graph/runtime/runtime_attrs.h:16,
+                 from /usr/local/Ascend/cann-9.2.1/include/exe_graph/runtime/infer_shape_context.h:16,
+                 from /usr/local/Ascend/cann-9.2.1/include/register/op_impl_registry.h:19,
+                 from /usr/local/Ascend/cann-9.2.1/include/register/op_def.h:19,
+                 from /usr/local/Ascend/cann-9.2.1/include/register/op_def_registry.h:14,
+                 from /home/k831/perf-opt/candidate-src/attention/quant_flash_attn/op_host/quant_flash_attn_def.cpp:18:
+/usr/local/Ascend/cann-9.2.1/include/external/ge_common/ge_api_types.h:15:122: note: '#pragma message: Warning: ge_api_types.h is deprecated and will be removed after 2027-06. Include "ge_common_api_types.h" instead.'
+   15 |     "Warning: ge_api_types.h is deprecated and will be removed after 2027-06. Include \"ge_common_api_types.h\" instead.")
+      |                                                                                                                          ^
+/home/k831/perf-opt/candidate-src/cmake/scripts/util/ascendc_impl_build.py:247: SyntaxWarning: invalid escape sequence '\d'
+  ascendc_api_version = re.findall(r"#define ASCENDC_API_VERSION (\d+)", ascendc_api_version_file.read())
+-- Found json: /home/k831/work/deps/lib_cache/json/include  
+-- Start building custom package.
+-- Search libs under install path /usr/local/Ascend/cann-9.2.1
+-- CMAKE_MODULE_PATH            :/home/k831/perf-opt/candidate-src/cmake/modules;/usr/local/Ascend/cann-9.2.1/include/ge/cmake
+-- compile option:   -Wall -Wextra -Wshadow -Wformat=2 -fno-common -fPIC -Wformat-signedness -Wno-missing-include-dirs -Wno-write-strings
+-- Found dlog: /usr/local/Ascend/cann-9.2.1/pkg_inc/base  
+-- Transformer Variables in dlog module:
+-- dlog_TRANSFORMER_INCLUDE_DIR="/usr/local/Ascend/cann-9.2.1/pkg_inc/base"
+-- dlog_SHARED_LIBRARY="/usr/local/Ascend/cann-9.2.1/lib64/libascendalog.so"
+-- 
+ Properties for TARGET dlog:
+   dlog.INTERFACE_COMPILE_DEFINITIONS = "LOG_CPP;PROCESS_LOG"
+   dlog.INTERFACE_LINK_LIBRARIES = "dlog_headers"
+   dlog.IMPORTED_LOCATION = "/usr/local/Ascend/cann-9.2.1/lib64/libascendalog.so"
+
+-- 
+ Properties for TARGET dlog_headers:
+   dlog_headers.INTERFACE_INCLUDE_DIRECTORIES = "/usr/local/Ascend/cann-9.2.1/pkg_inc/base"
+
+-- Found securec: /usr/local/Ascend/cann-9.2.1/include  
+-- Found OPBASE: /home/k831/work/deps/opbase/include  
+-- Found OPABSE include:/home/k831/work/deps/opbase/include
+-- Found OPABSE lib:
+-- Found platform: /usr/local/Ascend/cann-9.2.1/include  
+-- Found platform include:/usr/local/Ascend/cann-9.2.1/x86_64-linux/include
+-- Found register library:/usr/local/Ascend/cann-9.2.1/x86_64-linux/lib64/libregister.so
+-- Found opp_registry library:/usr/local/Ascend/cann-9.2.1/x86_64-linux/lib64/libopp_registry.so
+-- Found exe_graph library:/usr/local/Ascend/cann-9.2.1/x86_64-linux/lib64/libexe_graph.so
+-- Found graph_base library:/usr/local/Ascend/cann-9.2.1/x86_64-linux/lib64/libgraph_base.so
+-- Found error_manager library:/usr/local/Ascend/cann-9.2.1/x86_64-linux/lib64/liberror_manager.so
+-- Found metadef library:/usr/local/Ascend/cann-9.2.1/x86_64-linux/lib64/libmetadef.so
+-- Found rt2_registry library:/usr/local/Ascend/cann-9.2.1/x86_64-linux/lib64/librt2_registry.a
+-- Found metadef: /usr/local/Ascend/cann-9.2.1/include  
+-- Found source metadef include dir:  /usr/local/Ascend/cann-9.2.1/x86_64-linux/include/;/usr/local/Ascend/cann-9.2.1/x86_64-linux/include/exe_graph
+-- Found graph library:/usr/local/Ascend/cann-9.2.1/x86_64-linux/lib64/libgraph.so
+-- Found mmpa library:/usr/local/Ascend/cann-9.2.1/x86_64-linux/lib64/libmmpa.so
+-- Found source acl include dir:  /usr/local/Ascend/cann-9.2.1/x86_64-linux/include
+-- [transformer]Found source npuruntime include dir: /usr/local/Ascend/cann-9.2.1/x86_64-linux/pkg_inc/runtime
+-- Found aclnn include dir:  /usr/local/Ascend/cann-9.2.1/x86_64-linux/include
+-- Found opdev include dir:  /usr/local/Ascend/cann-9.2.1/x86_64-linux/include/aclnn
+-- Found tilingapi include:/usr/local/Ascend/cann-9.2.1/x86_64-linux/include
+-- TILINGAPI_INC_DIRS: /usr/local/Ascend/cann-9.2.1/x86_64-linux/include;/usr/local/Ascend/cann-9.2.1/x86_64-linux/ascendc;/usr/local/Ascend/cann-9.2.1/x86_64-linux/ascendc/include;/usr/local/Ascend/cann-9.2.1/x86_64-linux/ascendc/include/highlevel_api;/usr/local/Ascend/cann-9.2.1/x86_64-linux/ascendc/include/highlevel_api/lib;/usr/local/Ascend/cann-9.2.1/x86_64-linux/ascendc/include/highlevel_api/impl;/usr/local/Ascend/cann-9.2.1/x86_64-linux/ascendc/include/highlevel_api/tiling
+-- Found tilingapi lib:/usr/local/Ascend/cann-9.2.1/x86_64-linux/lib64/libtiling_api.a
+-- Using AICPU include dirs: /usr/local/Ascend/cann-9.2.1/x86_64-linux/include/experiment;/usr/local/Ascend/cann-9.2.1/x86_64-linux/include/experiment/cce;/usr/local/Ascend/cann-9.2.1/x86_64-linux/include/experiment/msprof;/usr/local/Ascend/cann-9.2.1/x86_64-linux/pkg_inc/aicpu_common/context;/usr/local/Ascend/cann-9.2.1/x86_64-linux/pkg_inc/aicpu_common/context/common;/usr/local/Ascend/cann-9.2.1/x86_64-linux/pkg_inc/aicpu_common/context/cpu_proto;/usr/local/Ascend/cann-9.2.1/x86_64-linux/pkg_inc/aicpu_common/context/utils;/usr/local/Ascend/cann-9.2.1/x86_64-linux/include/aicpu_common/context;/usr/local/Ascend/cann-9.2.1/x86_64-linux/include/aicpu_common/context/common;/usr/local/Ascend/cann-9.2.1/x86_64-linux/include/aicpu_common/context/cpu_proto;/usr/local/Ascend/cann-9.2.1/x86_64-linux/include/aicpu_common/context/utils;/usr/local/Ascend/cann-9.2.1/x86_64-linux/include/experiment/datagw/aicpu/common;/usr/local/Ascend/cann-9.2.1/x86_64-linux/include/experiment/datagw/aicpu/common;/usr/local/Ascend/cann-9.2.1/x86_64-linux/include/aicpu;/usr/local/Ascend/cann-9.2.1/x86_64-linux/pkg_inc;/usr/local/Ascend/cann-9.2.1/x86_64-linux/pkg_inc/aicpu
+-- Finding gen es pkg
+-- [add_es_library] Module loaded from: /usr/local/Ascend/cann-9.2.1/include/ge/cmake
+-- Find ops-tensor source dir: /home/k831/work/deps/ops-tensor
+-- ops-tensor fetched 6618ee2a91396f86c63a315c425523fe4e0f1773
+-- Find catlass source dir: /home/k831/work/deps/catlass
+-- [ThirdParty][eigen] tar.gz found in cache: /home/k831/work/deps/eigen-5.0.0.tar.gz
+-- Found abseil-cpp: /home/k831/work/deps/lib_cache/abseil-cpp  
+-- [ThirdParty][abseil-cpp] Found abseil-cpp in: /home/k831/work/deps/lib_cache/abseil-cpp
+-- [ThirdParty][protobuf] protobuf_shared build.
+-- [ThirdParty][protobuf] protoc use cache.
+-- [ThirdParty][protobuf] protobuf_static use cache.
+-- [ThirdParty][protobuf] protobuf_host_static build.
+-- Found alog: /usr/local/Ascend/cann-9.2.1/include  
+-- Variables in alog module:
+-- alog_a_INCLUDE_DIR="/usr/local/Ascend/cann-9.2.1/include"
+-- slog_a_SHARED_LIBRARY="/usr/local/Ascend/cann-9.2.1/lib64/libascendalog.so"
+-- alog_a_SHARED_LIBRARY="/usr/local/Ascend/cann-9.2.1/lib64/libascendalog.so"
+-- 
+ Properties for TARGET slog_a:
+   slog_a.INTERFACE_COMPILE_DEFINITIONS = "LOG_CPP;PROCESS_LOG"
+   slog_a.INTERFACE_LINK_LIBRARIES = "alog_headers"
+   slog_a.IMPORTED_LOCATION = "/usr/local/Ascend/cann-9.2.1/lib64/libascendalog.so"
+
+-- 
+ Properties for TARGET alog_a:
+   alog_a.INTERFACE_COMPILE_DEFINITIONS = "LOG_CPP;PROCESS_LOG"
+   alog_a.INTERFACE_LINK_LIBRARIES = "alog_headers"
+   alog_a.IMPORTED_LOCATION = "/usr/local/Ascend/cann-9.2.1/lib64/libascendalog.so"
+
+-- 
+ Properties for TARGET alog_headers:
+   alog_headers.INTERFACE_INCLUDE_DIRECTORIES = "/usr/local/Ascend/cann-9.2.1/include;/usr/local/Ascend/cann-9.2.1/include/base"
+
+-- Could NOT find unified_dlog (missing: _INCLUDE_ROOT_DIR) 
+-- Generated helper script: /home/k831/perf-opt/merge17-build/cmake/run_gen_esb_with_lock.sh
+-- Using existing Python3: /home/k831/venv/bin/python3
+-- _add_es_library_impl: OUTPUT_PATH is /home/k831/perf-opt/merge17-build/es_packages_math
+-- _add_es_library_impl: EXCLUDE_OPS is not provided
+-- add_es_package: OPP_PROTO_TARGET output directory: /home/k831/perf-opt/candidate-src/build
+-- add_es_package: Derived ASCEND_OPP_PATH: /home/k831/perf-opt/candidate-src/build
+--   - Created standard OPP path: /home/k831/perf-opt/merge17-build/common/stub/op_graph/es_math_build/opp_standard_path_proto_math
+-- _add_es_library_impl: gen_esb target not found, searching in environment...
+--     Found gen_esb in PATH (environment variables configured)
+--     - gen_esb path: /usr/local/Ascend/cann-9.2.1/bin/gen_esb
+--     - library path: /usr/local/Ascend/cann-9.2.1/lib64
+-- Using proto library path (derived from OPP_PROTO_TARGET): /home/k831/perf-opt/merge17-build/common/stub/op_graph/es_math_build/opp_standard_path_proto_math
+-- add_es_package: Module name for gen_esb: math
+-- [add_es_library] No history registry found at /usr/local/Ascend/cann-9.2.1/opp/history_registry/math, skipping
+-- Trying to locate eager_style_graph_builder_base library from run package...
+--   Found library in run package: /usr/local/Ascend/cann-9.2.1/lib64/libeager_style_graph_builder_base.so
+-- Configuring ES package: es_math
+--   - Exported target: es_math (public interface)
+--   - Internal .obj target: es_math_obj (compile once)
+--   - Internal .so target: es_math_so
+--   - Internal .a target: es_math_a
+--   - Module name (for gen_esb): math
+--   - OPP proto target: proto_math (type: SHARED_LIBRARY)
+--   - OPP proto path: /home/k831/perf-opt/merge17-build/common/stub/op_graph/es_math_build/opp_standard_path_proto_math
+--   - Output path: /home/k831/perf-opt/merge17-build/es_packages_math (artifacts will be copied)
+--   - Library files: libes_math.so, libes_math.a
+--   - Python package: es_math
+-- ES package 'es_math' using single-file compilation mode
+--   - Wrapper file: /home/k831/perf-opt/merge17-build/common/stub/op_graph/es_math_build/generated_code/es_math_all_in_one.cpp
+--   - Module name: math
+-- add_es_library: Using default compile options: -fPIC;-Wall;-fstack-protector-all;-std=c++17;-D_GLIBCXX_USE_CXX11_ABI=0;-O2;-Wno-free-nonheap-object
+-- add_es_library: Set _GLIBCXX_USE_CXX11_ABI=0 for ABI compatibility
+-- add_es_library: Deduced header base path from cmake file: /usr/local/Ascend/cann-9.2.1
+-- add_es_library: metadef_headers target not found, skipping
+-- add_es_library: Found c_sec target
+-- add_es_library: Linking with CANN libraries: c_sec
+-- add_es_package: 'build_es_math' is the first ES package (will be built first)
+-- ES package 'es_math' configured successfully (single-file mode):
+--   - Exported target (for linking): es_math
+--   - Build target: build_es_math
+--   - Wrapper file: /home/k831/perf-opt/merge17-build/common/stub/op_graph/es_math_build/generated_code/es_math_all_in_one.cpp
+--   - Internal targets:
+--     * Code generation: generate_es_math_code
+--     * Object library: es_math_obj (compiled once)
+--     * Shared library: es_math_so
+--     * Static library: es_math_a
+--     * Wheel generation: generate_es_math_whl
+--     * Install: install_es_math
+--   - Library files: libes_math.so, libes_math.a
+--   - Python package: es_math
+--   - ES base library: /usr/local/Ascend/cann-9.2.1/lib64/libeager_style_graph_builder_base.so (from library)
+-- 
+-- Build mode: Single-file compilation (no reconfiguration needed)
+-- 
+-- Quick start:
+--   1. Link:    target_link_libraries(your_target PRIVATE es_math)
+--   2. Build:   make your_target  (recommended, triggers automatically)
+-- 
+-- [ quant_flash_attn_metadata] Found aicpu sources: /home/k831/perf-opt/candidate-src/attention/quant_flash_attn_metadata/op_kernel_aicpu/quant_flash_attn_metadata_aicpu.cpp, ascend dir: /usr/local/Ascend/cann-9.2.1, ophsot name: ophost_transformer
+-- add_aicpu_cust_kernel_modules for quant_flash_attn_metadata_cust_obj
+-- aicpu or host aicpu no need aclnn.
+LIBASAN_PATH = 
+-- Start Generating es transformer for custom pkg
+-- _add_es_library_impl: OUTPUT_PATH is /home/k831/perf-opt/merge17-build/es_packages
+-- _add_es_library_impl: EXCLUDE_OPS is not provided
+-- add_es_package: Using default output directory: /home/k831/perf-opt/merge17-build
+-- add_es_package: OPP_PROTO_TARGET output directory: /home/k831/perf-opt/merge17-build
+-- add_es_package: Derived ASCEND_OPP_PATH: /home/k831/perf-opt/merge17-build
+--   - Created standard OPP path: /home/k831/perf-opt/merge17-build/es_transformer_cust_build/opp_standard_path_proto_transformer_cust
+-- _add_es_library_impl: gen_esb target not found, searching in environment...
+--     Found gen_esb in PATH (environment variables configured)
+--     - gen_esb path: /usr/local/Ascend/cann-9.2.1/bin/gen_esb
+--     - library path: /usr/local/Ascend/cann-9.2.1/lib64
+-- Using proto library path (derived from OPP_PROTO_TARGET): /home/k831/perf-opt/merge17-build/es_transformer_cust_build/opp_standard_path_proto_transformer_cust
+-- add_es_package: Module name for gen_esb: transformer_cust
+-- [add_es_library] No history registry found at /usr/local/Ascend/cann-9.2.1/opp/history_registry/transformer_cust, skipping
+-- Trying to locate eager_style_graph_builder_base library from run package...
+--   Found library in run package: /usr/local/Ascend/cann-9.2.1/lib64/libeager_style_graph_builder_base.so
+-- Configuring ES package: es_transformer_cust
+--   - Exported target: es_transformer_cust (public interface)
+--   - Internal .obj target: es_transformer_cust_obj (compile once)
+--   - Internal .so target: es_transformer_cust_so
+--   - Internal .a target: es_transformer_cust_a
+--   - Module name (for gen_esb): transformer_cust
+--   - OPP proto target: proto_transformer_cust (type: SHARED_LIBRARY)
+--   - OPP proto path: /home/k831/perf-opt/merge17-build/es_transformer_cust_build/opp_standard_path_proto_transformer_cust
+--   - Output path: /home/k831/perf-opt/merge17-build/es_packages (artifacts will be copied)
+--   - Library files: libes_transformer_cust.so, libes_transformer_cust.a
+--   - Python package: es_transformer_cust
+-- ES package 'es_transformer_cust' using single-file compilation mode
+--   - Wrapper file: /home/k831/perf-opt/merge17-build/es_transformer_cust_build/generated_code/es_transformer_cust_all_in_one.cpp
+--   - Module name: transformer_cust
+-- add_es_library: Using default compile options: -fPIC;-Wall;-fstack-protector-all;-std=c++17;-D_GLIBCXX_USE_CXX11_ABI=0;-O2;-Wno-free-nonheap-object
+-- add_es_library: Set _GLIBCXX_USE_CXX11_ABI=0 for ABI compatibility
+-- add_es_library: Deduced header base path from cmake file: /usr/local/Ascend/cann-9.2.1
+-- add_es_library: metadef_headers target not found, skipping
+-- add_es_library: Found c_sec target
+-- add_es_library: Linking with CANN libraries: c_sec
+-- add_es_package: 'build_es_transformer_cust' depends on 'build_es_math' to avoid concurrent builds of shared dependencies
+-- ES package 'es_transformer_cust' configured successfully (single-file mode):
+--   - Exported target (for linking): es_transformer_cust
+--   - Build target: build_es_transformer_cust
+--   - Wrapper file: /home/k831/perf-opt/merge17-build/es_transformer_cust_build/generated_code/es_transformer_cust_all_in_one.cpp
+--   - Internal targets:
+--     * Code generation: generate_es_transformer_cust_code
+--     * Object library: es_transformer_cust_obj (compiled once)
+--     * Shared library: es_transformer_cust_so
+--     * Static library: es_transformer_cust_a
+--     * Wheel generation: generate_es_transformer_cust_whl
+--     * Install: install_es_transformer_cust
+--   - Library files: libes_transformer_cust.so, libes_transformer_cust.a
+--   - Python package: es_transformer_cust
+--   - ES base library: /usr/local/Ascend/cann-9.2.1/lib64/libeager_style_graph_builder_base.so (from library)
+-- 
+-- Build mode: Single-file compilation (no reconfiguration needed)
+-- 
+-- Quick start:
+--   1. Link:    target_link_libraries(your_target PRIVATE es_transformer_cust)
+--   2. Build:   make your_target  (recommended, triggers automatically)
+-- 
+-- Detected architecture: x86_64
+-- End building custom package.
+-- create aclnn master header file: /home/k831/perf-opt/merge17-build/aclnn_ops_transformer_qfa_bbnd_copy.h
+-- no operator info to generate
+-- Start building custom package.
+-- Linking cust_aicpu_kernels with ARM toolchain: /usr/local/Ascend/cann-9.2.1/toolkit/toolchain/hcc/bin/aarch64-target-linux-gnu-g++
+-- Objects: $<TARGET_OBJECTS:quant_flash_attn_metadata_cust_obj>
+-- Output: /home/k831/perf-opt/merge17-build/libtransformer_aicpu_kernels.so
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/k831/perf-opt/merge17-build

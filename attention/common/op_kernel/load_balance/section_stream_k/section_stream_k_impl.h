@@ -34,6 +34,7 @@ public:
         std::vector<uint32_t> mEnd{};                    // 每个核处理数据的M结束点
         std::vector<uint32_t> s2End{};                   // 每个核处理数据的S2结束点
         uint32_t maxS2SplitNum{0U};                      // 单个归约任务最大分核数量
+        uint32_t maxCoreBlock{0U};                       // 单核最大基本块数，供调用方按规模选流水参数
         uint32_t fdTaskNum{0U};                          // 归约任务数量
         std::vector<uint32_t> firstFdDataWorkspaceIdx{}; // 每个核第一份归约任务的存放地址
 
@@ -70,6 +71,7 @@ public:
             maxCost = INT64_MIN;
             usedCoreNum = 0U;
             maxS2SplitNum = 0U;
+            maxCoreBlock = 0U;
             fdTaskNum = 0U;
             std::fill(bNEnd.begin(), bNEnd.end(), 0U);
             std::fill(mEnd.begin(), mEnd.end(), 0U);
@@ -689,6 +691,7 @@ inline void SectionStreamKImpl::ScheduleFa(const FaConfig& faConfig, const Compu
     }
     result.maxCost = 0U;
     result.usedCoreNum = 0U;
+    result.maxCoreBlock = 0U;
 
     AssignContext assignContext{};
     assignContext.curSectionIdx = faConfig.sectionIdx;
@@ -742,6 +745,7 @@ inline void SectionStreamKImpl::ScheduleFa(const FaConfig& faConfig, const Compu
         result.mEnd[i] = assignContext.curMIdx;
         result.s2End[i] = assignContext.curS2Idx;
         result.maxCost = std::max(result.maxCost, assignContext.coreCache.cost);
+        result.maxCoreBlock = std::max(result.maxCoreBlock, assignContext.coreCache.block);
 
         assignContext.unassignedCost -= assignContext.coreCache.cost;
         if (faConfig.FdOn && IsNeedRecordFDInfo(assignContext, result)) {

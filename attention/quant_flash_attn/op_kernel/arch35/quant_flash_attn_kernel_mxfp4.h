@@ -62,16 +62,29 @@ public:
     static_assert(CubeBlockType::ENABLE_QF322F32_PRE == VecFaBlockType::ENABLE_QF322F32_PRE,
                   "MXFP4 Cube and Vector must agree on MM1 Fixpipe scaling");
 
-    static constexpr uint32_t PRELOAD_N = 20; // C2落后C1 20 轮
-    static constexpr uint32_t GROUP_N = 16;  // 16个task的C2在L0C累积，然后执行一次V2
+    // PRELOAD_N / GROUP_N 是编译期上界，决定缓冲区槽数；实际节奏由 preloadN_ / groupN_
+    // 在 Init 时从 metadata header 读取（AICPU 按真实单核 task 数下发），只会取更小的值。
+    static constexpr uint32_t PRELOAD_N = 20; // C2落后C1 最多 20 轮
+    static constexpr bool M64_CONFIG = mBaseSize == 64 && dBaseSize == 256 && s2BaseSize == 256;
+    static constexpr bool SMALL_M_CONFIG =
+        M64_CONFIG || (mBaseSize == 32 && dBaseSize == 256 && s2BaseSize == 128);
+    // 一组 task 的 C2 在 L0C 累积后只做一次 V2；组大小与 Cube/Vector 共用，约束见 common 头。
+    static constexpr uint32_t GROUP_N = MXFP4_TASK_GROUP_N;
+    // 同页双 KV head 块对角合并：由专用 Config 6 的模板开关推导，cube 与 Dummy 都导出同一值。
+    static constexpr bool MERGE_KV_HEADS = CubeBlockType::MERGE_KV_HEADS;
+    // 一个 task 的 S2 块覆盖的「每 head token 数」；score 宽度仍为 s2BaseSize。
+    static constexpr uint32_t kvTokenBlock = MERGE_KV_HEADS ? s2BaseSize / 2U : s2BaseSize;
     static constexpr uint32_t DELAY_P_SCALE_N = 3; // P scale 在每个group的16个task的C1完成后，再过3轮，对这16个task进行一次pscale的update
     // KV lookahead 预取：全部布局（BBND/BNBD/NZ）、DN/ND、D128/D256 生效。创建指针领先
     // 执行 LEAD 个 tick：K 在创建时发射（提前 LEAD 拍），V 在 Bmm2 消费前 LEAD 拍发射；
     // 每流在途 (LEAD+1) 个槽（K 奇数槽、V 偶数槽，槽号 = 2*(taskLoop % (LEAD+1)) (+1 for K)）。
-    // 任务环 live set 为 [t-20, t+LEAD]，大小 PRELOAD_N+1+LEAD。
+    // 任务环 live set 为 [t-preloadN_, t+LEAD]，按上界分配 PRELOAD_N+1+LEAD 个槽。
     static constexpr uint32_t KV_PREFETCH_LEAD = 1U;
     static constexpr uint32_t KV_STREAM_SLOTS = KV_PREFETCH_LEAD + 1U; // 每流槽数
     static constexpr uint32_t PRELOAD_TASK_CACHE_SIZE = PRELOAD_N + 1U + KV_PREFETCH_LEAD;
+    // 编译期上界必须自洽；运行时下发值在 InitPipelineRhythm 里按同一约束校验。
+    static_assert(GROUP_N + DELAY_P_SCALE_N <= PRELOAD_N,
+                  "Pscale of a group must be published before Cube's first C2 of that group");
 
     static constexpr bool PAGE_ATTENTION = CubeBlockType::PAGE_ATTENTION; // 是否使用paged attn，true
     static constexpr bool FLASH_DECODE = VecFaBlockType::FLASH_DECODE; // 是否使用flash decoding
@@ -124,6 +137,10 @@ public:
     uint32_t sectionNum_; // 总的section数
     uint32_t metadataAicNum_; // metadata 为每个 section 存放的 AIC 记录数，用于定位 FA 记录
     uint32_t metadataAivNum_; // metadata 为每个 section 存放的 AIV 记录数，用于定位 FD 记录
+    // 流水节奏：由 AICPU 按真实单核 task 数下发，0 表示用编译期默认值。
+    // 缓冲区一律按编译期上界（GROUP_N / PRELOAD_N）静态分配，运行时只取更小的值，故不需要扩容。
+    uint32_t groupN_ = GROUP_N;
+    uint32_t preloadN_ = PRELOAD_N;
     // fa metadata，基本块的范围，表示起点和终点
     uint32_t bN2Start_;
     uint32_t bN2End_;
@@ -191,6 +208,7 @@ public:
         sectionNum_ = ((__gm__ uint32_t*)metadata)[METADATA_HEADER_SECTION_NUM_INDEX];
         metadataAicNum_ = ((__gm__ uint32_t*)metadata)[METADATA_HEADER_AIC_NUM_INDEX];
         metadataAivNum_ = ((__gm__ uint32_t*)metadata)[METADATA_HEADER_AIV_NUM_INDEX];
+        InitPipelineRhythm(metadata);
 
         faMetaDataGm_.SetGlobalBuffer((__gm__ uint32_t*)(metadata + METADATA_HEADER_OFFSET),
                                       sectionNum_ * metadataAicNum_ * METADATA_STRIDE);
@@ -272,8 +290,9 @@ public:
             constInfo_.realN2Size = constInfo_.n2Size * constInfo_.gSize;
             constInfo_.realGSize = 1;
         } else { // decode合轴
-            constInfo_.realN2Size = constInfo_.n2Size;
-            constInfo_.realGSize = constInfo_.gSize;
+            // 合并模式下 KV head 不再是独立任务轴：realN2Size=1，M 轴展开全部 N_q 个 Q head。
+            constInfo_.realN2Size = MERGE_KV_HEADS ? 1U : constInfo_.n2Size;
+            constInfo_.realGSize = MERGE_KV_HEADS ? constInfo_.n2Size * constInfo_.gSize : constInfo_.gSize;
         }
         constInfo_.cuSeqLensQSize = qfaBaseParams.cuSeqLensQSize;
         constInfo_.cuSeqLensKVSize = qfaBaseParams.cuSeqLensKVSize;
@@ -377,6 +396,20 @@ public:
         DispatchRows();
     }
 
+    // AICPU 依真实 seqused_kv 分布下发流水节奏；缺省或非法值一律回退编译期默认，
+    // 保证与旧 metadata 兼容。上界仍是编译期常量，缓冲区尺寸不受影响。
+    __aicore__ inline void InitPipelineRhythm(__gm__ uint8_t* metadata)
+    {
+        const uint32_t g = ((__gm__ uint32_t*)metadata)[METADATA_HEADER_GROUP_N_INDEX];
+        const uint32_t p = ((__gm__ uint32_t*)metadata)[METADATA_HEADER_PRELOAD_N_INDEX];
+        if (g != 0U && g <= GROUP_N) {
+            groupN_ = g;
+        }
+        if (p != 0U && p <= PRELOAD_N && p >= groupN_ + DELAY_P_SCALE_N) {
+            preloadN_ = p;
+        }
+    }
+
     // Both cores enumerate the same rows and task numbers. The task type selects the
     // descriptor fields and the pipeline at compile time.
     template <typename Task = CoreTask>
@@ -400,7 +433,9 @@ public:
             const uint32_t queryStart = row * mBaseSize;
             const uint32_t rows = AttentionCommon::Min(static_cast<uint64_t>(mBaseSize),
                 actSeqLensQ_ * constInfo_.realGSize - queryStart);
-            const uint32_t alignedRows = (rows + 31U) & ~31U;
+            // 合并模式的 L1 Q tile 为 part-major：两个 part 各占 mBaseSize/2 行（16 的整数倍，
+            // 满足 MX scale 整 fractal 落地约束），整块共 mBaseSize 行。
+            const uint32_t alignedRows = MERGE_KV_HEADS ? mBaseSize : (rows + 31U) & ~31U;
             uint32_t kvHead = 0;
             int64_t causalOffset = 0;
             bool splitRow = false;
@@ -417,6 +452,8 @@ public:
                 }
             }
 
+            // 组内计数用比较推进，避免在任务创建热循环里出现运行时除数的取模。
+            uint32_t groupTaskCount = 0U;
             for (; s2 < curS2End_; ++s2) {
                 Task& task = tasks[created % PRELOAD_TASK_CACHE_SIZE];
                 task.loop = created;
@@ -425,11 +462,15 @@ public:
                 task.gS1Idx = queryStart;
                 task.actMSize = rows;
                 task.actMSizeAlign32 = alignedRows;
-                task.s2Idx = s2 * s2BaseSize;
-                task.actSingleLoopS2Size = AttentionCommon::Min(static_cast<uint64_t>(s2BaseSize),
+                task.s2Idx = s2 * kvTokenBlock;
+                task.actSingleLoopS2Size = AttentionCommon::Min(static_cast<uint64_t>(kvTokenBlock),
                     actSeqLensKv_ - task.s2Idx);
                 task.isLastS2Loop = s2 + 1U == curS2End_;
-                task.isGroupLast = task.isLastS2Loop || (s2 - curS2Start_ + 1U) % GROUP_N == 0U;
+                ++groupTaskCount;
+                if (groupTaskCount >= groupN_) {
+                    groupTaskCount = 0U;
+                }
+                task.isGroupLast = task.isLastS2Loop || groupTaskCount == 0U;
                 if constexpr (isCube) {
                     task.n2Idx = kvHead;
                     if (rows != 0 && task.actSingleLoopS2Size != 0) {
@@ -453,7 +494,7 @@ public:
             UpdateAxisInfo(TASK_DEAL_MODE::SKIP_REMAINING_S2, head, row, s2);
         }
         if (created != 0) {
-            while (tick < created + PRELOAD_N) {
+            while (tick < created + preloadN_) {
                 ExecuteTick(tick++, created, tasks);
             }
         }
@@ -461,8 +502,8 @@ public:
 
     __aicore__ inline void ExecuteTick(uint64_t tick, uint64_t created, Mxfp4CubeTask* tasks)
     {
-        if (tick + KV_PREFETCH_LEAD >= PRELOAD_N) {
-            const uint64_t v = tick + KV_PREFETCH_LEAD - PRELOAD_N;
+        if (tick + KV_PREFETCH_LEAD >= preloadN_) {
+            const uint64_t v = tick + KV_PREFETCH_LEAD - preloadN_;
             if (v < created) {
                 auto& task = tasks[v % PRELOAD_TASK_CACHE_SIZE];
                 if (task.actMSize != 0 && task.actSingleLoopS2Size != 0) {
@@ -470,8 +511,8 @@ public:
                 }
             }
         }
-        if (tick >= PRELOAD_N) {
-            auto& pv = tasks[(tick - PRELOAD_N) % PRELOAD_TASK_CACHE_SIZE];
+        if (tick >= preloadN_) {
+            auto& pv = tasks[(tick - preloadN_) % PRELOAD_TASK_CACHE_SIZE];
             cubeBlock_.ComputeBmm2(pv, ValueSlotOf(pv.loop));
         }
         if (tick < created) {
@@ -482,8 +523,8 @@ public:
 
     __aicore__ inline void ExecuteTick(uint64_t tick, uint64_t created, Mxfp4VecTask* tasks)
     {
-        if (tick >= PRELOAD_N) {
-            auto& v2 = tasks[(tick - PRELOAD_N) % PRELOAD_TASK_CACHE_SIZE];
+        if (tick >= preloadN_) {
+            auto& v2 = tasks[(tick - preloadN_) % PRELOAD_TASK_CACHE_SIZE];
             if (v2.isGroupLast) {
                 vecFaBlock_.ComputeVec2(v2);
             }
@@ -514,7 +555,7 @@ public:
     __aicore__ inline void UpdateAxisInfo(TASK_DEAL_MODE taskDealMode, uint32_t& bN2Cur, uint32_t& gS1Cur,
                                           uint32_t& s2Cur)
     {
-        uint64_t s2LoopTimes = (actSeqLensKv_ + s2BaseSize - 1) / s2BaseSize;
+        uint64_t s2LoopTimes = (actSeqLensKv_ + kvTokenBlock - 1) / kvTokenBlock;
         uint64_t gS1Size = actSeqLensQ_ * constInfo_.realGSize;
         uint64_t gS1LoopTimes = (gS1Size + mBaseSize - 1) / mBaseSize;
         // 尚未到达有效区间, 快进s2Cur到curS2Start_, 不跳行
@@ -561,7 +602,7 @@ public:
                 actSeqLensQ_ = qSeqUsedParser_.GetActualSeqLength(bIdx);
             }
         }
-        uint64_t s2LoopTimes = (actSeqLensKv_ + s2BaseSize - 1) / s2BaseSize;
+        uint64_t s2LoopTimes = (actSeqLensKv_ + kvTokenBlock - 1) / kvTokenBlock;
         uint64_t gS1Size = actSeqLensQ_ * constInfo_.realGSize;
         uint64_t gS1LoopTimes = (gS1Size + mBaseSize - 1) / mBaseSize;
         if (s2LoopTimes == 0 || gS1LoopTimes == 0) { // batch 空的任务
@@ -599,7 +640,7 @@ public:
     __aicore__ inline void CalcCurS2StartEndNoSparse(uint32_t bN2Cur, uint32_t gS1Cur)
     {
         curS2Start_ = 0U;
-        curS2End_ = (static_cast<uint32_t>(actSeqLensKv_) + s2BaseSize - 1) / s2BaseSize;
+        curS2End_ = (static_cast<uint32_t>(actSeqLensKv_) + kvTokenBlock - 1) / kvTokenBlock;
         // 只有第一个开始的M行和最后一个结束的M行，s2的开始和结束才可能不是0和最后一个块
         // 中间的M行一定会处理一整行kv
         if ((bN2Cur == bN2Start_) && (gS1Cur == gS1OStart_)) {
@@ -666,8 +707,8 @@ public:
         s2FirstToken = ClipMxfp4SInnerToken(s2FirstToken, 0, static_cast<int64_t>(actSeqLensKv_ - 1));
         s2LastToken = ClipMxfp4SInnerToken(s2LastToken, 0, static_cast<int64_t>(actSeqLensKv_ - 1));
 
-        s2StartWithSparse = static_cast<uint32_t>(s2FirstToken) / s2BaseSize;
-        s2EndWithSparse = static_cast<uint32_t>(s2LastToken) / s2BaseSize + 1U; // +1 变成左右开区间
+        s2StartWithSparse = static_cast<uint32_t>(s2FirstToken) / kvTokenBlock;
+        s2EndWithSparse = static_cast<uint32_t>(s2LastToken) / kvTokenBlock + 1U; // +1 变成左右开区间
 
         // 4. 计算 curS2Start_, curS2End_
         curS2Start_ = s2StartWithSparse;

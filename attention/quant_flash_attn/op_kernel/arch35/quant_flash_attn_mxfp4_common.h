@@ -23,6 +23,12 @@
 #include "../../../common/op_kernel/vector_common.h"
 
 namespace BaseApi {
+// 一组 task 的 C2 在 L0C 累积后只做一次 V2/Pscale 更新。主控、Cube、Vector 必须共用同一组大小。
+// 约束：GROUP_N + DELAY_P_SCALE_N <= PRELOAD_N(20)。组内最后一个 task 的 Pscale 在
+// tick last+DELAY_P_SCALE_N 发布，Cube 在 tick first+PRELOAD_N 的首个 C2 等它；而 AIV 在同一
+// tick 的 V1 又依赖 Cube 该 tick 才能产出的 score。组过大时两侧互等，单核 task 数超过
+// PRELOAD_N 后必然挂死。
+static constexpr uint32_t MXFP4_TASK_GROUP_N = 16U;
 // Values match the public quant_schema attribute. Q/K/V encoding is unchanged.
 enum class QuantSchema : uint8_t {
     OCP_QUANT = 0,

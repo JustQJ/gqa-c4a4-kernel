@@ -391,15 +391,17 @@ __aicore__ inline void quant_flash_attn_mxfp4(
                                 static_cast<int32_t>(ConfigValue[config].d) % 64 == 0;
 
     constexpr bool useDn = (quantMode == QFA_MXFP4_FP32_PREFILL);
-    
+    // 同页双 KV head 块对角合并只在专用 Config 6（M64/N256/D256）上派发。
+    constexpr bool mergeKvHeads = (config == Config_MergeKvHeads_S1Aligned64_S2Aligned256_DAligned256_DVAligned256);
+
     using CubeBlock =
         BaseApi::QuantFlashAttnBlockCubeMxfp4<INPUT_T, float, inputLayoutType, s1TemplateType, s2TemplateType,
                                               dTemplateType, dVTemplateType, KvLayoutType, useDn, isDAligned,
-                                              enableQf322F32Pre>;
+                                              enableQf322F32Pre, mergeKvHeads>;
     using VecFaBlock =
         BaseApi::QuantFlashAttnBlockVecMxfp4<INPUT_T, float, OUT_T, inputLayoutType, outputLayoutType, s1TemplateType,
                                              s2TemplateType, dTemplateType, dVTemplateType, hasAttenMask, KvLayoutType,
-                                             isFd, useDn, isDAligned, QUANT_SCHEMA, enableQf322F32Pre>;
+                                             isFd, useDn, isDAligned, QUANT_SCHEMA, enableQf322F32Pre, mergeKvHeads>;
     using VecFdBlock =
         BaseApi::QuantFlashAttnBlockVecFlashDecode<INPUT_T, float, OUT_T, inputLayoutType, outputLayoutType,
                                                    s1TemplateType, s2TemplateType, dTemplateType, dVTemplateType,
@@ -408,11 +410,12 @@ __aicore__ inline void quant_flash_attn_mxfp4(
     using CubeBlockDummy =
         BaseApi::QuantFlashAttnBlockCubeMxfp4Dummy<INPUT_T, float, inputLayoutType, s1TemplateType, s2TemplateType,
                                                    dTemplateType, dVTemplateType, KvLayoutType, useDn,
-                                                   enableQf322F32Pre>;
+                                                   enableQf322F32Pre, mergeKvHeads>;
     using VecFaBlockDummy =
         BaseApi::QuantFlashAttnBlockVecMxfp4Dummy<INPUT_T, float, OUT_T, inputLayoutType, outputLayoutType,
                                                   s1TemplateType, s2TemplateType, dTemplateType, dVTemplateType,
-                                                  hasAttenMask, KvLayoutType, isFd, useDn, isDAligned, QUANT_SCHEMA, enableQf322F32Pre>;
+                                                  hasAttenMask, KvLayoutType, isFd, useDn, isDAligned, QUANT_SCHEMA,
+                                                  enableQf322F32Pre, mergeKvHeads>;
     using VecFdBlockDummy =
         BaseApi::QuantFlashAttnBlockVecFlashDecodeDummy<INPUT_T, float, OUT_T, inputLayoutType, outputLayoutType,
                                                         s1TemplateType, s2TemplateType, dTemplateType, dVTemplateType,
